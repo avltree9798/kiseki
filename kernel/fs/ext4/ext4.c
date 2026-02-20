@@ -84,8 +84,14 @@ static int ext4_vop_unlink(struct vnode *dir, const char *name,
 static int ext4_vop_setattr(struct vnode *vp, struct stat *st);
 static int ext4_vop_readlink(struct vnode *vp, char *buf, uint64_t buflen);
 
-/* Forward declaration — needed by write helpers before definition */
+/* Forward declarations — needed by write helpers before definition */
 static uint64_t ext4_inode_size(struct ext4_inode *ip);
+static uint64_t ext4_group_block_bitmap(struct ext4_mount_info *mi, uint32_t group);
+static struct ext4_group_desc *ext4_get_group_desc(struct ext4_mount_info *mi, uint32_t group);
+static int ext4_write_group_desc(struct ext4_mount_info *mi, uint32_t group);
+static uint64_t ext4_alloc_block(struct ext4_mount_info *mi, uint32_t pref_group);
+static int ext4_write_fs_block(struct ext4_mount_info *mi, uint64_t fs_block,
+                               uint32_t offset, const void *src, uint32_t len);
 
 static int ext4_fs_mount(struct mount *mp);
 static int ext4_fs_unmount(struct mount *mp);
@@ -475,6 +481,117 @@ ext4_extent_read(struct ext4_mount_info *mi, struct ext4_inode *inode,
 
     /* Logical block falls in a hole (sparse file) */
     return -ENOENT;
+}
+
+/*
+ * ext4_extent_alloc_block - Allocate a block and add it to the extent tree.
+ *
+ * For simple (depth=0) extent trees, this either:
+ *   - Extends the last extent if the new block is contiguous
+ *   - Adds a new extent entry if there's room
+ *
+ * @mi:         Mount info
+ * @inode:      Inode to modify (will be written back by caller)
+ * @logical:    Logical block number to allocate
+ * @pref_group: Preferred block group for allocation
+ * @physical:   Output: physical block number allocated
+ *
+ * Returns 0 on success, -ENOSPC if no space, -EFBIG if extent tree is full.
+ */
+static int
+ext4_extent_alloc_block(struct ext4_mount_info *mi, struct ext4_inode *inode,
+                        uint64_t logical, uint32_t pref_group, uint64_t *physical)
+{
+    struct ext4_extent_header *eh = (struct ext4_extent_header *)inode->i_block;
+
+    if (eh->eh_magic != EXT4_EXT_MAGIC)
+        return -EINVAL;
+
+    /* Only support depth=0 (leaf-only) extent trees for now */
+    if (eh->eh_depth > 0) {
+        kprintf("ext4: extent tree depth>0 not supported for allocation\n");
+        return -ENOSYS;
+    }
+
+    struct ext4_extent *extents = (struct ext4_extent *)(eh + 1);
+    uint16_t nentries = eh->eh_entries;
+    uint16_t max_entries = eh->eh_max;
+
+    /* Try to extend the last extent if the block is contiguous */
+    if (nentries > 0) {
+        struct ext4_extent *last = &extents[nentries - 1];
+        uint32_t last_logical_end = last->ee_block + EXT4_EXT_GET_LEN(last);
+        uint64_t last_phys_end = EXT4_EXTENT_PBLOCK(last) + EXT4_EXT_GET_LEN(last);
+
+        if (logical == last_logical_end) {
+            /* Check if we can extend (length < max and physical block is contiguous) */
+            uint16_t cur_len = EXT4_EXT_GET_LEN(last);
+            if (cur_len < EXT4_EXT_INIT_MAX_LEN) {
+                /* Try to allocate the next contiguous physical block */
+                /* First check if it's free */
+                uint32_t group = (uint32_t)((last_phys_end - mi->first_data_block) /
+                                            mi->blocks_per_group);
+                uint32_t block_in_group = (uint32_t)((last_phys_end - mi->first_data_block) %
+                                                     mi->blocks_per_group);
+
+                uint64_t bitmap_block = ext4_group_block_bitmap(mi, group);
+                if (bitmap_block != 0) {
+                    uint8_t bitmap[mi->block_size];
+                    if (ext4_read_fs_block(mi, bitmap_block, 0, bitmap, mi->block_size) == 0) {
+                        uint32_t byte_idx = block_in_group / 8;
+                        uint8_t bit_mask = (uint8_t)(1 << (block_in_group % 8));
+
+                        if (byte_idx < mi->block_size && !(bitmap[byte_idx] & bit_mask)) {
+                            /* Block is free! Allocate it */
+                            bitmap[byte_idx] |= bit_mask;
+                            if (ext4_write_fs_block(mi, bitmap_block, 0, bitmap, mi->block_size) == 0) {
+                                /* Update group descriptor */
+                                struct ext4_group_desc *gd = ext4_get_group_desc(mi, group);
+                                if (gd && gd->bg_free_blocks_count_lo > 0)
+                                    gd->bg_free_blocks_count_lo--;
+                                ext4_write_group_desc(mi, group);
+
+                                /* Update superblock free count */
+                                if (mi->sb.s_free_blocks_count_lo > 0)
+                                    mi->sb.s_free_blocks_count_lo--;
+
+                                /* Extend the extent */
+                                last->ee_len = cur_len + 1;
+                                inode->i_blocks_lo += (mi->block_size / 512);
+
+                                *physical = last_phys_end;
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Can't extend last extent, need to add a new one */
+    if (nentries >= max_entries) {
+        kprintf("ext4: extent tree full (%u/%u entries)\n", nentries, max_entries);
+        return -EFBIG;
+    }
+
+    /* Allocate a new block */
+    uint64_t new_block = ext4_alloc_block(mi, pref_group);
+    if (new_block == 0)
+        return -ENOSPC;
+
+    /* Add new extent entry */
+    struct ext4_extent *new_ext = &extents[nentries];
+    new_ext->ee_block = (uint32_t)logical;
+    new_ext->ee_len = 1;
+    new_ext->ee_start_lo = (uint32_t)(new_block & 0xFFFFFFFF);
+    new_ext->ee_start_hi = (uint16_t)(new_block >> 32);
+
+    eh->eh_entries = nentries + 1;
+    inode->i_blocks_lo += (mi->block_size / 512);
+
+    *physical = new_block;
+    return 0;
 }
 
 /*
@@ -1671,10 +1788,13 @@ ext4_vop_create(struct vnode *dir, const char *name, uint32_t namelen,
 /*
  * ext4_vop_write - Write data to a regular file.
  *
- * Uses direct block mapping (i_block[0..11]) for newly created files.
- * For existing extent-based files, this allocates direct blocks —
- * the caller must have created the file with our ext4_vop_create
- * (which uses direct blocks, not extents).
+ * Supports two modes:
+ *   1. Extent-based files: can only overwrite within existing extents
+ *      (extending extent-based files is not supported)
+ *   2. Direct-block files (i_block[0..11]): can allocate new blocks
+ *
+ * Files created by this driver use direct blocks, but files created
+ * by mkfs.ext4/debugfs use extents by default.
  */
 static int64_t
 ext4_vop_write(struct vnode *vp, const void *buf, uint64_t offset,
@@ -1690,6 +1810,7 @@ ext4_vop_write(struct vnode *vp, const void *buf, uint64_t offset,
     struct ext4_mount_info *mi = vd->mi;
     struct ext4_inode *ip = &vd->inode;
     uint32_t bs = mi->block_size;
+    int uses_extents = (ip->i_flags & EXT4_EXTENTS_FL) != 0;
 
     /* Determine the preferred block group for allocation */
     uint32_t pref_group, pref_idx;
@@ -1706,40 +1827,77 @@ ext4_vop_write(struct vnode *vp, const void *buf, uint64_t offset,
         if (chunk > count - bytes_written)
             chunk = (uint32_t)(count - bytes_written);
 
-        /* Can only use direct blocks for write */
-        if (logical_block >= EXT4_NDIR_BLOCKS) {
-            if (bytes_written > 0)
-                break;  /* Return what we've written so far */
-            return -EFBIG;
-        }
-
         uint64_t phys_block = 0;
 
-        /* Try to map existing block first */
-        if (ip->i_block[logical_block] != 0) {
-            phys_block = ip->i_block[logical_block];
-        } else {
-            /* Allocate a new block */
-            phys_block = ext4_alloc_block(mi, pref_group);
-            if (phys_block == 0) {
-                if (bytes_written > 0)
-                    break;
-                return -ENOSPC;
-            }
-
-            ip->i_block[logical_block] = (uint32_t)phys_block;
-            ip->i_blocks_lo += (bs / 512);
-
-            /* If this is a new block and we're writing a partial block,
-             * zero it first to avoid leaking stale data */
-            if (block_offset > 0 || chunk < bs) {
-                uint8_t zeros[bs];
-                ext4_memset(zeros, 0, bs);
-                int err = ext4_write_fs_block(mi, phys_block, 0, zeros, bs);
+        if (uses_extents) {
+            /*
+             * Extent-based file: use ext4_bmap() to find the physical block.
+             * If the block isn't mapped, allocate it via extent tree.
+             */
+            int err = ext4_bmap(mi, ip, logical_block, &phys_block);
+            if (err == -ENOENT) {
+                /* Block not mapped — allocate via extent tree */
+                err = ext4_extent_alloc_block(mi, ip, logical_block, pref_group,
+                                              &phys_block);
                 if (err != 0) {
                     if (bytes_written > 0)
                         break;
                     return err;
+                }
+
+                /* Zero the new block if we're writing a partial block */
+                if (block_offset > 0 || chunk < bs) {
+                    uint8_t zeros[bs];
+                    ext4_memset(zeros, 0, bs);
+                    int zerr = ext4_write_fs_block(mi, phys_block, 0, zeros, bs);
+                    if (zerr != 0) {
+                        if (bytes_written > 0)
+                            break;
+                        return zerr;
+                    }
+                }
+            } else if (err != 0) {
+                if (bytes_written > 0)
+                    break;
+                return err;
+            }
+        } else {
+            /*
+             * Direct-block file: i_block[0..11] contain block numbers.
+             * We can allocate new blocks if needed.
+             */
+            if (logical_block >= EXT4_NDIR_BLOCKS) {
+                if (bytes_written > 0)
+                    break;  /* Return what we've written so far */
+                return -EFBIG;
+            }
+
+            /* Try to map existing block first */
+            if (ip->i_block[logical_block] != 0) {
+                phys_block = ip->i_block[logical_block];
+            } else {
+                /* Allocate a new block */
+                phys_block = ext4_alloc_block(mi, pref_group);
+                if (phys_block == 0) {
+                    if (bytes_written > 0)
+                        break;
+                    return -ENOSPC;
+                }
+
+                ip->i_block[logical_block] = (uint32_t)phys_block;
+                ip->i_blocks_lo += (bs / 512);
+
+                /* If this is a new block and we're writing a partial block,
+                 * zero it first to avoid leaking stale data */
+                if (block_offset > 0 || chunk < bs) {
+                    uint8_t zeros[bs];
+                    ext4_memset(zeros, 0, bs);
+                    int err = ext4_write_fs_block(mi, phys_block, 0, zeros, bs);
+                    if (err != 0) {
+                        if (bytes_written > 0)
+                            break;
+                        return err;
+                    }
                 }
             }
         }

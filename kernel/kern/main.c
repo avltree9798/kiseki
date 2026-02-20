@@ -170,6 +170,13 @@ void kmain(uint64_t dtb_addr)
     }
 
     /* ================================================================
+     * Phase 12c: Start buffer cache sync daemon
+     * ================================================================ */
+    kprintf("[boot] Starting buffer cache sync daemon...\n");
+    extern void buf_start_sync_daemon(void);
+    buf_start_sync_daemon();
+
+    /* ================================================================
      * Phase 13: Mach IPC subsystem
      * ================================================================ */
     kprintf("[boot] Initializing Mach IPC...\n");

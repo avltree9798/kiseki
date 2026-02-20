@@ -90,6 +90,10 @@ struct thread {
 
     /* Continuation (Mach stackless switch optimization) */
     uint64_t            continuation;       /* Function pointer */
+
+    /* Timed sleep support */
+    uint64_t            wakeup_tick;        /* Tick at which to wake (0 = not timed) */
+    struct thread       *sleep_next;        /* Next in sleep queue */
 };
 
 /*
@@ -150,6 +154,9 @@ void thread_block(const char *reason);
 
 /* Unblock a thread (wake up) */
 void thread_unblock(struct thread *th);
+
+/* Sleep for a specified number of timer ticks */
+void thread_sleep_ticks(uint64_t ticks);
 
 /* Get current thread */
 struct thread *current_thread_get(void);

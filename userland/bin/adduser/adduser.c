@@ -19,8 +19,8 @@
 #define PATH_GROUP     "/etc/group"
 #define PATH_SKEL      "/etc/skel"
 #define DEFAULT_SHELL  "/bin/bash"
-#define DEFAULT_HOME   "/home"
-#define MIN_SYS_UID    1000
+#define DEFAULT_HOME   "/Users"    /* macOS style */
+#define MIN_SYS_UID    501         /* macOS starts regular users at 501 */
 
 static const char *progname = "adduser";
 
@@ -470,7 +470,7 @@ static void usage(void)
     fprintf(stderr, "Add a new user to the system.\n\n");
     fprintf(stderr, "  -u UID       specify user ID\n");
     fprintf(stderr, "  -g GID       specify primary group ID\n");
-    fprintf(stderr, "  -d HOME      home directory (default: /home/USERNAME)\n");
+    fprintf(stderr, "  -d HOME      home directory (default: /Users/USERNAME)\n");
     fprintf(stderr, "  -s SHELL     login shell (default: %s)\n",
             DEFAULT_SHELL);
     fprintf(stderr, "  -c COMMENT   GECOS/comment field\n");

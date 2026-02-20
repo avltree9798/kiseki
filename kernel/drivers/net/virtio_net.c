@@ -367,9 +367,13 @@ int virtio_net_send(const void *frame, uint32_t len)
     /* Notify device (TX queue = 1) */
     mmio_write32(netdev.base + VIRTIO_MMIO_QUEUE_NOTIFY, 1);
 
-    /* Poll for TX completion */
+    /* Ensure the MMIO write is visible to the device */
     dsb();
+    __asm__ volatile("isb");
+
+    /* Poll for TX completion with yield to let QEMU process */
     while (vq->used->idx == vq->last_used_idx) {
+        __asm__ volatile("yield");
         dsb();
     }
 

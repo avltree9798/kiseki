@@ -266,7 +266,12 @@ static void arp_send(uint16_t op, const uint8_t *dst_mac, uint32_t dst_ip)
 
     uint32_t frame_len = ETH_HDRLEN + sizeof(struct arp_hdr);
 
-    nic_send(eth_tx_buf, frame_len);
+    kprintf("[arp] sending %s to %02x:%02x:%02x:%02x:%02x:%02x\n",
+            op == ARP_OP_REQUEST ? "request" : "reply",
+            dst_mac[0], dst_mac[1], dst_mac[2],
+            dst_mac[3], dst_mac[4], dst_mac[5]);
+    int ret = nic_send(eth_tx_buf, frame_len);
+    kprintf("[arp] nic_send returned %d\n", ret);
 
     spin_unlock_irqrestore(&eth_tx_lock, flags);
 }
@@ -296,8 +301,16 @@ static void arp_input(const void *data, uint32_t len)
     uint16_t op = ntohs(ah->ar_op);
 
     if (op == ARP_OP_REQUEST) {
+        uint32_t req_ip = ntohl(ah->ar_tpa);
+        uint32_t sender_ip = ntohl(ah->ar_spa);
+        kprintf("[arp] request: who-has %u.%u.%u.%u tell %u.%u.%u.%u\n",
+                (req_ip >> 24) & 0xFF, (req_ip >> 16) & 0xFF,
+                (req_ip >> 8) & 0xFF, req_ip & 0xFF,
+                (sender_ip >> 24) & 0xFF, (sender_ip >> 16) & 0xFF,
+                (sender_ip >> 8) & 0xFF, sender_ip & 0xFF);
         /* Is this request for our IP? */
         if (local_ip != 0 && ah->ar_tpa == local_ip) {
+            kprintf("[arp] replying with our MAC\n");
             arp_send(ARP_OP_REPLY, ah->ar_sha, ah->ar_spa);
         }
     }
@@ -314,11 +327,11 @@ static void arp_input(const void *data, uint32_t len)
 void eth_input(const void *frame, uint32_t len)
 {
     if (len < ETH_HDRLEN) {
-        kprintf("[eth] frame too short (%u bytes)\n", len);
         return;
     }
 
     const struct eth_hdr *eh = (const struct eth_hdr *)frame;
+    uint16_t ethertype = ntohs(eh->eth_type);
 
     /* Check destination: accept our MAC, broadcast, or multicast */
     if (!mac_is_broadcast(eh->eth_dst) &&
@@ -329,7 +342,6 @@ void eth_input(const void *frame, uint32_t len)
 
     const uint8_t *payload = (const uint8_t *)frame + ETH_HDRLEN;
     uint32_t payload_len = len - ETH_HDRLEN;
-    uint16_t ethertype = ntohs(eh->eth_type);
 
     switch (ethertype) {
     case ETHERTYPE_IP:
@@ -487,6 +499,13 @@ int eth_output(uint32_t dst_ip, uint16_t ethertype, const void *data,
         dst[i] = src[i];
 
     uint32_t frame_len = ETH_HDRLEN + len;
+
+    kprintf("[eth] TX: dst=%02x:%02x:%02x:%02x:%02x:%02x src=%02x:%02x:%02x:%02x:%02x:%02x type=0x%04x len=%u\n",
+            eh->eth_dst[0], eh->eth_dst[1], eh->eth_dst[2],
+            eh->eth_dst[3], eh->eth_dst[4], eh->eth_dst[5],
+            eh->eth_src[0], eh->eth_src[1], eh->eth_src[2],
+            eh->eth_src[3], eh->eth_src[4], eh->eth_src[5],
+            ntohs(eh->eth_type), frame_len);
 
     /* Send via NIC driver */
     int ret = nic_send(eth_tx_buf, frame_len);

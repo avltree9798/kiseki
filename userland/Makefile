@@ -18,10 +18,10 @@
 COREUTILS := cat cp mv rm ln touch mkdir rmdir \
              echo head tail wc sort uniq cut tr tee \
              grep ls sed awk find xargs \
-             ps kill env sleep time timeout \
+             ps kill env sleep time timeout clear sync \
              id whoami uname date which hostname \
              chmod chown df du mount umount \
-             login su sudo adduser \
+             login su sudo passwd adduser useradd usermod \
              printf test true false yes basename dirname expr
 
 # Networking tools

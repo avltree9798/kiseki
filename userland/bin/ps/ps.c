@@ -1,13 +1,20 @@
 /*
  * ps - report process status
  *
- * Kiseki OS coreutils
+ * Kiseki OS coreutils - macOS compatible
  *
- * Since Kiseki OS does not have a /proc filesystem, the actual process
- * data source must come from the kernel (e.g., a sysctl-style interface
- * or a dedicated syscall). This implementation provides complete option
- * parsing and output formatting, with a stub data source that the kernel
- * team can fill in.
+ * Supports both BSD-style options (no dash): ps aux
+ * and POSIX-style options (with dash): ps -ef
+ *
+ * BSD options:
+ *   a    show processes for all users (with terminal)
+ *   u    user-oriented format (USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND)
+ *   x    show processes without controlling terminal
+ *   
+ * POSIX options:
+ *   -e   select all processes
+ *   -f   full format
+ *   -p   select by PID
  */
 
 #include <stdio.h>
@@ -28,7 +35,7 @@ static const char *progname = "ps";
 /* Maximum processes we can display */
 #define MAX_PROCS       1024
 
-/* Process info structure — what we need from the kernel */
+/* Process info structure */
 struct proc_info {
     pid_t       pid;
     pid_t       ppid;
@@ -46,37 +53,48 @@ struct proc_info {
     char        args[1024];     /* Full command line */
 };
 
-/* Format mode */
+/* Format modes */
 enum format {
-    FMT_BASIC,      /* PID TTY TIME CMD */
+    FMT_DEFAULT,    /* PID TTY TIME CMD */
+    FMT_BSD_U,      /* USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND */
     FMT_FULL,       /* UID PID PPID C STIME TTY TIME CMD */
     FMT_LONG,       /* F S UID PID PPID C PRI NI ADDR SZ WCHAN TTY TIME CMD */
 };
 
 /* Options */
-static int opt_all = 0;        /* -e/-A: all processes */
-static int opt_pid = -1;       /* -p PID: specific process */
-static const char *opt_user = NULL;  /* -u USER */
-static enum format opt_fmt = FMT_BASIC;
+static int opt_all_users = 0;   /* a: all users */
+static int opt_all_procs = 0;   /* x/-e: include processes without tty */
+static int opt_pid = -1;        /* -p PID */
+static enum format opt_fmt = FMT_DEFAULT;
 
 static void usage(void)
 {
-    fprintf(stderr, "Usage: %s [-eAfl] [-p PID] [-u USER]\n", progname);
+    fprintf(stderr, "Usage: %s [aux] [-ef] [-p pid]\n", progname);
     fprintf(stderr, "Report process status.\n\n");
+    fprintf(stderr, "BSD options (no dash):\n");
+    fprintf(stderr, "  a         show processes for all users\n");
+    fprintf(stderr, "  u         user-oriented output format\n");
+    fprintf(stderr, "  x         show processes without controlling terminal\n");
+    fprintf(stderr, "\nPOSIX options (with dash):\n");
     fprintf(stderr, "  -e, -A    select all processes\n");
     fprintf(stderr, "  -f        full format listing\n");
-    fprintf(stderr, "  -l        long format listing\n");
-    fprintf(stderr, "  -p PID    select by process ID\n");
-    fprintf(stderr, "  -u USER   select by effective user ID\n");
-    fprintf(stderr, "  --help    display this help and exit\n");
+    fprintf(stderr, "  -p pid    select by process ID\n");
+    fprintf(stderr, "  --help    display this help\n");
 }
 
-/*
- * Format CPU time as HH:MM:SS or MM:SS.
- */
+/* Get username from UID (stub - just returns UID as string) */
+static const char *get_username(uid_t uid)
+{
+    static char buf[16];
+    if (uid == 0)
+        return "root";
+    snprintf(buf, sizeof(buf), "%u", uid);
+    return buf;
+}
+
+/* Format CPU time as HH:MM:SS or MM:SS */
 static void format_time(unsigned long ticks, char *buf, size_t bufsz)
 {
-    /* Assume 100 ticks per second */
     unsigned long total_secs = ticks / 100;
     unsigned long hours = total_secs / 3600;
     unsigned long mins = (total_secs % 3600) / 60;
@@ -85,14 +103,10 @@ static void format_time(unsigned long ticks, char *buf, size_t bufsz)
     if (hours > 0)
         snprintf(buf, bufsz, "%lu:%02lu:%02lu", hours, mins, secs);
     else
-        snprintf(buf, bufsz, "%02lu:%02lu", mins, secs);
+        snprintf(buf, bufsz, "%lu:%02lu", mins, secs);
 }
 
-/*
- * Format start time.
- * For simplicity, we just format as HH:MM since we don't have
- * a real time-of-day clock interface yet.
- */
+/* Format start time as HH:MM */
 static void format_stime(unsigned long starttime, char *buf, size_t bufsz)
 {
     unsigned long hours = (starttime / 3600) % 24;
@@ -101,15 +115,14 @@ static void format_stime(unsigned long starttime, char *buf, size_t bufsz)
 }
 
 /*
- * Kernel process info structure — must match kernel's kinfo_proc_brief.
- * 128 bytes per entry.
+ * Kernel process info structure - must match kernel's kinfo_proc_brief.
  */
 struct kinfo_proc_brief {
     int         kp_pid;
     int         kp_ppid;
     unsigned    kp_uid;
     unsigned    kp_gid;
-    int         kp_state;       /* 0=unused,1=embryo,2=running,3=sleeping,4=stopped,5=zombie */
+    int         kp_state;
     int         kp_pad0;
     unsigned long kp_user_ticks;
     unsigned long kp_sys_ticks;
@@ -142,12 +155,9 @@ static inline long raw_syscall2(long num, long a0, long a1)
     return x0;
 }
 
-/*
- * Get process list from the kernel via SYS_proc_info.
- */
+/* Get process list from kernel */
 static int get_proc_list(struct proc_info *procs, int max_procs)
 {
-    /* Allocate kernel info buffer */
     int kmax = max_procs;
     if (kmax > 256)
         kmax = 256;
@@ -182,8 +192,8 @@ static int get_proc_list(struct proc_info *procs, int max_procs)
         default: p->state = '?';          break;
         }
 
-        p->vsz  = 0;
-        p->rss  = 0;
+        p->vsz  = 4096;  /* Placeholder */
+        p->rss  = 1024;  /* Placeholder */
         p->nice = 0;
         strcpy(p->tty, "tty0");
         p->utime     = kp->kp_user_ticks;
@@ -200,28 +210,14 @@ static int get_proc_list(struct proc_info *procs, int max_procs)
     return count;
 }
 
-/*
- * Check if a process matches the selection criteria.
- */
+/* Check if process matches selection criteria */
 static int proc_matches(const struct proc_info *p)
 {
     if (opt_pid >= 0 && p->pid != (pid_t)opt_pid)
         return 0;
 
-    if (opt_user != NULL) {
-        /* Compare as UID number (since we don't have getpwnam) */
-        char *endp;
-        long uid = strtol(opt_user, &endp, 10);
-        if (*endp == '\0') {
-            if (p->uid != (uid_t)uid)
-                return 0;
-        }
-        /* If opt_user is a name string, we can't resolve it without
-         * a passwd database. Skip non-numeric user filters. */
-    }
-
-    if (!opt_all && opt_pid < 0 && opt_user == NULL) {
-        /* Default: show only processes belonging to this terminal/user */
+    /* If neither -e/x nor a specified, show only current user's processes */
+    if (!opt_all_procs && !opt_all_users && opt_pid < 0) {
         if (p->uid != getuid())
             return 0;
     }
@@ -229,28 +225,26 @@ static int proc_matches(const struct proc_info *p)
     return 1;
 }
 
-/*
- * Print the header line for the selected format.
- */
+/* Print header */
 static void print_header(void)
 {
     switch (opt_fmt) {
-    case FMT_BASIC:
+    case FMT_DEFAULT:
         printf("  PID TTY          TIME CMD\n");
+        break;
+    case FMT_BSD_U:
+        printf("USER       PID  %%CPU %%MEM    VSZ   RSS TTY      STAT  TIME COMMAND\n");
         break;
     case FMT_FULL:
         printf("  UID   PID  PPID  C STIME TTY          TIME CMD\n");
         break;
     case FMT_LONG:
-        printf("F S   UID   PID  PPID  C PRI  NI   VSZ   RSS "
-               "TTY          TIME CMD\n");
+        printf("F S   UID   PID  PPID  C PRI  NI    VSZ   RSS TTY          TIME CMD\n");
         break;
     }
 }
 
-/*
- * Print a single process entry in the selected format.
- */
+/* Print a process entry */
 static void print_proc(const struct proc_info *p)
 {
     char timebuf[32];
@@ -259,10 +253,18 @@ static void print_proc(const struct proc_info *p)
     format_time(p->utime + p->stime, timebuf, sizeof(timebuf));
 
     switch (opt_fmt) {
-    case FMT_BASIC:
+    case FMT_DEFAULT:
         printf("%5d %-8s %8s %s\n",
                p->pid, p->tty, timebuf,
                p->args[0] ? p->args : p->comm);
+        break;
+
+    case FMT_BSD_U:
+        /* USER PID %CPU %MEM VSZ RSS TTY STAT TIME COMMAND */
+        printf("%-8s %5d   0.0  0.0 %6ld %5ld %-8s %c     %s %s\n",
+               get_username(p->uid), p->pid,
+               p->vsz, p->rss, p->tty, p->state,
+               timebuf, p->args[0] ? p->args : p->comm);
         break;
 
     case FMT_FULL:
@@ -273,83 +275,113 @@ static void print_proc(const struct proc_info *p)
                p->args[0] ? p->args : p->comm);
         break;
 
-    case FMT_LONG: {
-        int flags = 0;
-        int pri = 80;  /* Default priority */
-        printf("%1d %c %5u %5d %5d  0 %3d %3d %5ld %5ld %-8s %8s %s\n",
-               flags, p->state, p->uid, p->pid, p->ppid,
-               pri, p->nice, p->vsz, p->rss,
+    case FMT_LONG:
+        printf("%1d %c %5u %5d %5d  0 %3d %3d %6ld %5ld %-8s %8s %s\n",
+               0, p->state, p->uid, p->pid, p->ppid,
+               80, p->nice, p->vsz, p->rss,
                p->tty, timebuf,
                p->args[0] ? p->args : p->comm);
         break;
     }
+}
+
+/* Parse BSD-style options (no dash) */
+static int parse_bsd_opts(const char *opts)
+{
+    while (*opts) {
+        switch (*opts) {
+        case 'a':
+            opt_all_users = 1;
+            break;
+        case 'u':
+            opt_fmt = FMT_BSD_U;
+            break;
+        case 'x':
+            opt_all_procs = 1;
+            break;
+        case 'e':
+            /* 'e' without dash is BSD style - show environment */
+            /* We treat it same as showing all for simplicity */
+            opt_all_procs = 1;
+            break;
+        case 'w':
+            /* Wide output - ignore for now */
+            break;
+        default:
+            return -1;
+        }
+        opts++;
     }
+    return 0;
 }
 
 int main(int argc, char *argv[])
 {
-    /* Parse options */
+    /* Parse arguments */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) {
             usage();
             return 0;
         }
 
-        if (argv[i][0] != '-') {
-            fprintf(stderr, "%s: unexpected argument '%s'\n", progname,
-                    argv[i]);
-            usage();
-            return 1;
-        }
-
-        /* Parse bundled flags */
-        const char *p = &argv[i][1];
-        while (*p) {
-            switch (*p) {
-            case 'e':
-            case 'A':
-                opt_all = 1;
-                break;
-            case 'f':
-                opt_fmt = FMT_FULL;
-                break;
-            case 'l':
-                opt_fmt = FMT_LONG;
-                break;
-            case 'p':
-                /* -p PID */
-                if (*(p + 1) != '\0') {
-                    /* -pPID form */
-                    opt_pid = atoi(p + 1);
-                    p += strlen(p) - 1;  /* skip rest */
-                } else if (i + 1 < argc) {
-                    opt_pid = atoi(argv[++i]);
-                } else {
-                    fprintf(stderr, "%s: option '-p' requires an argument\n",
-                            progname);
+        if (argv[i][0] == '-') {
+            /* POSIX-style options */
+            const char *p = &argv[i][1];
+            if (*p == '-') {
+                /* Long option */
+                fprintf(stderr, "%s: unknown option '%s'\n", progname, argv[i]);
+                return 1;
+            }
+            while (*p) {
+                switch (*p) {
+                case 'e':
+                case 'A':
+                    opt_all_procs = 1;
+                    opt_all_users = 1;
+                    break;
+                case 'f':
+                    opt_fmt = FMT_FULL;
+                    break;
+                case 'l':
+                    opt_fmt = FMT_LONG;
+                    break;
+                case 'p':
+                    if (*(p + 1)) {
+                        opt_pid = atoi(p + 1);
+                        goto next_arg;
+                    } else if (i + 1 < argc) {
+                        opt_pid = atoi(argv[++i]);
+                        goto next_arg;
+                    } else {
+                        fprintf(stderr, "%s: option '-p' requires an argument\n", progname);
+                        return 1;
+                    }
+                    break;
+                case 'a':
+                    opt_all_users = 1;
+                    break;
+                case 'u':
+                    opt_fmt = FMT_BSD_U;
+                    break;
+                case 'x':
+                    opt_all_procs = 1;
+                    break;
+                default:
+                    fprintf(stderr, "%s: invalid option -- '%c'\n", progname, *p);
+                    usage();
                     return 1;
                 }
-                break;
-            case 'u':
-                /* -u USER */
-                if (*(p + 1) != '\0') {
-                    opt_user = p + 1;
-                    p += strlen(p) - 1;
-                } else if (i + 1 < argc) {
-                    opt_user = argv[++i];
-                } else {
-                    fprintf(stderr, "%s: option '-u' requires an argument\n",
-                            progname);
-                    return 1;
-                }
-                break;
-            default:
-                fprintf(stderr, "%s: invalid option -- '%c'\n", progname, *p);
+                p++;
+            }
+        } else {
+            /* BSD-style options (no dash) */
+            if (parse_bsd_opts(argv[i]) < 0) {
+                fprintf(stderr, "%s: invalid option string '%s'\n", progname, argv[i]);
                 usage();
                 return 1;
             }
-            p++;
         }
+        next_arg:;
     }
 
     /* Get process list */

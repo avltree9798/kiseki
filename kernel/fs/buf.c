@@ -7,13 +7,20 @@
  *
  * Thread safety: a single spinlock protects all cache metadata.
  * Individual buffers are further protected by the B_BUSY flag.
+ *
+ * A background kernel thread (bufsync) periodically flushes dirty
+ * buffers to disk, similar to BSD's syncer or macOS's buffer flushing.
  */
 
 #include <kiseki/types.h>
 #include <kern/kprintf.h>
 #include <kern/sync.h>
+#include <kern/thread.h>
 #include <fs/buf.h>
 #include <drivers/blkdev.h>
+
+/* Interval between background syncs (in timer ticks, ~30 seconds) */
+#define BUFSYNC_INTERVAL    (30 * 100)  /* 100 ticks/sec assumed */
 
 /* ============================================================================
  * Hash Table
@@ -314,10 +321,15 @@ void buf_release(struct buf *bp)
     spin_unlock_irqrestore(&buf_lock, flags);
 }
 
-void buf_sync(void)
+/*
+ * buf_sync_internal - Flush all dirty buffers to disk.
+ *
+ * @quiet: if true, don't print status messages (for background sync)
+ *
+ * Returns number of buffers flushed.
+ */
+static uint32_t buf_sync_internal(bool quiet)
 {
-    kprintf("[buf] syncing dirty buffers...\n");
-
     uint32_t flushed = 0;
 
     for (uint32_t i = 0; i < BUF_POOL_SIZE; i++) {
@@ -330,11 +342,13 @@ void buf_sync(void)
             bp->flags |= B_BUSY;
             spin_unlock_irqrestore(&buf_lock, flags);
 
-            if (buf_do_write(bp) != 0)
-                kprintf("[buf] sync: writeback failed for dev=%u blk=%lu\n",
-                        bp->dev, bp->block_no);
-            else
+            if (buf_do_write(bp) != 0) {
+                if (!quiet)
+                    kprintf("[buf] sync: writeback failed for dev=%u blk=%lu\n",
+                            bp->dev, bp->block_no);
+            } else {
                 flushed++;
+            }
 
             spin_lock_irqsave(&buf_lock, &flags);
             bp->flags &= ~B_BUSY;
@@ -344,5 +358,46 @@ void buf_sync(void)
         }
     }
 
+    return flushed;
+}
+
+void buf_sync(void)
+{
+    kprintf("[buf] syncing dirty buffers...\n");
+    uint32_t flushed = buf_sync_internal(false);
     kprintf("[buf] sync complete: %u buffers flushed\n", flushed);
+}
+
+/* ============================================================================
+ * Background Sync Daemon (bufsync)
+ *
+ * Periodically flushes dirty buffers to disk. Similar to BSD's syncer
+ * or the buffer flushing in macOS/Darwin.
+ * ============================================================================ */
+
+static void bufsync_thread(void *arg)
+{
+    (void)arg;
+
+    kprintf("[bufsync] buffer sync daemon started\n");
+
+    for (;;) {
+        /* Sleep for the sync interval */
+        thread_sleep_ticks(BUFSYNC_INTERVAL);
+
+        /* Flush dirty buffers silently */
+        (void)buf_sync_internal(true);
+    }
+}
+
+void buf_start_sync_daemon(void)
+{
+    /* Use low priority (16) - above idle but not competing with normal tasks */
+    struct thread *th = thread_create("bufsync", bufsync_thread, NULL, PRI_MIN + 16);
+    if (th) {
+        sched_enqueue(th);
+        kprintf("[buf] started background sync daemon\n");
+    } else {
+        kprintf("[buf] warning: failed to start sync daemon\n");
+    }
 }

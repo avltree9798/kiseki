@@ -72,6 +72,10 @@ int main(int argc, char *argv[])
         printf("The system is going down for reboot NOW!\n");
     }
 
+    /* Sync filesystems before rebooting */
+    printf("Syncing disks...\n");
+    sync();
+
     /* Call the reboot syscall */
     int ret = sys_reboot(howto);
     if (ret != 0) {

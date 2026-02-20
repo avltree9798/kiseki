@@ -75,7 +75,6 @@ void udp_input(uint32_t src_addr, uint32_t dst_addr,
 
     /* Check for DHCP client port (68) - handle before socket lookup */
     if (ntohs(dport) == 68) {
-        kprintf("[udp] DHCP response on port 68\n");
         /* Skip UDP header and pass DHCP payload */
         const uint8_t *payload = (const uint8_t *)data + sizeof(struct udp_hdr);
         uint32_t payload_len = len - sizeof(struct udp_hdr);

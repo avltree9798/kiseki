@@ -69,14 +69,14 @@ echo "  [2/4] Formatted as Ext4 (label: kiseki-root)"
 BIN_PROGS="bash cat cp mv rm ln ls mkdir rmdir chmod echo head tail
            grep sed awk cut tr wc sort uniq tee touch sleep kill time timeout
            date hostname uname test true false printf expr basename dirname
-           login su
+           login su passwd ps clear sync
            ifconfig ping nc curl ntpdate"
 
 # Binaries that go in /usr/bin (non-essential utilities)
 USR_BIN_PROGS="find xargs id whoami which env du wc yes"
 
 # Binaries that go in /sbin (system admin)
-SBIN_PROGS="mount umount chown adduser df sudo init getty halt reboot shutdown sshd"
+SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd"
 
 # Test binary
 MACHO_HELLO="${PROJDIR}/build/hello"
@@ -93,7 +93,7 @@ populate_linux() {
 
     # Create directory hierarchy
     sudo mkdir -p "${MOUNT_DIR}"/{bin,sbin,usr/{bin,lib,sbin},etc,dev,proc,sys,tmp}
-    sudo mkdir -p "${MOUNT_DIR}"/{var/{log,run},root,home}
+    sudo mkdir -p "${MOUNT_DIR}"/{var/{log,run},root,home,Users}
     sudo mkdir -p "${MOUNT_DIR}"/etc/skel
 
     # Set permissions
@@ -199,6 +199,7 @@ mkdir var/log
 mkdir var/run
 mkdir root
 mkdir home
+mkdir Users
 DIRS
 
     # Install /bin binaries
@@ -269,11 +270,16 @@ ISSUE
     # Write the .bashrc and .profile for root
     if [ -f "${TMPDIR}/bashrc" ]; then
         echo "write ${TMPDIR}/bashrc /root/.bashrc" >> "${CMDS}"
-        echo "write ${TMPDIR}/bashrc /etc/skel/.bashrc" >> "${CMDS}"
     fi
     if [ -f "${TMPDIR}/dot_profile" ]; then
         echo "write ${TMPDIR}/dot_profile /root/.profile" >> "${CMDS}"
-        echo "write ${TMPDIR}/dot_profile /etc/skel/.profile" >> "${CMDS}"
+    fi
+    # Write skel files for new users (different from root files)
+    if [ -f "${TMPDIR}/skel_bashrc" ]; then
+        echo "write ${TMPDIR}/skel_bashrc /etc/skel/.bashrc" >> "${CMDS}"
+    fi
+    if [ -f "${TMPDIR}/skel_profile" ]; then
+        echo "write ${TMPDIR}/skel_profile /etc/skel/.profile" >> "${CMDS}"
     fi
 
     # Run debugfs
@@ -306,6 +312,19 @@ sudo:x:27:
 daemon:x:1:
 users:x:100:
 nogroup:x:65534:
+# Reserved space for group membership expansion
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
+#.............................................................................
 GROUP
 
     sudo tee "${MOUNT_DIR}/etc/hostname" > /dev/null << 'HOSTNAME'
@@ -353,8 +372,41 @@ if [ -f ~/.bashrc ]; then
 fi
 DOTPROFILE
 
-    sudo cp "${MOUNT_DIR}/root/.bashrc" "${MOUNT_DIR}/etc/skel/.bashrc"
-    sudo cp "${MOUNT_DIR}/root/.profile" "${MOUNT_DIR}/etc/skel/.profile"
+    # Create /etc/skel files for new users (different from root)
+    sudo tee "${MOUNT_DIR}/etc/skel/.bashrc" > /dev/null << 'SKELBASHRC'
+# Kiseki OS - User .bashrc
+# This file is sourced for interactive non-login shells
+
+# Prompt with username, hostname, and current directory
+export PS1='\u@\h:\w\$ '
+
+# Useful aliases
+alias ls='ls -F'
+alias ll='ls -la'
+alias la='ls -A'
+alias ..='cd ..'
+alias ...='cd ../..'
+
+# History settings
+export HISTSIZE=1000
+export HISTFILESIZE=2000
+
+# Don't put duplicate lines in history
+export HISTCONTROL=ignoredups:ignorespace
+SKELBASHRC
+
+    sudo tee "${MOUNT_DIR}/etc/skel/.profile" > /dev/null << 'SKELPROFILE'
+# Kiseki OS - User .profile
+# This file is sourced for login shells
+
+# Set PATH
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$HOME/bin
+
+# Source .bashrc if it exists (for interactive login shells)
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+SKELPROFILE
 }
 
 create_config_tmpfiles() {
@@ -422,6 +474,28 @@ if [ -f ~/.bashrc ]; then
     . ~/.bashrc
 fi
 DOTPROFILE
+
+    # Skel files for new users
+    cat > "${DIR}/skel_bashrc" << 'SKELBASHRC'
+# Kiseki OS - User .bashrc
+export PS1='\u@\h:\w\$ '
+alias ls='ls -F'
+alias ll='ls -la'
+alias la='ls -A'
+alias ..='cd ..'
+alias ...='cd ../..'
+export HISTSIZE=1000
+export HISTFILESIZE=2000
+export HISTCONTROL=ignoredups:ignorespace
+SKELBASHRC
+
+    cat > "${DIR}/skel_profile" << 'SKELPROFILE'
+# Kiseki OS - User .profile
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$HOME/bin
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+SKELPROFILE
 }
 
 # ============================================================================

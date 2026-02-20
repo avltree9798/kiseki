@@ -798,8 +798,18 @@ int sys_setuid(struct trap_frame *tf)
     if (cur->task->euid != 0 && new_uid != cur->task->uid)
         return EACCES;
 
+    /* Update Mach task credentials */
     cur->task->uid = new_uid;
     cur->task->euid = new_uid;
+
+    /* Also update BSD proc credentials so fork() inherits correctly */
+    struct proc *p = proc_current();
+    if (p) {
+        p->p_ucred.cr_uid = new_uid;
+        p->p_ucred.cr_ruid = new_uid;
+        p->p_ucred.cr_svuid = new_uid;
+    }
+
     syscall_return(tf, 0);
     return 0;
 }
@@ -847,8 +857,18 @@ int sys_setgid(struct trap_frame *tf)
     if (cur->task->euid != 0 && new_gid != cur->task->gid)
         return EACCES;
 
+    /* Update Mach task credentials */
     cur->task->gid = new_gid;
     cur->task->egid = new_gid;
+
+    /* Also update BSD proc credentials so fork() inherits correctly */
+    struct proc *p = proc_current();
+    if (p) {
+        p->p_ucred.cr_gid = new_gid;
+        p->p_ucred.cr_rgid = new_gid;
+        p->p_ucred.cr_svgid = new_gid;
+    }
+
     syscall_return(tf, 0);
     return 0;
 }
@@ -3368,6 +3388,11 @@ static int sys_reboot(struct trap_frame *tf)
         return EPERM;
 
     kprintf("\n");
+
+    /* Sync all dirty buffers to disk before rebooting */
+    kprintf("[kern] Syncing disks...\n");
+    extern void buf_sync(void);
+    buf_sync();
 
     if (howto & RB_HALT) {
         kprintf("[kern] System halting...\n");

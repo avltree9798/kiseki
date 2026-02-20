@@ -62,41 +62,52 @@ struct passwd_entry {
     char shell[256];
 };
 
+/*
+ * get_field - Extract the next colon-separated field from a string.
+ * Unlike strtok_r, this handles empty fields correctly.
+ */
+static int get_field(char **pp, char *buf, size_t bufsz)
+{
+    if (*pp == NULL || **pp == '\0')
+        return -1;
+
+    char *start = *pp;
+    char *end = strchr(start, ':');
+
+    if (end == NULL) {
+        size_t len = strlen(start);
+        if (len > 0 && start[len - 1] == '\n')
+            len--;
+        if (len >= bufsz)
+            len = bufsz - 1;
+        memcpy(buf, start, len);
+        buf[len] = '\0';
+        *pp = start + strlen(start);
+    } else {
+        size_t len = (size_t)(end - start);
+        if (len >= bufsz)
+            len = bufsz - 1;
+        memcpy(buf, start, len);
+        buf[len] = '\0';
+        *pp = end + 1;
+    }
+    return 0;
+}
+
 static int parse_passwd_line(char *line, struct passwd_entry *pw)
 {
-    char *saveptr = NULL;
-    char *tok;
+    char *p = line;
+    char tmp[256];
 
-    tok = strtok_r(line, ":", &saveptr);
-    if (!tok) return -1;
-    strncpy(pw->name, tok, sizeof(pw->name) - 1);
-    pw->name[sizeof(pw->name) - 1] = '\0';
-
-    tok = strtok_r(NULL, ":", &saveptr);  /* password placeholder */
-    if (!tok) return -1;
-
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
-    pw->uid = atoi(tok);
-
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
-    pw->gid = atoi(tok);
-
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
-    strncpy(pw->gecos, tok, sizeof(pw->gecos) - 1);
-    pw->gecos[sizeof(pw->gecos) - 1] = '\0';
-
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
-    strncpy(pw->home, tok, sizeof(pw->home) - 1);
-    pw->home[sizeof(pw->home) - 1] = '\0';
-
-    tok = strtok_r(NULL, ":\n", &saveptr);
-    if (!tok) return -1;
-    strncpy(pw->shell, tok, sizeof(pw->shell) - 1);
-    pw->shell[sizeof(pw->shell) - 1] = '\0';
+    if (get_field(&p, pw->name, sizeof(pw->name)) < 0) return -1;
+    if (get_field(&p, tmp, sizeof(tmp)) < 0) return -1;  /* password placeholder */
+    if (get_field(&p, tmp, sizeof(tmp)) < 0) return -1;
+    pw->uid = atoi(tmp);
+    if (get_field(&p, tmp, sizeof(tmp)) < 0) return -1;
+    pw->gid = atoi(tmp);
+    if (get_field(&p, pw->gecos, sizeof(pw->gecos)) < 0) return -1;
+    if (get_field(&p, pw->home, sizeof(pw->home)) < 0) return -1;
+    if (get_field(&p, pw->shell, sizeof(pw->shell)) < 0) return -1;
 
     return 0;
 }

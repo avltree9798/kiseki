@@ -15,6 +15,7 @@
 #include <kern/pmm.h>
 #include <kern/vmm.h>
 #include <kern/kprintf.h>
+#include <drivers/timer.h>
 
 /* Per-CPU data array */
 static struct cpu_data cpu_data_array[MAX_CPUS];
@@ -23,6 +24,10 @@ static struct cpu_data cpu_data_array[MAX_CPUS];
 static struct thread thread_pool[MAX_THREADS];
 static uint64_t next_tid = 1;
 static spinlock_t thread_lock = SPINLOCK_INIT;
+
+/* Sleep queue - threads waiting for timed wakeup */
+static struct thread *sleep_queue = NULL;
+static spinlock_t sleep_lock = SPINLOCK_INIT;
 
 /* --- Per-CPU data access via TPIDR_EL1 --- */
 
@@ -212,8 +217,44 @@ void thread_unblock(struct thread *th)
     th->state = TH_RUN;
     th->wait_channel = NULL;
     th->wait_reason = NULL;
+    th->wakeup_tick = 0;
 
     sched_enqueue(th);
+}
+
+/*
+ * thread_sleep_ticks - Sleep the current thread for a number of timer ticks
+ *
+ * @ticks: Number of timer ticks to sleep (at 100Hz, 100 ticks = 1 second)
+ */
+void thread_sleep_ticks(uint64_t ticks)
+{
+    struct cpu_data *cd = get_cpu_data();
+    struct thread *th = cd->current_thread;
+    uint64_t flags;
+
+    if (ticks == 0)
+        return;
+
+    /* Calculate absolute wakeup time */
+    th->wakeup_tick = timer_get_ticks() + ticks;
+    th->state = TH_WAIT;
+    th->wait_reason = "sleep";
+
+    /* Add to sleep queue (sorted by wakeup time for efficiency) */
+    spin_lock_irqsave(&sleep_lock, &flags);
+
+    struct thread **pp = &sleep_queue;
+    while (*pp && (*pp)->wakeup_tick <= th->wakeup_tick)
+        pp = &(*pp)->sleep_next;
+
+    th->sleep_next = *pp;
+    *pp = th;
+
+    spin_unlock_irqrestore(&sleep_lock, flags);
+
+    /* Switch to another thread */
+    sched_switch();
 }
 
 struct thread *current_thread_get(void)
@@ -392,6 +433,35 @@ void sched_yield(void)
 }
 
 /*
+ * sched_wakeup_sleepers - Wake threads whose sleep time has expired
+ *
+ * Called from sched_tick() to check the sleep queue.
+ */
+static void sched_wakeup_sleepers(void)
+{
+    uint64_t now = timer_get_ticks();
+    uint64_t flags;
+
+    spin_lock_irqsave(&sleep_lock, &flags);
+
+    /* Wake all threads at the front of the queue whose time has come */
+    while (sleep_queue && sleep_queue->wakeup_tick <= now) {
+        struct thread *th = sleep_queue;
+        sleep_queue = th->sleep_next;
+        th->sleep_next = NULL;
+        th->wakeup_tick = 0;
+        th->state = TH_RUN;
+        th->wait_reason = NULL;
+
+        spin_unlock_irqrestore(&sleep_lock, flags);
+        sched_enqueue(th);
+        spin_lock_irqsave(&sleep_lock, &flags);
+    }
+
+    spin_unlock_irqrestore(&sleep_lock, flags);
+}
+
+/*
  * sched_tick - Called from timer interrupt handler (100 Hz)
  *
  * Decrements current thread's quantum. If expired, marks for reschedule.
@@ -404,6 +474,9 @@ void sched_tick(void)
         return;
 
     cd->total_ticks++;
+
+    /* Check for sleeping threads to wake up */
+    sched_wakeup_sleepers();
 
     struct thread *th = cd->current_thread;
     if (!th || th == cd->idle_thread) {

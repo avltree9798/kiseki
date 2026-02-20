@@ -18,7 +18,7 @@
 #define LINE_MAX       1024
 #define PATH_PASSWD    "/etc/passwd"
 #define PATH_SHADOW    "/etc/shadow"
-#define DEFAULT_PATH   "/usr/local/bin:/usr/bin:/bin"
+#define DEFAULT_PATH   "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 #define DEFAULT_SHELL  "/bin/sh"
 
 static const char *progname = "login";
@@ -80,52 +80,77 @@ struct passwd_entry {
 };
 
 /*
+ * get_field - Extract the next colon-separated field from a string.
+ * Unlike strtok_r, this handles empty fields correctly.
+ */
+static int get_field(char **pp, char *buf, size_t bufsz)
+{
+    if (*pp == NULL || **pp == '\0')
+        return -1;
+
+    char *start = *pp;
+    char *end = strchr(start, ':');
+
+    if (end == NULL) {
+        /* Last field - copy until end of string, strip newline */
+        size_t len = strlen(start);
+        if (len > 0 && start[len - 1] == '\n')
+            len--;
+        if (len >= bufsz)
+            len = bufsz - 1;
+        memcpy(buf, start, len);
+        buf[len] = '\0';
+        *pp = start + strlen(start);
+    } else {
+        size_t len = (size_t)(end - start);
+        if (len >= bufsz)
+            len = bufsz - 1;
+        memcpy(buf, start, len);
+        buf[len] = '\0';
+        *pp = end + 1;
+    }
+    return 0;
+}
+
+/*
  * Parse a line from /etc/passwd into a passwd_entry.
  * Format: name:x:uid:gid:gecos:home:shell
  * Returns 0 on success.
  */
 static int parse_passwd_line(char *line, struct passwd_entry *pw)
 {
-    char *saveptr = NULL;
-    char *tok;
+    char *p = line;
+    char tmp[256];
 
     /* name */
-    tok = strtok_r(line, ":", &saveptr);
-    if (!tok) return -1;
-    strncpy(pw->name, tok, sizeof(pw->name) - 1);
-    pw->name[sizeof(pw->name) - 1] = '\0';
+    if (get_field(&p, pw->name, sizeof(pw->name)) < 0)
+        return -1;
 
     /* password placeholder (skip) */
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
+    if (get_field(&p, tmp, sizeof(tmp)) < 0)
+        return -1;
 
     /* uid */
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
-    pw->uid = atoi(tok);
+    if (get_field(&p, tmp, sizeof(tmp)) < 0)
+        return -1;
+    pw->uid = atoi(tmp);
 
     /* gid */
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
-    pw->gid = atoi(tok);
+    if (get_field(&p, tmp, sizeof(tmp)) < 0)
+        return -1;
+    pw->gid = atoi(tmp);
 
-    /* gecos */
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
-    strncpy(pw->gecos, tok, sizeof(pw->gecos) - 1);
-    pw->gecos[sizeof(pw->gecos) - 1] = '\0';
+    /* gecos (can be empty) */
+    if (get_field(&p, pw->gecos, sizeof(pw->gecos)) < 0)
+        return -1;
 
     /* home */
-    tok = strtok_r(NULL, ":", &saveptr);
-    if (!tok) return -1;
-    strncpy(pw->home, tok, sizeof(pw->home) - 1);
-    pw->home[sizeof(pw->home) - 1] = '\0';
+    if (get_field(&p, pw->home, sizeof(pw->home)) < 0)
+        return -1;
 
     /* shell */
-    tok = strtok_r(NULL, ":\n", &saveptr);
-    if (!tok) return -1;
-    strncpy(pw->shell, tok, sizeof(pw->shell) - 1);
-    pw->shell[sizeof(pw->shell) - 1] = '\0';
+    if (get_field(&p, pw->shell, sizeof(pw->shell)) < 0)
+        return -1;
 
     return 0;
 }

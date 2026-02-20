@@ -636,11 +636,11 @@ int main(int argc, char **argv, char **envp)
             state->positional[j] = strdup(argv[pos_start + j]);
     }
 
-    /* Import environment variables */
-    shell_import_environ(state);
-
-    /* Initialize default variables */
+    /* Initialize default variables first */
     var_init(state);
+
+    /* Import environment variables (overrides defaults) */
+    shell_import_environ(state);
 
     /* Determine if interactive */
     if (force_interactive)

@@ -63,7 +63,7 @@ void eth_get_mac(uint8_t *mac);
 /* DHCP magic cookie */
 #define DHCP_MAGIC_COOKIE       0x63825363
 
-/* DHCP header structure */
+/* DHCP header structure (minimum 240 bytes, options can vary) */
 struct dhcp_msg {
     uint8_t     op;         /* Message type: 1=BOOTREQUEST, 2=BOOTREPLY */
     uint8_t     htype;      /* Hardware type: 1=Ethernet */
@@ -80,8 +80,11 @@ struct dhcp_msg {
     uint8_t     sname[64];  /* Server hostname (optional) */
     uint8_t     file[128];  /* Boot filename (optional) */
     uint32_t    magic;      /* Magic cookie: 0x63825363 */
-    uint8_t     options[308]; /* DHCP options */
+    uint8_t     options[308]; /* DHCP options (variable length) */
 } __packed;
+
+/* Minimum DHCP message size (fixed fields only, no options) */
+#define DHCP_MIN_SIZE   240
 
 /* UDP header */
 struct udp_hdr {
@@ -244,51 +247,38 @@ static void dhcp_parse_options(const uint8_t *options, int len,
  */
 void dhcp_input(const void *data, uint32_t len)
 {
-    kprintf("[dhcp] received packet len=%u\n", len);
-    
-    if (len < sizeof(struct dhcp_msg)) {
-        kprintf("[dhcp] packet too small (%u < %u)\n", len, (uint32_t)sizeof(struct dhcp_msg));
+    /* Check minimum size (fixed headers before options) */
+    if (len < DHCP_MIN_SIZE)
         return;
-    }
     
     const struct dhcp_msg *dhcp = (const struct dhcp_msg *)data;
     
-    kprintf("[dhcp] op=%u xid=0x%x magic=0x%x\n", dhcp->op, ntohl(dhcp->xid), ntohl(dhcp->magic));
-    
     /* Verify this is a reply (BOOTREPLY) */
-    if (dhcp->op != 2) {
-        kprintf("[dhcp] not BOOTREPLY (op=%u)\n", dhcp->op);
+    if (dhcp->op != 2)
         return;
-    }
     
     /* Verify transaction ID */
-    if (ntohl(dhcp->xid) != dhcp_xid) {
-        kprintf("[dhcp] xid mismatch (got 0x%x, expected 0x%x)\n", ntohl(dhcp->xid), dhcp_xid);
+    if (ntohl(dhcp->xid) != dhcp_xid)
         return;
-    }
     
     /* Verify magic cookie */
-    if (ntohl(dhcp->magic) != DHCP_MAGIC_COOKIE) {
-        kprintf("[dhcp] bad magic cookie\n");
+    if (ntohl(dhcp->magic) != DHCP_MAGIC_COOKIE)
         return;
-    }
     
-    /* Parse options */
+    /* Parse options - calculate actual options length from packet size.
+     * Options start at offset 240 (DHCP_MIN_SIZE) in the DHCP message. */
     int msg_type;
     uint32_t server_id, subnet, router;
-    dhcp_parse_options(dhcp->options, sizeof(dhcp->options),
+    uint32_t opts_len = (len > DHCP_MIN_SIZE) ? (len - DHCP_MIN_SIZE) : 0;
+    if (opts_len > sizeof(dhcp->options))
+        opts_len = sizeof(dhcp->options);
+    dhcp_parse_options(dhcp->options, opts_len,
                        &msg_type, &server_id, &subnet, &router);
     
     uint32_t offered_ip = ntohl(dhcp->yiaddr);
     
     if (msg_type == DHCP_OFFER && dhcp_state == 1) {
         /* Got an offer, send request */
-        kprintf("[dhcp] OFFER: %d.%d.%d.%d from server %d.%d.%d.%d\n",
-                (offered_ip >> 24) & 0xFF, (offered_ip >> 16) & 0xFF,
-                (offered_ip >> 8) & 0xFF, offered_ip & 0xFF,
-                (server_id >> 24) & 0xFF, (server_id >> 16) & 0xFF,
-                (server_id >> 8) & 0xFF, server_id & 0xFF);
-        
         dhcp_offered_ip = offered_ip;
         dhcp_server_ip = server_id;
         dhcp_subnet_mask = subnet;
@@ -299,12 +289,7 @@ void dhcp_input(const void *data, uint32_t len)
         dhcp_send(DHCP_REQUEST, offered_ip, server_id);
         
     } else if (msg_type == DHCP_ACK && dhcp_state == 2) {
-        /* Got ACK, we're bound */
-        kprintf("[dhcp] ACK: IP %d.%d.%d.%d\n",
-                (offered_ip >> 24) & 0xFF, (offered_ip >> 16) & 0xFF,
-                (offered_ip >> 8) & 0xFF, offered_ip & 0xFF);
-        
-        /* Apply configuration */
+        /* Got ACK, we're bound - apply configuration */
         g_dhcp_ip = offered_ip;
         g_dhcp_mask = subnet ? subnet : 0xFFFFFF00;  /* Default /24 */
         g_dhcp_gateway = router ? router : 0;
@@ -313,7 +298,6 @@ void dhcp_input(const void *data, uint32_t len)
         g_dhcp_complete = 1;
         
     } else if (msg_type == DHCP_NAK) {
-        kprintf("[dhcp] NAK received, restarting\n");
         dhcp_state = 0;
     }
 }
@@ -324,43 +308,49 @@ extern void virtio_net_recv(void);
 /*
  * Run DHCP client to obtain IP configuration.
  * Returns 0 on success, -1 on timeout/failure.
+ *
+ * Sends up to 3 DISCOVER packets, waiting ~2 seconds after each.
  */
 int dhcp_configure(void)
 {
-    kprintf("[dhcp] starting DHCP client...\n");
+    kprintf("[dhcp] requesting IP address...\n");
     
     /* Start with no IP */
     eth_set_ip(0);
     
-    /* Send DHCPDISCOVER */
-    dhcp_state = 1;
     g_dhcp_complete = 0;
     
-    if (dhcp_send(DHCP_DISCOVER, 0, 0) < 0) {
-        kprintf("[dhcp] failed to send DISCOVER\n");
-        return -1;
-    }
+    /* Brief delay to let vmnet initialize its DHCP server */
+    for (volatile int d = 0; d < 500000; d++)
+        ;
     
-    kprintf("[dhcp] DISCOVER sent, waiting for OFFER...\n");
-    
-    /* Wait for DHCP to complete, polling for network packets.
-     * ~500 iterations * ~10ms = ~5 seconds timeout */
-    for (int i = 0; i < 500 && !g_dhcp_complete; i++) {
-        /* Poll for incoming packets */
-        virtio_net_recv();
+    /* Try up to 5 times, re-sending DISCOVER each time */
+    for (int attempt = 0; attempt < 5 && !g_dhcp_complete; attempt++) {
+        /* Reset state for new DISCOVER */
+        dhcp_state = 1;
         
-        /* Small delay between polls (~10ms each iteration) */
-        for (volatile int j = 0; j < 50000; j++)
-            ;
+        if (dhcp_send(DHCP_DISCOVER, 0, 0) < 0)
+            return -1;
+        
+        /* Wait ~3 seconds per attempt, polling for packets.
+         * ~300 iterations * ~10ms = ~3 seconds */
+        for (int i = 0; i < 300 && !g_dhcp_complete; i++) {
+            /* Poll for incoming packets */
+            virtio_net_recv();
+            
+            /* Small delay between polls (~10ms each iteration) */
+            for (volatile int j = 0; j < 50000; j++)
+                ;
+        }
     }
     
     if (!g_dhcp_complete) {
-        kprintf("[dhcp] timeout waiting for response\n");
+        kprintf("[dhcp] no response\n");
         return -1;
     }
     
     /* Apply the obtained configuration */
-    kprintf("[dhcp] configured: IP %d.%d.%d.%d mask %d.%d.%d.%d gw %d.%d.%d.%d\n",
+    kprintf("[dhcp] %d.%d.%d.%d/%d.%d.%d.%d gw %d.%d.%d.%d\n",
             (g_dhcp_ip >> 24) & 0xFF, (g_dhcp_ip >> 16) & 0xFF,
             (g_dhcp_ip >> 8) & 0xFF, g_dhcp_ip & 0xFF,
             (g_dhcp_mask >> 24) & 0xFF, (g_dhcp_mask >> 16) & 0xFF,

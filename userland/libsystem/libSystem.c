@@ -2194,6 +2194,21 @@ EXPORT int remove(const char *pathname)
     return 0;
 }
 
+EXPORT int rename(const char *oldpath, const char *newpath)
+{
+    long ret = syscall2(128 /* SYS_rename */, oldpath, newpath);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return 0;
+}
+
+EXPORT void sync(void)
+{
+    syscall0(36 /* SYS_sync */);
+}
+
 /* ============================================================================
  * access / unlink / chdir / getcwd (POSIX)
  * ============================================================================ */

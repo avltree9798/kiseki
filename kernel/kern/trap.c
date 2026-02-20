@@ -289,6 +289,9 @@ void trap_irq_el0(struct trap_frame *tf)
  *
  * Simple table-based dispatch. Will be expanded as drivers register handlers.
  */
+/* VirtIO-net interrupt handler (defined in virtio_net.c) */
+extern void virtio_net_recv(void);
+
 void irq_dispatch(uint32_t irq)
 {
     switch (irq) {
@@ -323,8 +326,13 @@ void irq_dispatch(uint32_t irq)
         break;
 
     default:
-        /* Unregistered interrupt */
-        kprintf("[irq] Unhandled IRQ %u\n", irq);
+        /* Check if this is a VirtIO MMIO interrupt (IRQ 48..79) */
+        if (irq >= VIRTIO_MMIO_IRQ_BASE &&
+            irq < VIRTIO_MMIO_IRQ_BASE + VIRTIO_MMIO_COUNT) {
+            virtio_net_recv();
+        } else {
+            kprintf("[irq] Unhandled IRQ %u\n", irq);
+        }
         break;
     }
 }

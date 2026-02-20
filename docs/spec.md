@@ -15,11 +15,11 @@
 
 奇跡 (kiseki) is the Japanese word for **miracle**.
 
-Running native macOS ARM64 binaries on bare-metal non-Apple hardware — without Apple's kernel, without Apple's bootloader, without a single line of Apple's code — should not be possible. The Mach-O format, the XNU syscall conventions, the Darwin ABI: these were designed for a vertically integrated ecosystem where Apple controls the hardware, the firmware, the kernel, and the userland. Reproducing enough of that interface to make real binaries believe they are on macOS, on a QEMU `virt` machine or a Raspberry Pi, is an act of unreasonable ambition.
+Running native macOS ARM64 binaries on bare-metal non-Apple hardware - without Apple's kernel, without Apple's bootloader, without a single line of Apple's code - should not be possible. The Mach-O format, the XNU syscall conventions, the Darwin ABI: these were designed for a vertically integrated ecosystem where Apple controls the hardware, the firmware, the kernel, and the userland. Reproducing enough of that interface to make real binaries believe they are on macOS, on a QEMU `virt` machine or a Raspberry Pi, is an act of unreasonable ambition.
 
-The name also acknowledges the nature of building an operating system from nothing. The project began with a UART printing characters to a serial console. No scheduler. No memory allocator. No filesystem. Just voltage on a wire. From that starting point, every new subsystem that comes to life — the first process that forks, the first file that opens, the first TCP handshake that completes — is a small miracle. Kiseki is the sum of these miracles.
+The name also acknowledges the nature of building an operating system from nothing. The project began with a UART printing characters to a serial console. No scheduler. No memory allocator. No filesystem. Just voltage on a wire. From that starting point, every new subsystem that comes to life - the first process that forks, the first file that opens, the first TCP handshake that completes - is a small miracle. Kiseki is the sum of these miracles.
 
-The project embodies a conviction: that the best way to understand a system is to build it, completely, from first principles. Not to patch an existing kernel. Not to port a compatibility layer. To write every line — the boot code, the page table walker, the scheduler, the filesystem driver, the TCP state machine, the shell — and in doing so, to truly comprehend what an operating system is.
+The project embodies a conviction: that the best way to understand a system is to build it, completely, from first principles. Not to patch an existing kernel. Not to port a compatibility layer. To write every line - the boot code, the page table walker, the scheduler, the filesystem driver, the TCP state machine, the shell - and in doing so, to truly comprehend what an operating system is.
 
 ### 1.2. Design Principles
 
@@ -35,7 +35,7 @@ The project embodies a conviction: that the best way to understand a system is t
 
 ## 2. Executive Summary
 
-Kiseki is a Unix-like operating system that runs native macOS ARM64 CLI binaries on non-Apple hardware. It achieves this by implementing a clean-room version of the XNU kernel interfaces — Mach traps and BSD syscalls — while targeting standard virtualised and embedded ARM64 platforms.
+Kiseki is a Unix-like operating system that runs native macOS ARM64 CLI binaries on non-Apple hardware. It achieves this by implementing a clean-room version of the XNU kernel interfaces - Mach traps and BSD syscalls - while targeting standard virtualised and embedded ARM64 platforms.
 
 The system comprises:
 - A **hybrid kernel** (~21,000 lines of C and ARM64 assembly) implementing the Mach microkernel, BSD personality, Ext4 filesystem, TCP/IP networking, and device drivers
@@ -170,7 +170,7 @@ Kiseki implements a **1:1 threading model**. Each user-space pthread maps to exa
 | `task` | `struct task *` | Owning Mach task (process container) |
 | `continuation` | `uint64_t` | Mach stackless context switch optimisation |
 
-**Task structure (`struct task`)** — the Mach process container:
+**Task structure (`struct task`)** - the Mach process container:
 
 | Field | Type | Purpose |
 |---|---|---|
@@ -223,7 +223,7 @@ Kiseki implements a **1:1 threading model**. Each user-space pthread maps to exa
 - Copy-on-write: `fork()` shares parent pages read-only; write faults duplicate the page.
 - Page zero: first 4 GB (`0x0` – `0x100000000`) unmapped (Darwin convention).
 - Binary load address: `0x100000000` or higher (Mach-O `__PAGEZERO` segment).
-- CommPage: `0xFFFFFFFFFFFFC000` — shared read-only page with optimised `gettimeofday`.
+- CommPage: `0xFFFFFFFFFFFFC000` - shared read-only page with optimised `gettimeofday`.
 
 ### 5.6. Physical Memory
 
@@ -269,7 +269,7 @@ User code executes `svc #0x80` with the syscall number in register `x16`:
 
 **No-cancel variants:** `read_nocancel` (396), `write_nocancel` (397), `open_nocancel` (398), `close_nocancel` (399), `fcntl_nocancel` (406)
 
-**Kiseki extensions:** `openpty` (501) — allocate a pseudo-terminal pair.
+**Kiseki extensions:** `openpty` (501) - allocate a pseudo-terminal pair.
 
 ### 6.3. Mach Traps
 
@@ -388,10 +388,10 @@ Full read/write Ext4 implementation supporting:
 
 In-memory device filesystem mounted at `/dev`:
 
-- `/dev/console` — PL011 UART (backed by console TTY).
-- `/dev/null` — Discards writes, reads return EOF.
-- `/dev/zero` — Reads return zero bytes.
-- `/dev/urandom` — Pseudo-random bytes (LFSR-based).
+- `/dev/console` - PL011 UART (backed by console TTY).
+- `/dev/null` - Discards writes, reads return EOF.
+- `/dev/zero` - Reads return zero bytes.
+- `/dev/urandom` - Pseudo-random bytes (LFSR-based).
 
 ### 9.4. Buffer Cache
 
@@ -424,7 +424,7 @@ Pool of 16 PTY pairs for remote shell sessions (SSH):
 - **Slave side**: Full `struct tty` with termios, line discipline, winsize, process group.
 - **Data flow**: Master write → m2s ring buffer → slave reads (with line discipline). Slave write → s2m ring buffer → master reads.
 - **Ring buffers**: 4,096 bytes per direction.
-- **Syscall**: `openpty(int *master, int *slave, ...)` (syscall 501) — allocates a pair and returns both file descriptors.
+- **Syscall**: `openpty(int *master, int *slave, ...)` (syscall 501) - allocates a pair and returns both file descriptors.
 - **ioctl**: Slave fd supports all terminal ioctls (`TIOCGETA`, `TIOCSETA`, `TIOCGWINSZ`, `TIOCSWINSZ`, `TIOCSCTTY`, `TIOCSPGRP`, etc.).
 
 ---
@@ -582,7 +582,7 @@ All compiled with `clang -target arm64-apple-macos11` using the macOS SDK header
 
 | EC | Name | Handler |
 |---|---|---|
-| `0x15` | SVC from AArch64 | `syscall_handler()` — BSD/Mach dispatch |
+| `0x15` | SVC from AArch64 | `syscall_handler()` - BSD/Mach dispatch |
 | `0x20` | Instruction abort (lower EL) | Demand paging or `SIGSEGV` |
 | `0x24` | Data abort (lower EL) | Copy-on-write, demand paging, or `SIGSEGV` |
 | `0x22` | PC alignment fault | `SIGBUS` |

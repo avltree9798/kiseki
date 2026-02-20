@@ -198,6 +198,7 @@ static void dyld_puts(const char *s)
     sys_write(2, s, dyld_strlen(s));
 }
 
+__attribute__((unused))
 static void dyld_put_hex(uint64_t val)
 {
     char buf[19]; /* "0x" + 16 hex digits + NUL */
@@ -669,6 +670,9 @@ struct loaded_image {
 
 static struct loaded_image images[MAX_IMAGES];
 static uint32_t            num_images = 0;
+
+/* Pointer to dyld's own image entry (set during initialization) */
+static struct loaded_image *dyld_image = NULL;
 
 /* ============================================================================
  * Parse Mach-O Load Commands
@@ -1688,6 +1692,16 @@ static void process_chained_fixups(struct loaded_image *img)
 
 static struct loaded_image *load_dylib(const char *path)
 {
+    /*
+     * Return dyld's own image when asked to load /usr/lib/dyld.
+     * libSystem has a dependency on dyld (for dyld_stub_binder).
+     * Since dyld is already running, we return our pre-registered image
+     * so symbol resolution can find dyld_stub_binder.
+     */
+    if (dyld_strcmp(path, "/usr/lib/dyld") == 0) {
+        return dyld_image;  /* Return dyld's own image */
+    }
+
     if (num_images >= MAX_IMAGES) {
         dyld_puts("dyld: too many loaded images\n");
         return NULL;
@@ -1861,19 +1875,31 @@ static struct loaded_image *load_dylib(const char *path)
  * We eagerly resolve all lazy bindings, so dyld_stub_binder should never
  * be called. However, the binary's __got has a slot for it. We write the
  * address of this function into that slot; if it's ever called, we trap.
+ *
+ * The actual dyld_stub_binder symbol is defined in start.S (in assembly)
+ * so that ld64 sees it as defined during linking. The assembly stub calls
+ * this C function to handle the fatal error.
  * ============================================================================ */
 
+/*
+ * dyld_stub_binder_trap - Called by assembly stub when lazy binding is attempted
+ *
+ * This should never happen since we eagerly resolve all bindings.
+ */
 __attribute__((noreturn, used))
-static void dyld_stub_binder_trap(void)
+void dyld_stub_binder_trap(void)
 {
     dyld_fatal("dyld_stub_binder called — this should not happen "
                "(all lazy bindings should be eagerly resolved)");
 }
 
-/* Address of the stub binder trap for binding */
+/* dyld_stub_binder is defined in start.S */
+extern void dyld_stub_binder(void);
+
+/* Address of the stub binder for binding */
 static uint64_t get_stub_binder_addr(void)
 {
-    return (uint64_t)(void *)dyld_stub_binder_trap;
+    return (uint64_t)(void *)dyld_stub_binder;
 }
 
 /* ============================================================================

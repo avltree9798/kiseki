@@ -55,7 +55,7 @@ else
 endif
 
 # --- Compiler Flags ----------------------------------------------------------
-INCLUDES    := -I$(SRCDIR)/include
+INCLUDES    := -I$(SRCDIR)/include -Iinclude
 
 CFLAGS      := -Wall -Wextra -Werror \
                -ffreestanding -fno-builtin -fno-stack-protector \
@@ -122,7 +122,8 @@ NET_SRCS    := $(SRCDIR)/net/socket.c \
                $(SRCDIR)/net/ip.c \
                $(SRCDIR)/net/eth.c \
                $(SRCDIR)/net/icmp.c \
-               $(SRCDIR)/net/udp.c
+               $(SRCDIR)/net/udp.c \
+               $(SRCDIR)/net/dhcp.c
 
 # All sources
 C_SRCS      := $(KERN_SRCS) $(ARCH_SRCS) $(DRV_SRCS) $(BSD_SRCS) $(MACH_SRCS) $(FS_SRCS) $(NET_SRCS)
@@ -195,8 +196,11 @@ ifneq ($(wildcard $(DISK_IMG)),)
                   -device virtio-blk-device,drive=hd0
 endif
 
-# Add virtio-net device (QEMU user-mode networking: guest 10.0.2.15, host 10.0.2.2)
-QEMU_FLAGS += -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+# Add virtio-net device
+# vmnet-shared: macOS native networking, guest gets a real LAN IP.
+# Requires running QEMU with sudo (for vmnet framework access).
+# The guest static IP is 192.168.64.10, host/gateway is 192.168.64.1.
+QEMU_FLAGS += -netdev vmnet-shared,id=net0 \
               -device virtio-net-device,netdev=net0
 
 run: all
@@ -206,11 +210,12 @@ run: all
 	else \
 		echo "  WARNING: No disk image. Run 'make disk' first for root filesystem."; \
 	fi
+	@echo "  Network: vmnet-shared (guest 192.168.64.10, requires sudo)"
 	@echo ""
-	$(QEMU) $(QEMU_FLAGS)
+	sudo $(QEMU) $(QEMU_FLAGS)
 
 run-debug: all
-	$(QEMU) $(QEMU_FLAGS) -s -S &
+	sudo $(QEMU) $(QEMU_FLAGS) -s -S &
 	@echo "GDB server started on :1234. Attach with:"
 	@echo "  $(CROSS_COMPILE)gdb -ex 'target remote :1234' $(KERNEL_ELF)"
 

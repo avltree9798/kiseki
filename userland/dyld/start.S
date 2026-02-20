@@ -78,3 +78,33 @@ _start:
     mov     x16, #1         /* SYS_exit */
     svc     #0x80
     brk     #0xDEAD         /* Should never reach here */
+
+/*
+ * dyld_stub_binder - Lazy binding trampoline
+ *
+ * On real macOS, this function resolves lazy symbols on first call.
+ * Kiseki's dyld eagerly resolves all bindings at load time, so this
+ * should never be called. We export it as a global symbol so:
+ *   1. ld64's "initial-undefines" requirement is satisfied at link time
+ *   2. libSystem and other dylibs can reference it at runtime
+ *
+ * If called, we trap with a fatal error since it indicates a bug
+ * (lazy binding occurred when it shouldn't have).
+ *
+ * Symbol name is without underscore prefix because ld64 uses the
+ * raw name "dyld_stub_binder" for this special symbol.
+ */
+    .globl _dyld_stub_binder
+    .globl dyld_stub_binder
+    .p2align 2
+_dyld_stub_binder:
+dyld_stub_binder:
+    /* Save link register for diagnostics */
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    /* Call the C fatal handler */
+    bl      _dyld_stub_binder_trap
+
+    /* Should never return, but just in case */
+    brk     #0xDEAD

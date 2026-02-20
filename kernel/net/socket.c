@@ -204,6 +204,7 @@ int  virtio_net_init(void);
 void eth_set_ip(uint32_t ip);
 void ip_set_gateway(uint32_t gw);
 void ip_set_netmask(uint32_t mask);
+int  dhcp_configure(void);
 
 void net_init(void)
 {
@@ -220,12 +221,14 @@ void net_init(void)
 
     /* Probe and initialize VirtIO-net device */
     if (virtio_net_init() == 0) {
-        /* Configure default network for QEMU user-mode networking.
-         * QEMU user-mode net gives the guest 10.0.2.15 by default,
-         * with gateway at 10.0.2.2 and DNS at 10.0.2.3. */
-        eth_set_ip(htonl(0x0A00020FU));      /* 10.0.2.15 */
-        ip_set_netmask(htonl(0xFFFFFF00U));   /* 255.255.255.0 */
-        ip_set_gateway(htonl(0x0A000202U));   /* 10.0.2.2 */
+        /* Try DHCP first, fall back to static IP if it fails */
+        if (dhcp_configure() != 0) {
+            kprintf("[net] DHCP failed, using static IP configuration\n");
+            /* Fallback: vmnet-shared subnet 192.168.64.0/24, gateway 192.168.64.1 */
+            eth_set_ip(htonl(0xC0A8400AU));      /* 192.168.64.10 */
+            ip_set_netmask(htonl(0xFFFFFF00U));   /* 255.255.255.0 */
+            ip_set_gateway(htonl(0xC0A84001U));   /* 192.168.64.1 */
+        }
     }
 
     kprintf("[net] networking subsystem initialized (%d sockets)\n",

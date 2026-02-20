@@ -74,6 +74,9 @@ int     ioctl(int fd, unsigned long request, ...);
 unsigned int sleep(unsigned int seconds);
 int     usleep(useconds_t usec);
 
+/* Entropy */
+int     getentropy(void *buf, size_t buflen);
+
 /* brk/sbrk - not available on XNU, malloc uses mmap instead */
 
 /* Environment (declared here, defined in stdlib.c) */

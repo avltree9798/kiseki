@@ -2621,10 +2621,11 @@ int main(int argc, char *argv[])
             strncpy(g_fs, fs, sizeof(g_fs) - 1);
             g_fs[sizeof(g_fs) - 1] = '\0';
         } else if (opt[1] == 'v') {
-            const char *assign;
+            const char *assign = NULL;
             if (opt[2]) assign = opt + 2;
             else if (argi + 1 < argc) assign = argv[++argi];
             else usage();
+            if (!assign) usage();  /* safety check */
             char name[256], value[4096];
             const char *eq = strchr(assign, '=');
             if (!eq) usage();

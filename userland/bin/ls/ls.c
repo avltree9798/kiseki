@@ -224,23 +224,23 @@ static void format_size_human(off_t size, char *buf, size_t bufsz)
     if (size < 1024) {
         snprintf(buf, bufsz, "%ld", (long)size);
     } else if (size < 1024L * 1024) {
-        long val = (size * 10 + 512) / 1024;
+        long val = (long)((size * 10 + 512) / 1024);
         if (val < 100)
             snprintf(buf, bufsz, "%ld.%ldK", val / 10, val % 10);
         else
-            snprintf(buf, bufsz, "%ldK", (size + 512) / 1024);
+            snprintf(buf, bufsz, "%ldK", (long)((size + 512) / 1024));
     } else if (size < 1024L * 1024 * 1024) {
-        long val = (size * 10 + 524288) / (1024 * 1024);
+        long val = (long)((size * 10 + 524288) / (1024 * 1024));
         if (val < 100)
             snprintf(buf, bufsz, "%ld.%ldM", val / 10, val % 10);
         else
-            snprintf(buf, bufsz, "%ldM", (size + 524288) / (1024 * 1024));
+            snprintf(buf, bufsz, "%ldM", (long)((size + 524288) / (1024 * 1024)));
     } else {
-        long val = (size * 10 + 536870912L) / (1024L * 1024 * 1024);
+        long val = (long)((size * 10 + 536870912L) / (1024L * 1024 * 1024));
         if (val < 100)
             snprintf(buf, bufsz, "%ld.%ldG", val / 10, val % 10);
         else
-            snprintf(buf, bufsz, "%ldG", (size + 536870912L) / (1024L * 1024 * 1024));
+            snprintf(buf, bufsz, "%ldG", (long)((size + 536870912L) / (1024L * 1024 * 1024)));
     }
 }
 
@@ -444,7 +444,7 @@ static void print_entries(entry_t *entries, int count, const char *dirpath)
  * List a single directory
  * ======================================================================== */
 
-static void list_dir(const char *path, int print_header);
+static void list_dir(const char *path, int print_header) __attribute__((unused));
 
 static void list_directory(const char *path, int print_header)
 {

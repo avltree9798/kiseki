@@ -56,6 +56,9 @@ static uint32_t udp_sockbuf_write(struct sockbuf *sb, const uint8_t *data,
     return written;
 }
 
+/* DHCP client handler (port 68) */
+extern void dhcp_input(const void *data, uint32_t len);
+
 void udp_input(uint32_t src_addr, uint32_t dst_addr,
                const void *data, uint32_t len)
 {
@@ -69,6 +72,16 @@ void udp_input(uint32_t src_addr, uint32_t dst_addr,
     const struct udp_hdr *uh = (const struct udp_hdr *)data;
     uint16_t dport = uh->uh_dport; /* already in network order */
     uint16_t sport = uh->uh_sport;
+
+    /* Check for DHCP client port (68) - handle before socket lookup */
+    if (ntohs(dport) == 68) {
+        kprintf("[udp] DHCP response on port 68\n");
+        /* Skip UDP header and pass DHCP payload */
+        const uint8_t *payload = (const uint8_t *)data + sizeof(struct udp_hdr);
+        uint32_t payload_len = len - sizeof(struct udp_hdr);
+        dhcp_input(payload, payload_len);
+        return;
+    }
 
     /* Find a matching socket */
     struct socket *match = NULL;

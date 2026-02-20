@@ -212,10 +212,12 @@ void ip_input(const void *data, uint32_t len)
         return;
     }
 
-    /* Check destination address (accept broadcast and our address) */
+    /* Check destination address (accept broadcast and our address).
+     * When local_ip_addr is 0 (during DHCP), accept all packets. */
     if (local_ip_addr != 0 &&
         iph->ip_dst != local_ip_addr &&
-        iph->ip_dst != htonl(INADDR_BROADCAST)) {
+        iph->ip_dst != htonl(INADDR_BROADCAST) &&
+        iph->ip_dst != htonl(0xFFFFFFFF)) {  /* Raw broadcast value */
         /* Not for us - would forward in a router. Drop for now. */
         return;
     }

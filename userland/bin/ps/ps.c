@@ -365,11 +365,9 @@ int main(int argc, char *argv[])
     print_header();
 
     /* Print matching processes */
-    int displayed = 0;
     for (int i = 0; i < nprocs; i++) {
         if (proc_matches(&procs[i])) {
             print_proc(&procs[i]);
-            displayed++;
         }
     }
 

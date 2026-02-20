@@ -2,7 +2,11 @@
 # Kiseki OS - libSystem.B.dylib (Mach-O Dynamic Library)
 # ============================================================================
 # Builds the userland C library as a Mach-O dynamic library using macOS clang.
-# This is the only libSystem target — the old ELF libsystem.a is removed.
+#
+# The dyld_stub_binder symbol is resolved via dyld.tbd (text-based stub),
+# which tells the linker that dyld will provide this symbol at runtime.
+# This mirrors how macOS handles the circular dependency between libSystem
+# and dyld.
 #
 # Usage:
 #   make            - Build libSystem.B.dylib
@@ -25,6 +29,7 @@ DYLIB_CFLAGS := -target arm64-apple-macos11 \
                 -O2 -Wall -Wextra \
                 -Wno-unused-parameter
 
+# Link against dyld.tbd stub to resolve dyld_stub_binder
 DYLIB_LDFLAGS := -target arm64-apple-macos11 \
                  -nostdlib -shared \
                  -Wl,-dylib \
@@ -40,10 +45,10 @@ all: dylib
 dylib: $(DYLIB)
 	@echo "  libSystem.B.dylib built successfully"
 
-$(DYLIB): libSystem.c
+$(DYLIB): libSystem.c dyld.tbd
 	@echo "  DYLIB    $@"
 	@mkdir -p $(dir $@)
-	$(DYLIB_CC) $(DYLIB_CFLAGS) $(DYLIB_LDFLAGS) -o $@ $<
+	$(DYLIB_CC) $(DYLIB_CFLAGS) $(DYLIB_LDFLAGS) -o $@ $< dyld.tbd
 
 clean:
 	@echo "  CLEAN    libSystem"

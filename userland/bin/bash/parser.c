@@ -63,7 +63,7 @@ static token_type_t peek_type(parser_t *p)
     return t ? t->type : TOK_EOF;
 }
 
-static token_t *advance(parser_t *p)
+static token_t * __attribute__((unused)) advance(parser_t *p)
 {
     if (p->current)
         token_free(p->current);
@@ -254,7 +254,7 @@ static void node_array_push(node_array_t *a, ast_node_t *node)
     a->items[a->count++] = node;
 }
 
-static void node_array_free_shallow(node_array_t *a)
+static void __attribute__((unused)) node_array_free_shallow(node_array_t *a)
 {
     free(a->items);
     a->items = NULL;

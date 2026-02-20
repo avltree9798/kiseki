@@ -91,7 +91,7 @@ static void strbuf_free(strbuf_t *sb)
 
 /* ---------- Lexer character access ---------- */
 
-static char lex_peek_char(lexer_t *lex)
+static char __attribute__((unused)) lex_peek_char(lexer_t *lex)
 {
     if (lex->pos >= lex->len)
         return '\0';
@@ -105,7 +105,7 @@ static char lex_peek_ahead(lexer_t *lex, size_t offset)
     return lex->input[lex->pos + offset];
 }
 
-static char lex_advance(lexer_t *lex)
+static char __attribute__((unused)) lex_advance(lexer_t *lex)
 {
     if (lex->pos >= lex->len)
         return '\0';
@@ -202,7 +202,7 @@ static void read_heredoc_bodies(lexer_t *lex)
         while (lex->pos < lex->len) {
             /* Find start of current line */
             size_t line_start = lex->pos;
-            const char *line_ptr = &lex->input[lex->pos];
+            (void)&lex->input[lex->pos];  /* line_ptr - unused but kept for clarity */
 
             /* For <<-, skip leading tabs */
             size_t skip = 0;

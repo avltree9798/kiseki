@@ -2027,24 +2027,8 @@ int sys_mprotect(struct trap_frame *tf)
  * ============================================================================ */
 
 /*
- * Minimal sysctl OIDs for hw.pagesize (used by libSystem bootstrap)
- *
- * sysctl name encoding: CTL_HW = 6, HW_PAGESIZE = 7
+ * sysctl OIDs are defined in <sys/syscall.h> (shared header)
  */
-#define CTL_HW          6
-#define HW_PAGESIZE     7
-#define HW_MACHINE      1
-#define HW_NCPU         3
-#define HW_MEMSIZE      12
-
-#define CTL_KERN        1
-#define KERN_OSTYPE     1
-#define KERN_OSRELEASE  2
-#define KERN_OSREV      3
-#define KERN_VERSION    4
-#define KERN_HOSTNAME   10
-#define KERN_PROC       14
-#define KERN_OSVERSION  65
 
 /*
  * sysctl_copyout_str - Helper to copy a string to a sysctl output buffer.
@@ -2187,6 +2171,40 @@ int sys_sysctl(struct trap_frame *tf)
             syscall_return(tf, 0);
             return 0;
 
+        default:
+            break;
+        }
+    }
+
+    /* --- CTL_NET (4) --- */
+    if (name[0] == CTL_NET && namelen >= 2) {
+        /* Get network configuration from DHCP module */
+        extern uint32_t dhcp_get_ip(void);
+        extern uint32_t dhcp_get_netmask(void);
+        extern uint32_t dhcp_get_gateway(void);
+        
+        switch (name[1]) {
+        case NET_KISEKI_IFADDR: {
+            uint32_t ip = dhcp_get_ip();
+            err = sysctl_copyout_int((int)ip, oldp, oldlenp);
+            if (err) return err;
+            syscall_return(tf, 0);
+            return 0;
+        }
+        case NET_KISEKI_IFMASK: {
+            uint32_t mask = dhcp_get_netmask();
+            err = sysctl_copyout_int((int)mask, oldp, oldlenp);
+            if (err) return err;
+            syscall_return(tf, 0);
+            return 0;
+        }
+        case NET_KISEKI_IFGW: {
+            uint32_t gw = dhcp_get_gateway();
+            err = sysctl_copyout_int((int)gw, oldp, oldlenp);
+            if (err) return err;
+            syscall_return(tf, 0);
+            return 0;
+        }
         default:
             break;
         }

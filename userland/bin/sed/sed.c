@@ -437,7 +437,7 @@ static int re_exec_inner(const regex_t *re, int pc, const char *sp,
 }
 
 /* Execute regex against string. Returns 1 on match, fills match info. */
-static int re_exec(const regex_t *re, const char *str, re_match_t *match)
+static int __attribute__((unused)) re_exec(const regex_t *re, const char *str, re_match_t *match)
 {
     int len = (int)strlen(str);
     const char *end = str + len;
@@ -497,6 +497,7 @@ static int re_exec(const regex_t *re, const char *str, re_match_t *match)
 }
 
 /* Execute regex, but start searching from a given offset. Fills match. */
+__attribute__((unused))
 static int re_exec_from(const regex_t *re, const char *str, const char *from,
                         re_match_t *match)
 {
@@ -1577,7 +1578,7 @@ static void process_stream(FILE *in, FILE *out)
         int lineno = i + 1;
         int is_last = (i == lb.nlines - 1);
         int deleted = 0;
-        int printed = 0;  /* explicit print from p command or s///p */
+        int printed __attribute__((unused)) = 0;  /* explicit print from p command or s///p */
         char *append_text = NULL;
 
         for (int ci = 0; ci < ncmds; ci++) {

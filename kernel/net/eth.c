@@ -510,6 +510,14 @@ void eth_set_mac(const uint8_t *mac)
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
+/*
+ * eth_get_mac - Get the local MAC address.
+ */
+void eth_get_mac(uint8_t *mac)
+{
+    mac_copy(mac, local_mac);
+}
+
 /* Forward: set IP address in the IP layer too */
 void ip_set_addr(uint32_t addr);
 

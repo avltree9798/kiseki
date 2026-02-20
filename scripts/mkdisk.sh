@@ -76,7 +76,7 @@ BIN_PROGS="bash cat cp mv rm ln ls mkdir rmdir chmod echo head tail
 USR_BIN_PROGS="find xargs id whoami which env du wc yes"
 
 # Binaries that go in /sbin (system admin)
-SBIN_PROGS="mount umount chown adduser df sudo init getty halt reboot shutdown"
+SBIN_PROGS="mount umount chown adduser df sudo init getty halt reboot shutdown sshd"
 
 # Test binary
 MACHO_HELLO="${PROJDIR}/build/hello"

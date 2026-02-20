@@ -127,6 +127,7 @@ static int lookup_passwd(const char *username, struct passwd_entry *pw)
     return -1;
 }
 
+__attribute__((unused))
 static int lookup_passwd_by_uid(int uid, struct passwd_entry *pw)
 {
     FILE *fp = fopen(PATH_PASSWD, "r");

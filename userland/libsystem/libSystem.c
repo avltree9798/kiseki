@@ -84,6 +84,7 @@ typedef signed long         time_t;
 #define SYS_lseek       199
 #define SYS_mmap        197
 #define SYS_sysctl      202
+#define SYS_getentropy  500
 #define SYS_openpty     501
 
 /* open flags */
@@ -244,13 +245,11 @@ EXPORT NORETURN void __stack_chk_fail(void)
 
 /* ============================================================================
  * dyld stub binder
+ *
+ * This symbol is required by ld64 as an "initial-undefined" for all dylibs.
+ * It's defined in stub_binder.s to satisfy the linker's initial-undefines.
+ * Kiseki's dyld does eager binding, so this is never actually called.
  * ============================================================================ */
-
-EXPORT void dyld_stub_binder(void)
-{
-    /* No-op / trap - Kiseki's dyld does eager binding */
-    __builtin_trap();
-}
 
 /* ============================================================================
  * String functions
@@ -3102,6 +3101,32 @@ EXPORT int openpty(int *master_fd, int *slave_fd,
         *master_fd = fds[0];
     if (slave_fd)
         *slave_fd = fds[1];
+    return 0;
+}
+
+/* ============================================================================
+ * Entropy
+ * ============================================================================ */
+
+/*
+ * getentropy - Fill a buffer with random bytes from the kernel.
+ *
+ * @buf:    Buffer to fill
+ * @buflen: Number of bytes (must be <= 256 per POSIX)
+ *
+ * Returns 0 on success, -1 on error (errno set).
+ */
+EXPORT int getentropy(void *buf, unsigned long buflen)
+{
+    if (buflen > 256) {
+        errno = EIO;
+        return -1;
+    }
+    long ret = syscall2(SYS_getentropy, (long)(unsigned long)buf, (long)buflen);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
     return 0;
 }
 

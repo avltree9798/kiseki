@@ -1,0 +1,10 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/usr/lib/dyld'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _dyld_stub_binder, dyld_stub_binder ]
+...

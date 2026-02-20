@@ -22,6 +22,7 @@
 #include <kern/sync.h>
 #include <kern/pmm.h>
 #include <drivers/virtio.h>
+#include <drivers/gic.h>
 #include <net/net.h>
 
 #ifdef PLATFORM_QEMU
@@ -520,7 +521,10 @@ int virtio_net_init(void)
         /* Post initial receive buffers */
         virtio_net_fill_rx();
 
-        kprintf("[virtio-net] device initialized successfully\n");
+        /* Enable interrupt-driven receive via GIC */
+        gic_enable_irq(irq);
+
+        kprintf("[virtio-net] device initialized successfully (IRQ %u)\n", irq);
         return 0;
     }
 

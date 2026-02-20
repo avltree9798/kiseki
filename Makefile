@@ -2,11 +2,18 @@
 # Kiseki Operating System - Top-Level Makefile
 # Target: ARM64 (AArch64)
 # Platforms: QEMU virt, Raspberry Pi 4/5
+#
+# Debug mode: make world DEBUG=1
+#   - Enables verbose debug output in kernel, dyld, etc.
 # ============================================================================
 
 # --- Configuration -----------------------------------------------------------
 ARCH        := aarch64
 PLATFORM    ?= qemu
+DEBUG       ?= 0
+
+# Export DEBUG for sub-makefiles
+export DEBUG
 
 # Cross-compiler toolchain detection
 # Try common prefixes in order of preference
@@ -57,12 +64,20 @@ endif
 # --- Compiler Flags ----------------------------------------------------------
 INCLUDES    := -I$(SRCDIR)/include -Iinclude
 
+# Debug flags
+ifeq ($(DEBUG),1)
+    DEBUG_DEF := -DDEBUG=1
+else
+    DEBUG_DEF :=
+endif
+
 CFLAGS      := -Wall -Wextra -Werror \
                -ffreestanding -fno-builtin -fno-stack-protector \
                -nostdinc -nostdlib \
                -mcpu=cortex-a72 -mgeneral-regs-only \
                -std=gnu11 -O2 -g \
                $(PLATFORM_DEF) \
+               $(DEBUG_DEF) \
                $(INCLUDES)
 
 ASFLAGS     := $(PLATFORM_DEF) $(INCLUDES) -D__ASSEMBLER__

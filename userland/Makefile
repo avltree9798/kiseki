@@ -22,7 +22,8 @@ COREUTILS := cat cp mv rm ln touch mkdir rmdir \
              id whoami uname date which hostname \
              chmod chown df du mount umount \
              login su sudo passwd adduser useradd usermod \
-             printf test true false yes basename dirname expr
+             printf test true false yes basename dirname expr \
+             vi
 
 # Networking tools
 NETTOOLS := ifconfig ping nc curl ntpdate

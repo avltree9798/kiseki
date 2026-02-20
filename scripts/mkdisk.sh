@@ -54,12 +54,15 @@ if [ -z "${MKFS}" ]; then
     exit 1
 fi
 
-# Create Ext4 filesystem
+# Create Ext4 filesystem with 4KB blocks
+# Note: Must use -b 4096 to ensure files can be larger than 12KB
+# (ext4 direct blocks: 12 blocks * block_size = max file size without indirection)
 "${MKFS}" -q \
+    -b 4096 \
     -L "kiseki-root" \
     -O extents,dir_index \
     "${DISK_IMG}"
-echo "  [2/4] Formatted as Ext4 (label: kiseki-root)"
+echo "  [2/4] Formatted as Ext4 (label: kiseki-root, 4KB blocks)"
 
 # ============================================================================
 # Binary layout
@@ -69,11 +72,11 @@ echo "  [2/4] Formatted as Ext4 (label: kiseki-root)"
 BIN_PROGS="bash cat cp mv rm ln ls mkdir rmdir chmod echo head tail
            grep sed awk cut tr wc sort uniq tee touch sleep kill time timeout
            date hostname uname test true false printf expr basename dirname
-           login su passwd ps clear sync
-           ifconfig ping nc curl ntpdate"
+           login su passwd ps clear sync vi
+           ifconfig ping nc curl ntpdate test_tcc test_puts writetest"
 
 # Binaries that go in /usr/bin (non-essential utilities)
-USR_BIN_PROGS="find xargs id whoami which env du wc yes"
+USR_BIN_PROGS="find xargs id whoami which env du wc yes tcc"
 
 # Binaries that go in /sbin (system admin)
 SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd"
@@ -236,6 +239,38 @@ DIRS
     if [ -f "${BUILDDIR}/lib/libSystem.B.dylib" ]; then
         echo "write ${BUILDDIR}/lib/libSystem.B.dylib /usr/lib/libSystem.B.dylib" >> "${CMDS}"
     fi
+
+    # Install TCC from tcc build directory
+    if [ -f "${BUILDDIR}/tcc/tcc" ]; then
+        echo "write ${BUILDDIR}/tcc/tcc /usr/bin/tcc" >> "${CMDS}"
+    fi
+
+    # Install C headers for TCC
+    echo "mkdir /usr/include" >> "${CMDS}"
+    echo "mkdir /usr/include/sys" >> "${CMDS}"
+    echo "mkdir /usr/include/arpa" >> "${CMDS}"
+    echo "mkdir /usr/include/netinet" >> "${CMDS}"
+    local INCDIR="${PROJDIR}/userland/libsystem/include"
+    for hdr in ${INCDIR}/*.h; do
+        if [ -f "$hdr" ]; then
+            echo "write $hdr /usr/include/$(basename $hdr)" >> "${CMDS}"
+        fi
+    done
+    for hdr in ${INCDIR}/sys/*.h; do
+        if [ -f "$hdr" ]; then
+            echo "write $hdr /usr/include/sys/$(basename $hdr)" >> "${CMDS}"
+        fi
+    done
+    for hdr in ${INCDIR}/arpa/*.h; do
+        if [ -f "$hdr" ]; then
+            echo "write $hdr /usr/include/arpa/$(basename $hdr)" >> "${CMDS}"
+        fi
+    done
+    for hdr in ${INCDIR}/netinet/*.h; do
+        if [ -f "$hdr" ]; then
+            echo "write $hdr /usr/include/netinet/$(basename $hdr)" >> "${CMDS}"
+        fi
+    done
 
     # Install hello test binary
     if [ -f "${MACHO_HELLO}" ]; then

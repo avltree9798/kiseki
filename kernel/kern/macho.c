@@ -173,6 +173,11 @@ load_segment(int fd, struct segment_command_64 *seg,
     uint64_t vm_pages = ALIGN_UP(vmsize, PAGE_SIZE) / PAGE_SIZE;
     uint64_t file_remaining = filesize;
 
+#ifdef DEBUG
+    kprintf("macho: load '%.16s' vmaddr=0x%lx vmsize=0x%lx fileoff=0x%lx filesize=0x%lx pages=%lu\n",
+            seg->segname, vmaddr, vmsize, fileoff, filesize, vm_pages);
+#endif
+
     /* Seek to segment data in file */
     if (filesize > 0) {
         int64_t seekret = vfs_lseek(fd, (int64_t)fileoff, SEEK_SET);
@@ -205,7 +210,14 @@ load_segment(int fd, struct segment_command_64 *seg,
 
             /* Read directly into the page — no intermediate buffer needed */
             int64_t nread = vfs_read(fd, kva, chunk);
+#ifdef DEBUG
+            if (p == 0 || strncmp_k(seg->segname, "__TEXT", 6) == 0) {
+                kprintf("macho:   page %lu: read %ld bytes, first word = 0x%08x\n",
+                        p, nread, *(uint32_t *)kva);
+            }
+#else
             (void)nread;
+#endif
 
             file_remaining -= chunk;
         }

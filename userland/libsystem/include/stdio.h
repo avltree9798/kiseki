@@ -51,6 +51,14 @@ int     vsprintf(char *str, const char *fmt, va_list ap);
 int     vsnprintf(char *str, size_t size, const char *fmt, va_list ap);
 int     dprintf(int fd, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
+/* Formatted input */
+int     scanf(const char *fmt, ...);
+int     fscanf(FILE *stream, const char *fmt, ...);
+int     sscanf(const char *str, const char *fmt, ...);
+int     vscanf(const char *fmt, va_list ap);
+int     vfscanf(FILE *stream, const char *fmt, va_list ap);
+int     vsscanf(const char *str, const char *fmt, va_list ap);
+
 /* Character output */
 int     fputc(int c, FILE *stream);
 int     fputs(const char *s, FILE *stream);

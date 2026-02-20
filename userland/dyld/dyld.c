@@ -1292,6 +1292,16 @@ static void process_binds(struct loaded_image *img,
             uint64_t addr = segment_address(img, seg_index) + seg_offset;
             uint64_t target = resolve_symbol(sym_name, ordinal, img);
 
+#ifdef DEBUG
+            dyld_puts("dyld:   BIND '");
+            dyld_puts(sym_name);
+            dyld_puts("' -> 0x");
+            dyld_put_hex(target);
+            dyld_puts(" at 0x");
+            dyld_put_hex(addr);
+            dyld_puts("\n");
+#endif
+
             if (target == 0) {
                 dyld_puts("dyld: warning: unresolved symbol '");
                 dyld_puts(sym_name);
@@ -1454,10 +1464,35 @@ static void process_binds(struct loaded_image *img,
 
 static void process_all_binds(struct loaded_image *img)
 {
-    if (!img->has_dyld_info)
+#ifdef DEBUG
+    dyld_puts("dyld: process_all_binds for '");
+    if (img->path)
+        dyld_puts(img->path);
+    else
+        dyld_puts("(main)");
+    dyld_puts("'\n");
+#endif
+
+    if (!img->has_dyld_info) {
+#ifdef DEBUG
+        dyld_puts("dyld:   no DYLD_INFO, skipping\n");
+#endif
         return;
-    if (img->linkedit_vmaddr == 0)
+    }
+    if (img->linkedit_vmaddr == 0) {
+#ifdef DEBUG
+        dyld_puts("dyld:   no LINKEDIT vmaddr, skipping\n");
+#endif
         return;
+    }
+
+#ifdef DEBUG
+    dyld_puts("dyld:   linkedit_vmaddr=0x");
+    dyld_put_hex(img->linkedit_vmaddr);
+    dyld_puts(" linkedit_fileoff=0x");
+    dyld_put_hex(img->linkedit_fileoff);
+    dyld_puts("\n");
+#endif
 
     /* Non-lazy binds */
     if (img->bind_size > 0) {
@@ -1953,6 +1988,15 @@ void dyld_main(const struct mach_header_64 *main_mh,
         if (dylib_path == NULL)
             continue;
 
+        /*
+         * Skip /usr/lib/dyld - it's not a library, it's the dynamic linker
+         * (us!). Some libraries incorrectly list it as a dependency due to
+         * linking against dyld.tbd for dyld_stub_binder. We're already
+         * running, so just skip it.
+         */
+        if (dyld_strcmp(dylib_path, "/usr/lib/dyld") == 0)
+            continue;
+
         /* Check if already loaded */
         bool already_loaded = false;
         for (uint32_t j = 1; j < num_images; j++) {
@@ -1978,6 +2022,9 @@ void dyld_main(const struct mach_header_64 *main_mh,
                 for (uint32_t k = 0; k < dylib->ndylibs; k++) {
                     const char *dep = dylib->dylib_paths[k];
                     if (dep == NULL)
+                        continue;
+                    /* Skip dyld itself (see comment above) */
+                    if (dyld_strcmp(dep, "/usr/lib/dyld") == 0)
                         continue;
                     bool dep_loaded = false;
                     for (uint32_t m = 0; m < num_images; m++) {
@@ -2114,6 +2161,23 @@ void dyld_main(const struct mach_header_64 *main_mh,
 
     uint64_t main_addr = main_img->text_base + main_img->main_entryoff;
 
+#ifdef DEBUG
+    dyld_puts("dyld: text_base=0x");
+    dyld_put_hex(main_img->text_base);
+    dyld_puts(" entryoff=0x");
+    dyld_put_hex(main_img->main_entryoff);
+    dyld_puts("\n");
+    dyld_puts("dyld: jumping to main at 0x");
+    dyld_put_hex(main_addr);
+    dyld_puts("\n");
+
+    /* Read first instruction at entry point to verify mapping */
+    uint32_t *entry_insn = (uint32_t *)main_addr;
+    dyld_puts("dyld: first instruction = 0x");
+    dyld_put_hex(*entry_insn);
+    dyld_puts("\n");
+#endif
+
     /*
      * Call main(argc, argv, envp, apple).
      *
@@ -2130,6 +2194,63 @@ void dyld_main(const struct mach_header_64 *main_mh,
 
     int ret = entry((int)argc, argv, envp, apple);
 
-    /* main() returned — exit with its return code */
+    /*
+     * main() returned — call libc exit() to flush stdio buffers.
+     * In Mach-O, C symbol "exit" becomes "_exit" (leading underscore).
+     * The raw _exit() syscall wrapper becomes "__exit".
+     */
+    typedef void (*exit_func_t)(int) __attribute__((noreturn));
+    uint64_t exit_addr = 0;
+
+#ifdef DEBUG
+    dyld_puts("dyld: main returned ");
+    dyld_put_dec(ret);
+    dyld_puts(", looking for _exit\n");
+#endif
+
+    /* Search for _exit (libc exit) in loaded images */
+    for (uint32_t i = 0; i < num_images; i++) {
+#ifdef DEBUG
+        dyld_puts("dyld: checking image ");
+        dyld_put_dec(i);
+        dyld_puts(": ");
+        dyld_puts(images[i].path ? images[i].path : "(null)");
+        dyld_puts("\n");
+#endif
+        exit_addr = lookup_export_trie(&images[i], "_exit");
+        if (exit_addr)
+            break;
+        exit_addr = lookup_symbol_in_image(&images[i], "_exit");
+        if (exit_addr)
+            break;
+    }
+
+#ifdef DEBUG
+    dyld_puts("dyld: _exit addr = 0x");
+    dyld_put_hex(exit_addr);
+    dyld_puts("\n");
+#endif
+
+    if (exit_addr) {
+#ifdef DEBUG
+        dyld_puts("dyld: calling libc exit at 0x");
+        dyld_put_hex(exit_addr);
+        dyld_puts(" with status ");
+        dyld_put_dec(ret);
+        dyld_puts("\n");
+#endif
+        exit_func_t libc_exit = (exit_func_t)exit_addr;
+        libc_exit(ret);
+#ifdef DEBUG
+        /* Should never reach here since exit is noreturn */
+        dyld_puts("dyld: ERROR - exit() returned!\n");
+#endif
+    }
+
+#ifdef DEBUG
+    dyld_puts("dyld: _exit not found, using raw syscall\n");
+#endif
+
+    /* Fallback to raw syscall if exit() not found */
     sys_exit(ret);
 }

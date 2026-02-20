@@ -15,11 +15,9 @@
  *   dev(4), mode(2), nlink(2), ino(8), uid(4), gid(4), rdev(4), pad(4),
  *   atimespec(16), mtimespec(16), ctimespec(16), birthtimespec(16),
  *   size(8), blocks(8), blksize(4), flags(4), gen(4), lspare(4), qspare(16)
+ *
+ * Note: struct timespec is defined in types.h
  */
-struct timespec {
-    time_t  tv_sec;
-    long    tv_nsec;
-};
 
 struct stat {
     dev_t               st_dev;             /*   0: Device ID (4) */

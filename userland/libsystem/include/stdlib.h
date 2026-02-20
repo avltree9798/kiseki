@@ -27,10 +27,14 @@ int     atexit(void (*function)(void));
 /* String to number conversion */
 int     atoi(const char *nptr);
 long    atol(const char *nptr);
+double  atof(const char *nptr);
 long    strtol(const char *nptr, char **endptr, int base);
 unsigned long strtoul(const char *nptr, char **endptr, int base);
 long long strtoll(const char *nptr, char **endptr, int base);
 unsigned long long strtoull(const char *nptr, char **endptr, int base);
+double  strtod(const char *nptr, char **endptr);
+float   strtof(const char *nptr, char **endptr);
+long double strtold(const char *nptr, char **endptr);
 
 /* Environment */
 char   *getenv(const char *name);

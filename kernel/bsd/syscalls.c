@@ -3294,28 +3294,27 @@ static int sys_select(struct trap_frame *tf)
         }
     }
 
-    /* If nothing ready and not polling, yield briefly then check again */
+    /* If nothing ready and not polling, do a brief retry loop */
     if (ready_count == 0 && !do_poll) {
-        /* Simple approach: yield a few times then return 0 */
+        /*
+         * Brief retry for stdin readiness.
+         * TODO: Proper blocking select() for vi - currently causes system hang.
+         * For now, just do a few retries and return.
+         */
         extern void sched_yield(void);
-        for (int retry = 0; retry < 100; retry++) {
+        extern bool uart_rx_ready(void);
+        
+        for (int retry = 0; retry < 100 && ready_count == 0; retry++) {
             sched_yield();
-            /* Re-check stdin */
-            for (int fd = 0; fd < nfds; fd++) {
-                int word = fd / 32;
-                uint32_t bit = 1u << (fd % 32);
-                if (readfds && (rd_in[word] & bit)) {
-                    if (fd == 0) {
-                        extern bool uart_rx_ready(void);
-                        if (uart_rx_ready()) {
-                            rd_out[word] |= bit;
-                            ready_count++;
-                        }
-                    }
+            
+            /* Re-check stdin (fd 0) */
+            if (readfds && nfds > 0) {
+                uint32_t bit0 = 1u << 0;
+                if ((rd_in[0] & bit0) && uart_rx_ready()) {
+                    rd_out[0] |= bit0;
+                    ready_count++;
                 }
             }
-            if (ready_count > 0)
-                break;
         }
     }
 

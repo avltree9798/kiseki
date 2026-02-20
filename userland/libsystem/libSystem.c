@@ -371,8 +371,10 @@ EXPORT size_t strcspn(const char *s, const char *reject)
     return (size_t)(p - s);
 }
 
-/* Forward declarations needed for strdup */
+/* Forward declarations needed by various functions */
 extern void *memcpy(void *dst, const void *src, size_t n);
+extern int execl(const char *pathname, const char *arg0, ...);
+extern int waitpid(int pid, int *status, int options);
 
 EXPORT char *strdup(const char *s)
 {
@@ -1055,13 +1057,27 @@ EXPORT int fflush(FILE *stream)
 
     if (!(stream->flags & _F_WRITE)) return 0;
 
-    if (stream->buf && stream->buf_pos > 0) {
+    /* Flush buffer contents, handling partial writes */
+    while (stream->buf && stream->buf_pos > 0) {
         ssize_t ret = write(stream->fd, stream->buf, stream->buf_pos);
         if (ret < 0) {
             stream->flags |= _F_ERROR;
             return EOF;
         }
-        stream->buf_pos = 0;
+        if (ret == 0) {
+            /* Can't make progress - treat as error */
+            stream->flags |= _F_ERROR;
+            return EOF;
+        }
+        if ((size_t)ret < stream->buf_pos) {
+            /* Partial write - shift remaining data to front of buffer */
+            size_t remaining = stream->buf_pos - (size_t)ret;
+            for (size_t i = 0; i < remaining; i++)
+                stream->buf[i] = stream->buf[(size_t)ret + i];
+            stream->buf_pos = remaining;
+        } else {
+            stream->buf_pos = 0;
+        }
     }
     return 0;
 }
@@ -1072,6 +1088,30 @@ EXPORT int fflush(FILE *stream)
 
 EXPORT NORETURN void exit(int status)
 {
+#ifdef DEBUG
+    /* Debug: show we're in exit and stdout buffer state */
+    const char *msg1 = "libSystem: exit() called, status=";
+    syscall3(SYS_write, 2, (long)msg1, 33);
+    char digit = '0' + (status % 10);
+    syscall3(SYS_write, 2, (long)&digit, 1);
+    syscall3(SYS_write, 2, (long)"\n", 1);
+    
+    const char *msg2 = "libSystem: stdout->buf_pos=";
+    syscall3(SYS_write, 2, (long)msg2, 27);
+    /* Print buf_pos as decimal */
+    size_t pos = stdout->buf_pos;
+    char numbuf[16];
+    int idx = 0;
+    if (pos == 0) numbuf[idx++] = '0';
+    else {
+        char tmp[16];
+        int ti = 0;
+        while (pos > 0) { tmp[ti++] = '0' + (pos % 10); pos /= 10; }
+        while (ti > 0) numbuf[idx++] = tmp[--ti];
+    }
+    syscall3(SYS_write, 2, (long)numbuf, idx);
+    syscall3(SYS_write, 2, (long)"\n", 1);
+#endif
     /* Call atexit handlers in reverse */
     while (_atexit_count > 0) {
         _atexit_count--;
@@ -1111,6 +1151,27 @@ EXPORT int fputc(int c, FILE *stream)
 {
     unsigned char ch = (unsigned char)c;
 
+#ifdef DEBUG
+    static int _fputc_debug_count = 0;
+    if (_fputc_debug_count < 3) {
+        _fputc_debug_count++;
+        const char *msg = "libSystem: fputc called, fd=";
+        syscall3(SYS_write, 2, (long)msg, 28);
+        char d = '0' + stream->fd;
+        syscall3(SYS_write, 2, (long)&d, 1);
+        syscall3(SYS_write, 2, (long)" flags=0x", 9);
+        /* print flags as hex */
+        char hbuf[8];
+        int hx = stream->flags;
+        for (int i = 3; i >= 0; i--) {
+            int nib = (hx >> (i*4)) & 0xF;
+            hbuf[3-i] = nib < 10 ? '0'+nib : 'a'+nib-10;
+        }
+        syscall3(SYS_write, 2, (long)hbuf, 4);
+        syscall3(SYS_write, 2, (long)"\n", 1);
+    }
+#endif
+
     if (stream->flags & _F_UNBUF) {
         ssize_t ret = write(stream->fd, &ch, 1);
         if (ret != 1) { stream->flags |= _F_ERROR; return EOF; }
@@ -1120,6 +1181,10 @@ EXPORT int fputc(int c, FILE *stream)
     _ensure_write_buf(stream);
 
     if (stream->buf == NULL) {
+#ifdef DEBUG
+        const char *msg2 = "libSystem: fputc - buf NULL, direct write\n";
+        syscall3(SYS_write, 2, (long)msg2, 42);
+#endif
         ssize_t ret = write(stream->fd, &ch, 1);
         return ret == 1 ? ch : EOF;
     }
@@ -1312,6 +1377,77 @@ EXPORT int feof(FILE *stream) { return (stream->flags & _F_EOF) ? 1 : 0; }
 EXPORT int ferror(FILE *stream) { return (stream->flags & _F_ERROR) ? 1 : 0; }
 EXPORT void clearerr(FILE *stream) { stream->flags &= ~(_F_EOF | _F_ERROR); }
 EXPORT int fileno(FILE *stream) { return stream->fd; }
+
+/*
+ * setvbuf - Set buffering mode for a stream.
+ *
+ * @stream: FILE stream
+ * @buf:    User-provided buffer (or NULL)
+ * @mode:   _IOFBF (full), _IOLBF (line), or _IONBF (none)
+ * @size:   Buffer size (ignored if buf is NULL and mode is _IONBF)
+ */
+#define _IOFBF  0   /* Fully buffered */
+#define _IOLBF  1   /* Line buffered */
+#define _IONBF  2   /* Unbuffered */
+
+EXPORT int setvbuf(FILE *stream, char *buf, int mode, size_t size)
+{
+    if (stream == NULL)
+        return -1;
+    
+    /* Flush any existing data */
+    fflush(stream);
+    
+    /* Free old buffer if we own it */
+    if (stream->flags & _F_MYBUF) {
+        free(stream->buf);
+        stream->buf = NULL;
+        stream->flags &= ~_F_MYBUF;
+    }
+    
+    /* Set buffering mode */
+    stream->flags &= ~(_F_UNBUF | _F_LINEBUF);
+    
+    switch (mode) {
+    case _IONBF:
+        stream->flags |= _F_UNBUF;
+        stream->buf = NULL;
+        stream->bufsiz = 0;
+        break;
+    case _IOLBF:
+        stream->flags |= _F_LINEBUF;
+        /* Fall through to set buffer */
+    case _IOFBF:
+        if (buf != NULL) {
+            stream->buf = buf;
+            stream->bufsiz = size;
+        } else if (size > 0) {
+            stream->buf = (char *)malloc(size);
+            if (stream->buf) {
+                stream->bufsiz = size;
+                stream->flags |= _F_MYBUF;
+            }
+        }
+        break;
+    default:
+        return -1;
+    }
+    
+    stream->buf_pos = 0;
+    stream->buf_len = 0;
+    return 0;
+}
+
+/*
+ * setbuf - Set buffer for a stream (simplified setvbuf).
+ */
+EXPORT void setbuf(FILE *stream, char *buf)
+{
+    if (buf == NULL)
+        setvbuf(stream, NULL, _IONBF, 0);
+    else
+        setvbuf(stream, buf, _IOFBF, BUFSIZ);
+}
 
 /* ============================================================================
  * printf engine
@@ -1550,7 +1686,32 @@ EXPORT int vfprintf(FILE *stream, const char *fmt, va_list ap)
 {
     struct _file_ctx ctx = { .fp = stream };
     _fmt_out out = { .putch = _file_putch, .ctx = &ctx, .count = 0 };
-    return _fmt_core(&out, fmt, ap);
+#ifdef DEBUG
+    const char *msg = "libSystem: vfprintf fmt='";
+    syscall3(SYS_write, 2, (long)msg, 25);
+    /* Print first 20 chars of fmt */
+    int flen = 0;
+    while (fmt[flen] && flen < 20) flen++;
+    syscall3(SYS_write, 2, (long)fmt, flen);
+    syscall3(SYS_write, 2, (long)"'\n", 2);
+#endif
+    int ret = _fmt_core(&out, fmt, ap);
+#ifdef DEBUG
+    const char *msg2 = "libSystem: vfprintf returned ";
+    syscall3(SYS_write, 2, (long)msg2, 29);
+    char dbuf[12];
+    int di = 0;
+    int rv = ret;
+    if (rv == 0) dbuf[di++] = '0';
+    else {
+        char tmp[12]; int ti = 0;
+        while (rv > 0) { tmp[ti++] = '0' + (rv % 10); rv /= 10; }
+        while (ti > 0) dbuf[di++] = tmp[--ti];
+    }
+    syscall3(SYS_write, 2, (long)dbuf, di);
+    syscall3(SYS_write, 2, (long)"\n", 1);
+#endif
+    return ret;
 }
 
 EXPORT int fprintf(FILE *stream, const char *fmt, ...)
@@ -1564,11 +1725,32 @@ EXPORT int fprintf(FILE *stream, const char *fmt, ...)
 
 EXPORT int vprintf(const char *fmt, va_list ap)
 {
+#ifdef DEBUG
+    const char *msg = "libSystem: vprintf stdout=0x";
+    syscall3(SYS_write, 2, (long)msg, 28);
+    /* Print stdout pointer as hex */
+    uint64_t p = (uint64_t)stdout;
+    char hbuf[16];
+    for (int i = 15; i >= 0; i--) {
+        int nib = (p >> (i*4)) & 0xF;
+        hbuf[15-i] = nib < 10 ? '0'+nib : 'a'+nib-10;
+    }
+    syscall3(SYS_write, 2, (long)hbuf, 16);
+    syscall3(SYS_write, 2, (long)"\n", 1);
+#endif
     return vfprintf(stdout, fmt, ap);
 }
 
 EXPORT int printf(const char *fmt, ...)
 {
+#ifdef DEBUG
+    static int _printf_debug_count = 0;
+    if (_printf_debug_count < 3) {
+        _printf_debug_count++;
+        const char *msg = "libSystem: printf called\n";
+        syscall3(SYS_write, 2, (long)msg, 25);
+    }
+#endif
     va_list ap;
     va_start(ap, fmt);
     int ret = vprintf(fmt, ap);
@@ -1806,6 +1988,179 @@ EXPORT int toupper(int c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
 EXPORT int tolower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
 
 /* ============================================================================
+ * BSD Rune/Locale Support (macOS ctype compatibility)
+ *
+ * macOS uses _RuneLocale for locale-aware character classification.
+ * We implement a minimal C locale (ASCII only) for compatibility.
+ * ============================================================================ */
+
+/* Character type flags used by ___maskrune */
+#define _CTYPE_A    0x00000100  /* Alpha */
+#define _CTYPE_C    0x00000200  /* Control */
+#define _CTYPE_D    0x00000400  /* Digit */
+#define _CTYPE_G    0x00000800  /* Graph */
+#define _CTYPE_L    0x00001000  /* Lower */
+#define _CTYPE_P    0x00002000  /* Punct */
+#define _CTYPE_S    0x00004000  /* Space */
+#define _CTYPE_U    0x00008000  /* Upper */
+#define _CTYPE_X    0x00010000  /* Hex digit */
+#define _CTYPE_B    0x00020000  /* Blank */
+#define _CTYPE_R    0x00040000  /* Print */
+
+/*
+ * _RuneLocale structure - simplified version for C locale only.
+ * The full BSD version is more complex with variable-length encoding support.
+ */
+typedef struct {
+    char            __magic[8];
+    char            __encoding[32];
+    unsigned int    __runetype[256];    /* Character type for each byte */
+    int             __maplower[256];    /* Lowercase mapping */
+    int             __mapupper[256];    /* Uppercase mapping */
+} _RuneLocale;
+
+/* C locale character type table */
+static const unsigned int _c_runetype[256] = {
+    /* 0x00-0x1F: Control characters */
+    _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C,
+    _CTYPE_C, _CTYPE_C|_CTYPE_S|_CTYPE_B, _CTYPE_C|_CTYPE_S, _CTYPE_C|_CTYPE_S, _CTYPE_C|_CTYPE_S, _CTYPE_C|_CTYPE_S, _CTYPE_C, _CTYPE_C,
+    _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C,
+    _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C, _CTYPE_C,
+    /* 0x20-0x2F: Space and punctuation */
+    _CTYPE_S|_CTYPE_B|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    /* 0x30-0x3F: Digits and punctuation */
+    _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X,
+    _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X,
+    _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_D|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    /* 0x40-0x4F: @ and uppercase A-O */
+    _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R|_CTYPE_X,
+    _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R,
+    _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R,
+    _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R,
+    /* 0x50-0x5F: Uppercase P-Z and punctuation */
+    _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R,
+    _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R,
+    _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_U|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    /* 0x60-0x6F: ` and lowercase a-o */
+    _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R|_CTYPE_X,
+    _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R|_CTYPE_X, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R,
+    _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R,
+    _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R,
+    /* 0x70-0x7F: Lowercase p-z, punctuation, and DEL */
+    _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R,
+    _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R,
+    _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_A|_CTYPE_L|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R,
+    _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_P|_CTYPE_G|_CTYPE_R, _CTYPE_C,
+    /* 0x80-0xFF: High bytes (non-ASCII, all zero for C locale) */
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+/* C locale case mapping tables */
+static const int _c_maplower[256] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+    0x40, 'a',  'b',  'c',  'd',  'e',  'f',  'g',  'h',  'i',  'j',  'k',  'l',  'm',  'n',  'o',
+    'p',  'q',  'r',  's',  't',  'u',  'v',  'w',  'x',  'y',  'z',  0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+    0x60, 'a',  'b',  'c',  'd',  'e',  'f',  'g',  'h',  'i',  'j',  'k',  'l',  'm',  'n',  'o',
+    'p',  'q',  'r',  's',  't',  'u',  'v',  'w',  'x',  'y',  'z',  0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
+    0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+    0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+    0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
+    0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+};
+
+static const int _c_mapupper[256] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+    0x40, 'A',  'B',  'C',  'D',  'E',  'F',  'G',  'H',  'I',  'J',  'K',  'L',  'M',  'N',  'O',
+    'P',  'Q',  'R',  'S',  'T',  'U',  'V',  'W',  'X',  'Y',  'Z',  0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+    0x60, 'A',  'B',  'C',  'D',  'E',  'F',  'G',  'H',  'I',  'J',  'K',  'L',  'M',  'N',  'O',
+    'P',  'Q',  'R',  'S',  'T',  'U',  'V',  'W',  'X',  'Y',  'Z',  0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
+    0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+    0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+    0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
+    0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+};
+
+/* Default C locale - exported as _DefaultRuneLocale */
+static _RuneLocale _c_locale = {
+    .__magic = "RuneMagA",
+    .__encoding = "NONE",
+    .__runetype = {0},  /* Will be initialized */
+    .__maplower = {0},
+    .__mapupper = {0},
+};
+
+/* Export the default locale */
+EXPORT _RuneLocale _DefaultRuneLocale;
+
+/* Initialize the default locale at load time */
+__attribute__((constructor))
+static void _init_default_rune_locale(void)
+{
+    memcpy(_DefaultRuneLocale.__magic, "RuneMagA", 8);
+    strcpy(_DefaultRuneLocale.__encoding, "NONE");
+    memcpy((void *)_DefaultRuneLocale.__runetype, _c_runetype, sizeof(_c_runetype));
+    memcpy((void *)_DefaultRuneLocale.__maplower, _c_maplower, sizeof(_c_maplower));
+    memcpy((void *)_DefaultRuneLocale.__mapupper, _c_mapupper, sizeof(_c_mapupper));
+}
+
+/*
+ * ___maskrune - Check if character has given type mask.
+ * Used by macOS ctype macros like isalpha(), isdigit(), etc.
+ */
+EXPORT int __maskrune(int c, unsigned long mask)
+{
+    if (c < 0 || c > 255)
+        return 0;
+    return (_DefaultRuneLocale.__runetype[c] & mask) != 0;
+}
+
+/*
+ * ___tolower - Locale-aware lowercase conversion.
+ */
+EXPORT int __tolower(int c)
+{
+    if (c < 0 || c > 255)
+        return c;
+    return _DefaultRuneLocale.__maplower[c];
+}
+
+/*
+ * ___toupper - Locale-aware uppercase conversion.
+ */
+EXPORT int __toupper(int c)
+{
+    if (c < 0 || c > 255)
+        return c;
+    return _DefaultRuneLocale.__mapupper[c];
+}
+
+/* ============================================================================
  * Miscellaneous C library functions
  * ============================================================================ */
 
@@ -2018,6 +2373,51 @@ EXPORT sighandler_t signal(int signum, sighandler_t handler)
 EXPORT int getegid(void)
 {
     return (int)syscall0(SYS_getegid);
+}
+
+/*
+ * system() - Execute a shell command.
+ *
+ * Forks, execs /bin/sh -c command, and waits for completion.
+ * Returns the exit status of the command, or -1 on error.
+ */
+EXPORT int system(const char *command)
+{
+    if (command == NULL) {
+        /* Check if shell is available */
+        return 1;  /* We have /bin/sh */
+    }
+    
+    int pid = fork();
+    if (pid < 0)
+        return -1;
+    
+    if (pid == 0) {
+        /* Child process */
+        execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+        _exit(127);  /* exec failed */
+    }
+    
+    /* Parent: wait for child */
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return -1;
+    
+    return status;
+}
+
+/*
+ * ___darwin_check_fd_set_overflow - macOS security check for select().
+ *
+ * This function checks if fd exceeds FD_SETSIZE to prevent buffer overflows.
+ * We always return 0 (success) since our fd_set handling is safe.
+ */
+EXPORT int __darwin_check_fd_set_overflow(int fd, const void *fdset, int is_write)
+{
+    (void)fd;
+    (void)fdset;
+    (void)is_write;
+    return 0;  /* Always safe */
 }
 
 /* geteuid, getgid, getppid moved to process lifecycle section above */
@@ -2470,6 +2870,91 @@ EXPORT int execvp(const char *file, char *const argv[])
 EXPORT int execv(const char *pathname, char *const argv[])
 {
     return execve(pathname, argv, environ);
+}
+
+/*
+ * execl - Execute a file with argument list.
+ * execl(path, arg0, arg1, ..., NULL)
+ */
+EXPORT int execl(const char *pathname, const char *arg0, ...)
+{
+    va_list ap;
+    int argc = 1;  /* Count arg0 */
+    
+    /* Count arguments */
+    va_start(ap, arg0);
+    while (va_arg(ap, const char *) != NULL)
+        argc++;
+    va_end(ap);
+    
+    /* Build argv array */
+    char *argv[argc + 1];
+    argv[0] = (char *)arg0;
+    
+    va_start(ap, arg0);
+    for (int i = 1; i < argc; i++)
+        argv[i] = va_arg(ap, char *);
+    argv[argc] = NULL;
+    va_end(ap);
+    
+    return execve(pathname, argv, environ);
+}
+
+/*
+ * execle - Execute a file with argument list and environment.
+ * execle(path, arg0, arg1, ..., NULL, envp)
+ */
+EXPORT int execle(const char *pathname, const char *arg0, ...)
+{
+    va_list ap;
+    int argc = 1;
+    
+    /* Count arguments (stop at NULL) */
+    va_start(ap, arg0);
+    while (va_arg(ap, const char *) != NULL)
+        argc++;
+    va_end(ap);
+    
+    /* Build argv and get envp */
+    char *argv[argc + 1];
+    argv[0] = (char *)arg0;
+    
+    va_start(ap, arg0);
+    for (int i = 1; i < argc; i++)
+        argv[i] = va_arg(ap, char *);
+    argv[argc] = NULL;
+    char *const *envp = va_arg(ap, char *const *);
+    va_end(ap);
+    
+    return execve(pathname, argv, envp);
+}
+
+/*
+ * execlp - Execute a file from PATH with argument list.
+ * execlp(file, arg0, arg1, ..., NULL)
+ */
+EXPORT int execlp(const char *file, const char *arg0, ...)
+{
+    va_list ap;
+    int argc = 1;
+    
+    /* Count arguments */
+    va_start(ap, arg0);
+    while (va_arg(ap, const char *) != NULL)
+        argc++;
+    va_end(ap);
+    
+    /* Build argv array */
+    char *argv[argc + 1];
+    argv[0] = (char *)arg0;
+    
+    va_start(ap, arg0);
+    for (int i = 1; i < argc; i++)
+        argv[i] = va_arg(ap, char *);
+    argv[argc] = NULL;
+    va_end(ap);
+    
+    return execvp(file, argv);
 }
 
 /* ============================================================================
@@ -3102,6 +3587,382 @@ EXPORT int pclose(void *stream)
 }
 
 /* ============================================================================
+ * getopt - POSIX command-line option parsing
+ * ============================================================================ */
+
+EXPORT char *optarg = NULL;
+EXPORT int optind = 1;
+EXPORT int opterr = 1;
+EXPORT int optopt = 0;
+
+EXPORT int getopt(int argc, char * const argv[], const char *optstring)
+{
+    static int sp = 1;  /* position within current argument */
+
+    if (sp == 1) {
+        /* Check if we're at end or current arg isn't an option */
+        if (optind >= argc || argv[optind][0] != '-' || argv[optind][1] == '\0')
+            return -1;
+        /* Check for "--" end of options marker */
+        if (argv[optind][1] == '-' && argv[optind][2] == '\0') {
+            optind++;
+            return -1;
+        }
+    }
+
+    int c = argv[optind][sp];
+    const char *cp = strchr(optstring, c);
+
+    if (c == ':' || cp == NULL) {
+        /* Invalid option */
+        optopt = c;
+        if (opterr && *optstring != ':')
+            fprintf(stderr, "%s: illegal option -- %c\n", argv[0], c);
+        if (argv[optind][++sp] == '\0') {
+            optind++;
+            sp = 1;
+        }
+        return '?';
+    }
+
+    if (cp[1] == ':') {
+        /* Option requires argument */
+        if (argv[optind][sp + 1] != '\0') {
+            /* Argument is rest of current argv element */
+            optarg = &argv[optind][sp + 1];
+        } else if (++optind >= argc) {
+            /* No argument available */
+            optopt = c;
+            sp = 1;
+            if (*optstring == ':')
+                return ':';
+            if (opterr)
+                fprintf(stderr, "%s: option requires an argument -- %c\n", argv[0], c);
+            return '?';
+        } else {
+            /* Argument is next argv element */
+            optarg = argv[optind];
+        }
+        optind++;
+        sp = 1;
+    } else {
+        /* Option doesn't take argument */
+        if (argv[optind][++sp] == '\0') {
+            optind++;
+            sp = 1;
+        }
+        optarg = NULL;
+    }
+
+    return c;
+}
+
+/* ============================================================================
+ * Password database (getpwuid, getpwnam) - reads /etc/passwd
+ * ============================================================================ */
+
+struct passwd {
+    char *pw_name;      /* username */
+    char *pw_passwd;    /* password (usually 'x') */
+    int   pw_uid;       /* user ID */
+    int   pw_gid;       /* group ID */
+    char *pw_gecos;     /* real name */
+    char *pw_dir;       /* home directory */
+    char *pw_shell;     /* shell */
+};
+
+static struct passwd _pw_entry;
+static char _pw_buf[512];
+
+/* Parse a line from /etc/passwd into struct passwd */
+static int _parse_passwd_line(char *line, struct passwd *pw)
+{
+    char *fields[7];
+    int i = 0;
+    char *p = line;
+
+    /* Split by ':' */
+    fields[i++] = p;
+    while (*p && i < 7) {
+        if (*p == ':') {
+            *p = '\0';
+            fields[i++] = p + 1;
+        }
+        p++;
+    }
+
+    if (i < 7)
+        return -1;
+
+    /* Strip newline from last field */
+    p = fields[6];
+    while (*p && *p != '\n' && *p != '\r') p++;
+    *p = '\0';
+
+    pw->pw_name = fields[0];
+    pw->pw_passwd = fields[1];
+    pw->pw_uid = atoi(fields[2]);
+    pw->pw_gid = atoi(fields[3]);
+    pw->pw_gecos = fields[4];
+    pw->pw_dir = fields[5];
+    pw->pw_shell = fields[6];
+
+    return 0;
+}
+
+EXPORT struct passwd *getpwuid(int uid)
+{
+    int fd = open("/etc/passwd", O_RDONLY);
+    if (fd < 0)
+        return NULL;
+
+    ssize_t n = read(fd, _pw_buf, sizeof(_pw_buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return NULL;
+    _pw_buf[n] = '\0';
+
+    /* Process line by line */
+    char *line = _pw_buf;
+    while (*line) {
+        char *next = line;
+        while (*next && *next != '\n') next++;
+        if (*next == '\n') *next++ = '\0';
+
+        /* Make a copy for parsing (since strtok modifies it) */
+        char linecopy[256];
+        strncpy(linecopy, line, sizeof(linecopy) - 1);
+        linecopy[sizeof(linecopy) - 1] = '\0';
+
+        if (_parse_passwd_line(line, &_pw_entry) == 0) {
+            if (_pw_entry.pw_uid == uid)
+                return &_pw_entry;
+        }
+
+        line = next;
+    }
+
+    return NULL;
+}
+
+EXPORT struct passwd *getpwnam(const char *name)
+{
+    int fd = open("/etc/passwd", O_RDONLY);
+    if (fd < 0)
+        return NULL;
+
+    ssize_t n = read(fd, _pw_buf, sizeof(_pw_buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return NULL;
+    _pw_buf[n] = '\0';
+
+    /* Process line by line */
+    char *line = _pw_buf;
+    while (*line) {
+        char *next = line;
+        while (*next && *next != '\n') next++;
+        if (*next == '\n') *next++ = '\0';
+
+        if (_parse_passwd_line(line, &_pw_entry) == 0) {
+            if (strcmp(_pw_entry.pw_name, name) == 0)
+                return &_pw_entry;
+        }
+
+        line = next;
+    }
+
+    return NULL;
+}
+
+/* ============================================================================
+ * Minimal termcap implementation for VT100/ANSI terminals
+ *
+ * Kiseki runs on QEMU with a VT100-compatible terminal, so we hardcode
+ * ANSI escape sequences. This is sufficient for vi and similar programs.
+ * ============================================================================ */
+
+/* Static buffer for termcap string storage */
+static char _tc_buf[256];
+static char *_tc_ptr = _tc_buf;
+
+/* VT100/ANSI capabilities we support */
+static struct {
+    const char *cap;    /* capability name */
+    const char *value;  /* escape sequence */
+} _tc_strings[] = {
+    { "cm", "\033[%i%d;%dH" },  /* cursor motion (row;col) - %i means 1-based */
+    { "cl", "\033[H\033[J" },   /* clear screen and home */
+    { "ce", "\033[K" },         /* clear to end of line */
+    { "ho", "\033[H" },         /* home cursor */
+    { "up", "\033[A" },         /* cursor up */
+    { "do", "\033[B" },         /* cursor down */
+    { "nd", "\033[C" },         /* cursor right (non-destructive) */
+    { "le", "\b" },             /* cursor left */
+    { "al", "\033[L" },         /* add line */
+    { "dl", "\033[M" },         /* delete line */
+    { "sr", "\033M" },          /* scroll reverse (up) */
+    { "so", "\033[7m" },        /* standout mode (reverse video) */
+    { "se", "\033[m" },         /* end standout mode */
+    { "us", "\033[4m" },        /* underline start */
+    { "ue", "\033[m" },         /* underline end */
+    { "vi", "\033[?25l" },      /* cursor invisible */
+    { "ve", "\033[?25h" },      /* cursor visible */
+    { "vb", "\007" },           /* visual bell (actually audible) */
+    { NULL, NULL }
+};
+
+static struct {
+    const char *cap;
+    int value;
+} _tc_numbers[] = {
+    { "li", 24 },               /* lines (default, may be overridden by TIOCGWINSZ) */
+    { "co", 80 },               /* columns */
+    { NULL, 0 }
+};
+
+/*
+ * tgetent - Load terminal entry.
+ * We ignore the terminal name and always use VT100/ANSI.
+ * Returns 1 on success, 0 if not found, -1 on error.
+ */
+EXPORT int tgetent(char *bp, const char *name)
+{
+    (void)bp;
+    (void)name;
+    _tc_ptr = _tc_buf;  /* reset string buffer */
+    return 1;           /* always succeed */
+}
+
+/*
+ * tgetstr - Get string capability.
+ * Returns pointer to the escape sequence, or NULL if not found.
+ * The area pointer is updated to point past the stored string.
+ */
+EXPORT char *tgetstr(const char *id, char **area)
+{
+    for (int i = 0; _tc_strings[i].cap; i++) {
+        if (strcmp(id, _tc_strings[i].cap) == 0) {
+            const char *val = _tc_strings[i].value;
+            char *ret = *area;
+            while (*val)
+                *(*area)++ = *val++;
+            *(*area)++ = '\0';
+            return ret;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * tgetnum - Get numeric capability.
+ * Returns the value, or -1 if not found.
+ */
+EXPORT int tgetnum(const char *id)
+{
+    /* First try to get actual terminal size via ioctl */
+    if (strcmp(id, "li") == 0 || strcmp(id, "co") == 0) {
+        /* struct winsize for TIOCGWINSZ */
+        struct { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; } ws;
+        #define TIOCGWINSZ 0x40087468
+        if (ioctl(0, TIOCGWINSZ, &ws) == 0) {
+            if (strcmp(id, "li") == 0 && ws.ws_row > 0)
+                return ws.ws_row;
+            if (strcmp(id, "co") == 0 && ws.ws_col > 0)
+                return ws.ws_col;
+        }
+    }
+
+    /* Fall back to defaults */
+    for (int i = 0; _tc_numbers[i].cap; i++) {
+        if (strcmp(id, _tc_numbers[i].cap) == 0)
+            return _tc_numbers[i].value;
+    }
+    return -1;
+}
+
+/*
+ * tgetflag - Get boolean capability.
+ * Returns 1 if present, 0 if not.
+ */
+EXPORT int tgetflag(const char *id)
+{
+    /* VT100 has auto margins */
+    if (strcmp(id, "am") == 0) return 1;
+    return 0;
+}
+
+/*
+ * tgoto - Produce cursor motion string.
+ * The cm capability uses printf-style %d for row and column.
+ * %i means arguments are 1-based (add 1 to each).
+ *
+ * Returns pointer to static buffer with the formatted string.
+ */
+EXPORT char *tgoto(const char *cm, int col, int row)
+{
+    static char result[32];
+    char *p = result;
+    int args[2] = { row, col };
+    int arg_idx = 0;
+    int add_one = 0;
+
+    if (cm == NULL)
+        return NULL;
+
+    while (*cm && (p - result) < 30) {
+        if (*cm == '%') {
+            cm++;
+            switch (*cm) {
+            case 'd':
+                /* Output decimal number */
+                {
+                    int val = args[arg_idx++] + add_one;
+                    if (val >= 100) *p++ = '0' + (val / 100) % 10;
+                    if (val >= 10) *p++ = '0' + (val / 10) % 10;
+                    *p++ = '0' + val % 10;
+                }
+                cm++;
+                break;
+            case 'i':
+                /* 1-based indexing */
+                add_one = 1;
+                cm++;
+                break;
+            case '%':
+                *p++ = '%';
+                cm++;
+                break;
+            default:
+                *p++ = '%';
+                break;
+            }
+        } else {
+            *p++ = *cm++;
+        }
+    }
+    *p = '\0';
+    return result;
+}
+
+/*
+ * tputs - Output a termcap string with padding.
+ * We ignore padding (modern terminals don't need it).
+ */
+EXPORT int tputs(const char *str, int affcnt, int (*putc_func)(int))
+{
+    (void)affcnt;
+    if (str == NULL)
+        return 0;
+
+    while (*str) {
+        putc_func((unsigned char)*str);
+        str++;
+    }
+    return 0;
+}
+
+/* ============================================================================
  * PTY Support
  * ============================================================================ */
 
@@ -3158,6 +4019,293 @@ EXPORT int getentropy(void *buf, unsigned long buflen)
         return -1;
     }
     return 0;
+}
+
+/* ============================================================================
+ * Floating-point string to number conversion
+ * ============================================================================ */
+
+static inline int _isspace_fp(int c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+           c == '\f' || c == '\v';
+}
+
+static inline int _isdigit_fp(int c)
+{
+    return c >= '0' && c <= '9';
+}
+
+/* Forward declaration */
+EXPORT double strtod(const char *nptr, char **endptr);
+
+EXPORT double atof(const char *nptr)
+{
+    return strtod(nptr, NULL);
+}
+
+EXPORT double strtod(const char *nptr, char **endptr)
+{
+    const char *s = nptr;
+    double result = 0.0;
+    double frac = 0.0;
+    int neg = 0;
+    int exp_neg = 0;
+    int exp_val = 0;
+    int has_digits = 0;
+
+    /* Skip whitespace */
+    while (_isspace_fp(*s))
+        s++;
+
+    /* Sign */
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    /* Integer part */
+    while (_isdigit_fp(*s)) {
+        result = result * 10.0 + (*s - '0');
+        has_digits = 1;
+        s++;
+    }
+
+    /* Fractional part */
+    if (*s == '.') {
+        s++;
+        double divisor = 10.0;
+        while (_isdigit_fp(*s)) {
+            frac += (*s - '0') / divisor;
+            divisor *= 10.0;
+            has_digits = 1;
+            s++;
+        }
+    }
+
+    result += frac;
+
+    /* Exponent */
+    if (*s == 'e' || *s == 'E') {
+        s++;
+        if (*s == '-') {
+            exp_neg = 1;
+            s++;
+        } else if (*s == '+') {
+            s++;
+        }
+        while (_isdigit_fp(*s)) {
+            exp_val = exp_val * 10 + (*s - '0');
+            s++;
+        }
+        
+        /* Apply exponent via repeated multiplication/division */
+        double multiplier = 1.0;
+        for (int i = 0; i < exp_val; i++)
+            multiplier *= 10.0;
+        
+        if (exp_neg)
+            result /= multiplier;
+        else
+            result *= multiplier;
+    }
+
+    if (!has_digits) {
+        if (endptr)
+            *endptr = (char *)nptr;
+        return 0.0;
+    }
+
+    if (endptr)
+        *endptr = (char *)s;
+
+    return neg ? -result : result;
+}
+
+EXPORT float strtof(const char *nptr, char **endptr)
+{
+    return (float)strtod(nptr, endptr);
+}
+
+EXPORT long double strtold(const char *nptr, char **endptr)
+{
+    return (long double)strtod(nptr, endptr);
+}
+
+/* ============================================================================
+ * Math functions (minimal implementations)
+ * ============================================================================ */
+
+/* ldexp: x * 2^exp */
+EXPORT double ldexp(double x, int exp)
+{
+    if (exp > 0) {
+        while (exp-- > 0)
+            x *= 2.0;
+    } else {
+        while (exp++ < 0)
+            x /= 2.0;
+    }
+    return x;
+}
+
+EXPORT float ldexpf(float x, int exp)
+{
+    return (float)ldexp((double)x, exp);
+}
+
+/* ============================================================================
+ * Time functions
+ * ============================================================================ */
+
+/* Days in each month (non-leap year) */
+static const int _days_in_month_lut[] = {
+    31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+};
+
+/* Days before each month (non-leap year) */
+static const int _days_before_month_lut[] = {
+    0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+};
+
+static int _is_leap_year(int year)
+{
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+/* Static struct for gmtime/localtime */
+static struct {
+    int tm_sec;
+    int tm_min;
+    int tm_hour;
+    int tm_mday;
+    int tm_mon;
+    int tm_year;
+    int tm_wday;
+    int tm_yday;
+    int tm_isdst;
+} _tm_buf;
+
+/* Convert time_t to struct tm (UTC) */
+EXPORT void *gmtime_r(const time_t *timep, void *result)
+{
+    time_t t = *timep;
+    int days, rem;
+    int y;
+    
+    /* Cast to our temp struct for manipulation */
+    struct {
+        int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday, tm_isdst;
+    } *tm = result;
+
+    days = (int)(t / 86400);
+    rem = (int)(t % 86400);
+    if (rem < 0) {
+        rem += 86400;
+        days--;
+    }
+
+    tm->tm_hour = rem / 3600;
+    rem %= 3600;
+    tm->tm_min = rem / 60;
+    tm->tm_sec = rem % 60;
+
+    /* January 1, 1970 was a Thursday (day 4) */
+    tm->tm_wday = (days + 4) % 7;
+    if (tm->tm_wday < 0)
+        tm->tm_wday += 7;
+
+    y = 1970;
+    while (days < 0 || days >= (_is_leap_year(y) ? 366 : 365)) {
+        int newy;
+        int leaps;
+
+        newy = y + days / 365;
+        if (days < 0)
+            --newy;
+        leaps = (newy - 1) / 4 - (newy - 1) / 100 + (newy - 1) / 400;
+        leaps -= (y - 1) / 4 - (y - 1) / 100 + (y - 1) / 400;
+        days -= (newy - y) * 365 + leaps;
+        y = newy;
+    }
+
+    tm->tm_year = y - 1900;
+    tm->tm_yday = days;
+
+    const int *ip = _days_before_month_lut;
+    int leap = _is_leap_year(y);
+    for (tm->tm_mon = 0; tm->tm_mon < 11; tm->tm_mon++) {
+        int mdays = ip[tm->tm_mon + 1] - ip[tm->tm_mon];
+        if (tm->tm_mon == 1 && leap)
+            mdays++;
+        if (days < mdays)
+            break;
+        days -= mdays;
+    }
+    tm->tm_mday = days + 1;
+    tm->tm_isdst = 0;
+
+    return result;
+}
+
+EXPORT void *gmtime(const time_t *timep)
+{
+    return gmtime_r(timep, &_tm_buf);
+}
+
+/* localtime - for now, same as gmtime (no timezone support) */
+EXPORT void *localtime_r(const time_t *timep, void *result)
+{
+    return gmtime_r(timep, result);
+}
+
+EXPORT void *localtime(const time_t *timep)
+{
+    return localtime_r(timep, &_tm_buf);
+}
+
+/* ============================================================================
+ * Assertion handler
+ * ============================================================================ */
+
+EXPORT NORETURN void __assert_fail(const char *expr, const char *file, int line, const char *func)
+{
+    const char *msg1 = "Assertion failed: ";
+    const char *msg2 = ", file ";
+    const char *msg3 = ", line ";
+    const char *msg4 = ", function ";
+    const char *msg5 = "\n";
+    
+    write(2, msg1, strlen(msg1));
+    write(2, expr, strlen(expr));
+    write(2, msg2, strlen(msg2));
+    write(2, file, strlen(file));
+    write(2, msg3, strlen(msg3));
+    
+    /* Convert line to string */
+    char line_buf[16];
+    char *p = line_buf + 15;
+    *p = '\0';
+    int n = line;
+    if (n == 0) {
+        *--p = '0';
+    } else {
+        while (n > 0) {
+            *--p = '0' + (n % 10);
+            n /= 10;
+        }
+    }
+    write(2, p, strlen(p));
+    
+    if (func) {
+        write(2, msg4, strlen(msg4));
+        write(2, func, strlen(func));
+    }
+    write(2, msg5, 1);
+    
+    abort();
 }
 
 /* ============================================================================

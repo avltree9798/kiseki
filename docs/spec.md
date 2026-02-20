@@ -38,9 +38,10 @@ The project embodies a conviction: that the best way to understand a system is t
 Kiseki is a Unix-like operating system that runs native macOS ARM64 CLI binaries on non-Apple hardware. It achieves this by implementing a clean-room version of the XNU kernel interfaces - Mach traps and BSD syscalls - while targeting standard virtualised and embedded ARM64 platforms.
 
 The system comprises:
-- A **hybrid kernel** (~21,000 lines of C and ARM64 assembly) implementing the Mach microkernel, BSD personality, Ext4 filesystem, TCP/IP networking, and device drivers
-- A **dynamic linker** (dyld) and **C library** (libSystem.B.dylib, ~3,100 lines) providing the Darwin userland ABI
-- **68 Mach-O userland binaries** including bash, awk, sed, grep, curl, and a full set of coreutils
+- A **hybrid kernel** (~22,000 lines of C and ARM64 assembly) implementing the Mach microkernel, BSD personality, Ext4 filesystem, TCP/IP networking, and device drivers
+- A **dynamic linker** (dyld) and **C library** (libSystem.B.dylib, ~3,200 lines) providing the Darwin userland ABI
+- **75 Mach-O userland binaries** including bash, awk, sed, grep, curl, TCC compiler, and a full set of coreutils
+- A **native C compiler** (TCC) that runs on Kiseki and produces working Mach-O ARM64 binaries
 - A **4-core SMP** scheduler with pre-emptive multitasking
 - A complete **TCP/IP stack** with BSD socket API
 - A **pseudo-terminal** subsystem for remote shell sessions
@@ -404,7 +405,7 @@ Full read/write Ext4 implementation supporting:
 - **Superblock**: Magic `0xEF53`, dynamic revision.
 - **Block groups**: Group descriptor table with free block/inode tracking.
 - **Extents** (`EXT4_FEATURE_INCOMPAT_EXTENTS`): Tree-based block allocation with extent header magic `0xF30A`.
-- **Legacy block map**: Direct blocks (0–11), indirect (12), double indirect (13), triple indirect (14).
+- **Legacy block map**: Direct blocks (0–11), indirect (12), double indirect (13), triple indirect (14). Full read/write support for indirect blocks enables files larger than 48KB on 4KB block filesystems.
 - **Directories**: Linear and HTree indexed (`EXT4_FEATURE_COMPAT_DIR_INDEX`).
 - **Inode sizes**: 128-byte or 256-byte with extended attributes.
 - **File types**: Regular, directory, symlink, character device, block device, FIFO, socket.
@@ -740,9 +741,11 @@ Freestanding C library (~3,200 lines) providing:
 - **System**: `sysctl`, `getentropy`, `sysconf`, `popen`, `pclose`, `system`.
 - **Mach**: Inline `__syscall()` wrapper for `svc #0x80`.
 
-### 13.3. Userland Binaries (74 Mach-O executables)
+### 13.3. Userland Binaries (75 Mach-O executables)
 
 **Shell:** bash (full implementation with lexer, parser, executor, job control, builtins, readline, `time` keyword)
+
+**Compiler:** TCC (Tiny C Compiler) - native C compiler that produces working Mach-O ARM64 binaries
 
 **System daemons:** init, getty, login, halt, reboot, shutdown, sshd
 
@@ -751,6 +754,31 @@ Freestanding C library (~3,200 lines) providing:
 **Coreutils:** awk, basename, cat, chmod, chown, clear, cp, curl, cut, date, df, dirname, du, echo, env, expr, false, find, grep, head, hostname, ifconfig, kill, ln, ls, mkdir, mount, mv, nc, ntpdate, ping, printf, ps, rm, rmdir, sed, sleep, sort, sync, tail, tee, test, time, timeout, touch, tr, true, umount, uname, uniq, wc, which, xargs, yes
 
 All compiled with `clang -target arm64-apple-macos11` using the macOS SDK headers, producing standard Mach-O binaries that link against libSystem.B.dylib.
+
+### 13.4. TCC (Tiny C Compiler)
+
+Kiseki includes a fully functional port of TCC that runs natively and produces ARM64 Mach-O executables:
+
+**Capabilities:**
+- Compiles C99 code to ARM64 machine code
+- Generates proper Mach-O executable format with LC_MAIN, LC_LOAD_DYLIB, LC_LOAD_DYLINKER
+- Dynamic linking against libSystem.B.dylib
+- Produces binaries that work identically to clang-compiled ones
+
+**Usage:**
+```bash
+# Compile and run a C program on Kiseki
+echo '#include <stdio.h>
+int main() { printf("Hello from TCC!\\n"); return 0; }' > hello.c
+tcc -o hello hello.c
+./hello
+```
+
+**Implementation notes:**
+- Custom `tccmacho.c` backend generates Mach-O instead of ELF
+- ARM64 code generation via `arm64-gen.c`
+- Stub generation for lazy symbol binding (dyld compatibility)
+- String constants properly placed in `__DATA,__data` section
 
 ---
 

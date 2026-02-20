@@ -726,3 +726,158 @@ char *itoa(int value, char *str, int base)
 
     return str;
 }
+
+/* ============================================================================
+ * Floating-point string to number conversion
+ * ============================================================================ */
+
+double atof(const char *nptr)
+{
+    return strtod(nptr, NULL);
+}
+
+double strtod(const char *nptr, char **endptr)
+{
+    const char *s = nptr;
+    double result = 0.0;
+    double frac = 0.0;
+    int neg = 0;
+    int exp_neg = 0;
+    int exp_val = 0;
+    int has_digits = 0;
+
+    /* Skip whitespace */
+    while (_isspace(*s))
+        s++;
+
+    /* Sign */
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    /* Integer part */
+    while (_isdigit(*s)) {
+        result = result * 10.0 + (*s - '0');
+        has_digits = 1;
+        s++;
+    }
+
+    /* Fractional part */
+    if (*s == '.') {
+        s++;
+        double divisor = 10.0;
+        while (_isdigit(*s)) {
+            frac += (*s - '0') / divisor;
+            divisor *= 10.0;
+            has_digits = 1;
+            s++;
+        }
+    }
+
+    result += frac;
+
+    /* Exponent */
+    if (*s == 'e' || *s == 'E') {
+        s++;
+        if (*s == '-') {
+            exp_neg = 1;
+            s++;
+        } else if (*s == '+') {
+            s++;
+        }
+        while (_isdigit(*s)) {
+            exp_val = exp_val * 10 + (*s - '0');
+            s++;
+        }
+        
+        /* Apply exponent via repeated multiplication/division */
+        double multiplier = 1.0;
+        for (int i = 0; i < exp_val; i++)
+            multiplier *= 10.0;
+        
+        if (exp_neg)
+            result /= multiplier;
+        else
+            result *= multiplier;
+    }
+
+    if (!has_digits) {
+        if (endptr)
+            *endptr = (char *)nptr;
+        return 0.0;
+    }
+
+    if (endptr)
+        *endptr = (char *)s;
+
+    return neg ? -result : result;
+}
+
+float strtof(const char *nptr, char **endptr)
+{
+    return (float)strtod(nptr, endptr);
+}
+
+long double strtold(const char *nptr, char **endptr)
+{
+    return (long double)strtod(nptr, endptr);
+}
+
+/* ============================================================================
+ * Math functions (minimal implementations for TCC)
+ * ============================================================================ */
+
+/* ldexp: x * 2^exp */
+double ldexp(double x, int exp)
+{
+    /* Simple implementation - multiply/divide by 2 repeatedly */
+    if (exp > 0) {
+        while (exp-- > 0)
+            x *= 2.0;
+    } else {
+        while (exp++ < 0)
+            x /= 2.0;
+    }
+    return x;
+}
+
+float ldexpf(float x, int exp)
+{
+    return (float)ldexp((double)x, exp);
+}
+
+/* ============================================================================
+ * Assertion handler
+ * ============================================================================ */
+
+void __assert_fail(const char *expr, const char *file, int line, const char *func)
+{
+    /* Print to stderr (fd 2) */
+    const char *msg1 = "Assertion failed: ";
+    const char *msg2 = ", file ";
+    const char *msg3 = ", line ";
+    const char *msg4 = ", function ";
+    const char *msg5 = "\n";
+    
+    write(2, msg1, strlen(msg1));
+    write(2, expr, strlen(expr));
+    write(2, msg2, strlen(msg2));
+    write(2, file, strlen(file));
+    write(2, msg3, strlen(msg3));
+    
+    /* Convert line to string */
+    char line_buf[16];
+    itoa(line, line_buf, 10);
+    write(2, line_buf, strlen(line_buf));
+    
+    if (func) {
+        write(2, msg4, strlen(msg4));
+        write(2, func, strlen(func));
+    }
+    write(2, msg5, 1);
+    
+    abort();
+}

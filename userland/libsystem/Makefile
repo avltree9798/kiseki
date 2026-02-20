@@ -29,6 +29,11 @@ DYLIB_CFLAGS := -target arm64-apple-macos11 \
                 -O2 -Wall -Wextra \
                 -Wno-unused-parameter
 
+# Pass DEBUG flag if set
+ifdef DEBUG
+DYLIB_CFLAGS += -DDEBUG=$(DEBUG)
+endif
+
 # Link against dyld.tbd stub to resolve dyld_stub_binder
 DYLIB_LDFLAGS := -target arm64-apple-macos11 \
                  -nostdlib -shared \

@@ -30,7 +30,12 @@ typedef int64_t             ptrdiff_t;
 typedef int64_t             off_t;
 
 /* --- Boolean --- */
+#ifdef __TINYC__
+/* TCC doesn't have _Bool, use int */
+typedef int                 bool;
+#else
 typedef _Bool               bool;
+#endif
 #define true                1
 #define false               0
 
@@ -60,11 +65,7 @@ typedef uint32_t            useconds_t;
 typedef uint32_t            id_t;
 
 /* --- Variadic arguments --- */
-typedef __builtin_va_list   va_list;
-#define va_start(ap, last)  __builtin_va_start(ap, last)
-#define va_end(ap)          __builtin_va_end(ap)
-#define va_arg(ap, type)    __builtin_va_arg(ap, type)
-#define va_copy(dest, src)  __builtin_va_copy(dest, src)
+#include <stdarg.h>
 
 /* --- Limits --- */
 #define INT_MAX             0x7fffffff

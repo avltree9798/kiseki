@@ -72,6 +72,7 @@ Every working syscall is a small miracle. Every binary that loads and runs is an
 ### Filesystems
 - Ext4 read/write with extents, directory indexing, block groups
 - **Extent-based file extension**: Allocates new blocks and extends extent tree
+- **Indirect block support**: Single/double/triple indirect blocks for large files (>48KB)
 - VFS layer with mount points, path resolution, file descriptor management
 - **VFS permission model**: Unix owner/group/other with root bypass
 - devfs for `/dev/console`, `/dev/null`, `/dev/zero`, `/dev/urandom`
@@ -89,14 +90,15 @@ Every working syscall is a small miracle. Every binary that loads and runs is an
 - BSD socket API: socket, bind, listen, accept, connect, send, recv, shutdown, close
 
 ### Userland
-- **74 Mach-O binaries** on the root filesystem
+- **75 Mach-O binaries** on the root filesystem
+- **TCC (Tiny C Compiler)**: Native C compiler that runs on Kiseki and produces working Mach-O binaries
 - Full bash shell with job control, pipelines, redirections, `time` keyword
-- 59 coreutils: ls, cat, grep, awk, sed, sort, find, wc, cut, head, tail, tr, xargs, and more
+- 60 coreutils: ls, cat, grep, awk, sed, sort, find, wc, cut, head, tail, tr, xargs, and more
 - System daemons: init, getty, login (with /etc/passwd authentication)
 - Network tools: curl, nc, ping, ifconfig, ntpdate
-- User management: useradd, usermod, passwd, su, sudo, whoami, id, groups
+- User management: useradd, usermod, passwd, su, sudo, whoami, id
 - Power management: halt, reboot, shutdown
-- libSystem.B.dylib: complete freestanding C library (~3,100 lines)
+- libSystem.B.dylib: complete freestanding C library (~3,200 lines)
 
 ### Security
 - Multi-user with UID/GID enforcement (Unix discretionary access control)
@@ -185,7 +187,9 @@ kiseki/
 ├── Makefile                        # Top-level build (kernel + QEMU)
 ├── README.md
 ├── docs/
-│   └── spec.md                     # Full architecture specification
+│   ├── spec.md                     # Full architecture specification
+│   ├── implementing-syscalls.md    # Guide to adding new syscalls
+│   └── porting-software.md         # Guide to porting software to Kiseki
 ├── scripts/
 │   └── mkdisk.sh                   # Root filesystem image builder
 ├── kernel/
@@ -261,8 +265,8 @@ kiseki/
 |-----------|-------|-------|
 | Kernel (C + ASM) | 37 | ~22,000 |
 | Kernel headers | 26 | ~4,900 |
-| Userland | 75+ | ~42,000 |
-| **Total** | **138+** | **~69,000** |
+| Userland | 76+ | ~45,000 |
+| **Total** | **139+** | **~72,000** |
 
 ## Roadmap
 
@@ -275,6 +279,7 @@ kiseki/
 - [x] 60+ coreutils
 - [x] TCP/IP networking stack
 - [x] PTY subsystem
+- [x] Native C compiler (TCC)
 - [ ] SSH server (in progress)
 - [ ] vim text editor
 - [ ] Lua interpreter

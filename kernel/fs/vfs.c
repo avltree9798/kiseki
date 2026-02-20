@@ -979,9 +979,20 @@ vfs_write(int fd, const void *buf, uint64_t count)
     if (fp->f_flags & O_APPEND)
         fp->f_offset = vp->v_size;
 
+#ifdef DEBUG
+    kprintf("[vfs] write: fd=%d offset=%lu count=%lu\n",
+            fd, (unsigned long)fp->f_offset, (unsigned long)count);
+#endif
+
     int64_t nwritten = vp->v_ops->write(vp, buf, fp->f_offset, count);
     if (nwritten > 0)
         fp->f_offset += (uint64_t)nwritten;
+
+#ifdef DEBUG
+    kprintf("[vfs] write done: fd=%d nwritten=%ld newoff=%lu\n",
+            fd, (long)nwritten, (unsigned long)fp->f_offset);
+#endif
+
     spin_unlock(&fp->f_lock);
 
     return nwritten;

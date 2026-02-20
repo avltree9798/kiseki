@@ -595,10 +595,60 @@ ext4_extent_alloc_block(struct ext4_mount_info *mi, struct ext4_inode *inode,
 }
 
 /*
+ * ext4_get_indirect_block - Get a block number from an indirect block.
+ *
+ * Reads the indirect block and returns the block number at the given index.
+ * Returns 0 if the entry is not allocated (hole).
+ */
+static uint32_t
+ext4_get_indirect_block(struct ext4_mount_info *mi, uint32_t indirect_block,
+                        uint32_t index)
+{
+    if (indirect_block == 0)
+        return 0;
+
+    uint32_t ptrs_per_block = mi->block_size / sizeof(uint32_t);
+    if (index >= ptrs_per_block)
+        return 0;
+
+    uint32_t block_num = 0;
+    int err = ext4_read_fs_block(mi, indirect_block,
+                                  index * sizeof(uint32_t),
+                                  &block_num, sizeof(block_num));
+    if (err != 0)
+        return 0;
+
+    return block_num;
+}
+
+/*
+ * ext4_set_indirect_block - Set a block number in an indirect block.
+ *
+ * Writes the block number at the given index in the indirect block.
+ * Returns 0 on success, error code on failure.
+ */
+static int
+ext4_set_indirect_block(struct ext4_mount_info *mi, uint32_t indirect_block,
+                        uint32_t index, uint32_t block_num)
+{
+    if (indirect_block == 0)
+        return -EINVAL;
+
+    uint32_t ptrs_per_block = mi->block_size / sizeof(uint32_t);
+    if (index >= ptrs_per_block)
+        return -EINVAL;
+
+    return ext4_write_fs_block(mi, indirect_block,
+                                index * sizeof(uint32_t),
+                                &block_num, sizeof(block_num));
+}
+
+/*
  * ext4_bmap - Map a logical file block to a physical disk block.
  *
- * Handles both extent-based and legacy indirect block-mapped inodes.
- * (Legacy indirect blocks: only direct blocks are supported for simplicity.)
+ * Handles both extent-based and legacy block-mapped inodes.
+ * Supports direct blocks (0-11), single indirect (12), double indirect (13),
+ * and triple indirect (14) for legacy block mapping.
  */
 static int
 ext4_bmap(struct ext4_mount_info *mi, struct ext4_inode *inode,
@@ -608,7 +658,9 @@ ext4_bmap(struct ext4_mount_info *mi, struct ext4_inode *inode,
         return ext4_extent_read(mi, inode, logical, physical);
     }
 
-    /* Legacy direct block mapping (i_block[0..11]) */
+    uint32_t ptrs_per_block = mi->block_size / sizeof(uint32_t);
+
+    /* Direct blocks: i_block[0..11] */
     if (logical < EXT4_NDIR_BLOCKS) {
         uint32_t blk = inode->i_block[logical];
         if (blk == 0)
@@ -617,9 +669,64 @@ ext4_bmap(struct ext4_mount_info *mi, struct ext4_inode *inode,
         return 0;
     }
 
-    /* Indirect blocks not yet supported in this driver */
-    kprintf("ext4: indirect blocks not supported (logical=%lu)\n", logical);
-    return -ENOSYS;
+    logical -= EXT4_NDIR_BLOCKS;
+
+    /* Single indirect: i_block[12] -> block of pointers */
+    if (logical < ptrs_per_block) {
+        uint32_t blk = ext4_get_indirect_block(mi, inode->i_block[EXT4_IND_BLOCK],
+                                                (uint32_t)logical);
+        if (blk == 0)
+            return -ENOENT;
+        *physical = blk;
+        return 0;
+    }
+
+    logical -= ptrs_per_block;
+
+    /* Double indirect: i_block[13] -> block of indirect blocks */
+    if (logical < ptrs_per_block * ptrs_per_block) {
+        uint32_t idx1 = (uint32_t)(logical / ptrs_per_block);
+        uint32_t idx2 = (uint32_t)(logical % ptrs_per_block);
+
+        uint32_t ind_block = ext4_get_indirect_block(mi,
+                                inode->i_block[EXT4_DIND_BLOCK], idx1);
+        if (ind_block == 0)
+            return -ENOENT;
+
+        uint32_t blk = ext4_get_indirect_block(mi, ind_block, idx2);
+        if (blk == 0)
+            return -ENOENT;
+        *physical = blk;
+        return 0;
+    }
+
+    logical -= ptrs_per_block * ptrs_per_block;
+
+    /* Triple indirect: i_block[14] -> block of double indirect blocks */
+    if (logical < (uint64_t)ptrs_per_block * ptrs_per_block * ptrs_per_block) {
+        uint32_t idx1 = (uint32_t)(logical / (ptrs_per_block * ptrs_per_block));
+        uint32_t rem = (uint32_t)(logical % (ptrs_per_block * ptrs_per_block));
+        uint32_t idx2 = rem / ptrs_per_block;
+        uint32_t idx3 = rem % ptrs_per_block;
+
+        uint32_t dind_block = ext4_get_indirect_block(mi,
+                                inode->i_block[EXT4_TIND_BLOCK], idx1);
+        if (dind_block == 0)
+            return -ENOENT;
+
+        uint32_t ind_block = ext4_get_indirect_block(mi, dind_block, idx2);
+        if (ind_block == 0)
+            return -ENOENT;
+
+        uint32_t blk = ext4_get_indirect_block(mi, ind_block, idx3);
+        if (blk == 0)
+            return -ENOENT;
+        *physical = blk;
+        return 0;
+    }
+
+    /* File too large */
+    return -EFBIG;
 }
 
 /* ============================================================================
@@ -1812,6 +1919,12 @@ ext4_vop_write(struct vnode *vp, const void *buf, uint64_t offset,
     uint32_t bs = mi->block_size;
     int uses_extents = (ip->i_flags & EXT4_EXTENTS_FL) != 0;
 
+#ifdef DEBUG
+    kprintf("[ext4] write: ino=%lu offset=%lu count=%lu extents=%d\n",
+            (unsigned long)vd->ino, (unsigned long)offset,
+            (unsigned long)count, uses_extents);
+#endif
+
     /* Determine the preferred block group for allocation */
     uint32_t pref_group, pref_idx;
     ext4_inode_to_block(mi, vd->ino, &pref_group, &pref_idx);
@@ -1863,20 +1976,27 @@ ext4_vop_write(struct vnode *vp, const void *buf, uint64_t offset,
             }
         } else {
             /*
-             * Direct-block file: i_block[0..11] contain block numbers.
-             * We can allocate new blocks if needed.
+             * Legacy block-mapped file: supports direct blocks (0-11),
+             * single indirect (12), double indirect (13), triple indirect (14).
              */
-            if (logical_block >= EXT4_NDIR_BLOCKS) {
+            uint32_t ptrs_per_block = bs / sizeof(uint32_t);
+            uint64_t max_blocks = EXT4_NDIR_BLOCKS +
+                                  ptrs_per_block +
+                                  (uint64_t)ptrs_per_block * ptrs_per_block +
+                                  (uint64_t)ptrs_per_block * ptrs_per_block * ptrs_per_block;
+
+            if (logical_block >= max_blocks) {
                 if (bytes_written > 0)
-                    break;  /* Return what we've written so far */
+                    break;
                 return -EFBIG;
             }
 
             /* Try to map existing block first */
-            if (ip->i_block[logical_block] != 0) {
-                phys_block = ip->i_block[logical_block];
-            } else {
-                /* Allocate a new block */
+            int map_err = ext4_bmap(mi, ip, logical_block, &phys_block);
+            if (map_err == 0) {
+                /* Block already allocated, use it */
+            } else if (map_err == -ENOENT) {
+                /* Block not allocated, need to allocate */
                 phys_block = ext4_alloc_block(mi, pref_group);
                 if (phys_block == 0) {
                     if (bytes_written > 0)
@@ -1884,11 +2004,134 @@ ext4_vop_write(struct vnode *vp, const void *buf, uint64_t offset,
                     return -ENOSPC;
                 }
 
-                ip->i_block[logical_block] = (uint32_t)phys_block;
+                /* Store the block number in the appropriate location */
+                if (logical_block < EXT4_NDIR_BLOCKS) {
+                    /* Direct block */
+                    ip->i_block[logical_block] = (uint32_t)phys_block;
+                } else {
+                    uint64_t idx = logical_block - EXT4_NDIR_BLOCKS;
+
+                    if (idx < ptrs_per_block) {
+                        /* Single indirect */
+                        if (ip->i_block[EXT4_IND_BLOCK] == 0) {
+                            /* Allocate the indirect block */
+                            uint64_t ind_blk = ext4_alloc_block(mi, pref_group);
+                            if (ind_blk == 0) {
+                                if (bytes_written > 0)
+                                    break;
+                                return -ENOSPC;
+                            }
+                            ip->i_block[EXT4_IND_BLOCK] = (uint32_t)ind_blk;
+                            ip->i_blocks_lo += (bs / 512);
+                            /* Zero the indirect block */
+                            uint8_t zeros[bs];
+                            ext4_memset(zeros, 0, bs);
+                            ext4_write_fs_block(mi, ind_blk, 0, zeros, bs);
+                        }
+                        ext4_set_indirect_block(mi, ip->i_block[EXT4_IND_BLOCK],
+                                                (uint32_t)idx, (uint32_t)phys_block);
+                    } else {
+                        idx -= ptrs_per_block;
+
+                        if (idx < (uint64_t)ptrs_per_block * ptrs_per_block) {
+                            /* Double indirect */
+                            uint32_t idx1 = (uint32_t)(idx / ptrs_per_block);
+                            uint32_t idx2 = (uint32_t)(idx % ptrs_per_block);
+
+                            if (ip->i_block[EXT4_DIND_BLOCK] == 0) {
+                                uint64_t dind_blk = ext4_alloc_block(mi, pref_group);
+                                if (dind_blk == 0) {
+                                    if (bytes_written > 0)
+                                        break;
+                                    return -ENOSPC;
+                                }
+                                ip->i_block[EXT4_DIND_BLOCK] = (uint32_t)dind_blk;
+                                ip->i_blocks_lo += (bs / 512);
+                                uint8_t zeros[bs];
+                                ext4_memset(zeros, 0, bs);
+                                ext4_write_fs_block(mi, dind_blk, 0, zeros, bs);
+                            }
+
+                            uint32_t ind_blk = ext4_get_indirect_block(mi,
+                                                ip->i_block[EXT4_DIND_BLOCK], idx1);
+                            if (ind_blk == 0) {
+                                ind_blk = (uint32_t)ext4_alloc_block(mi, pref_group);
+                                if (ind_blk == 0) {
+                                    if (bytes_written > 0)
+                                        break;
+                                    return -ENOSPC;
+                                }
+                                ip->i_blocks_lo += (bs / 512);
+                                uint8_t zeros[bs];
+                                ext4_memset(zeros, 0, bs);
+                                ext4_write_fs_block(mi, ind_blk, 0, zeros, bs);
+                                ext4_set_indirect_block(mi,
+                                    ip->i_block[EXT4_DIND_BLOCK], idx1, ind_blk);
+                            }
+                            ext4_set_indirect_block(mi, ind_blk, idx2,
+                                                    (uint32_t)phys_block);
+                        } else {
+                            /* Triple indirect - similar pattern */
+                            idx -= (uint64_t)ptrs_per_block * ptrs_per_block;
+                            uint32_t idx1 = (uint32_t)(idx / (ptrs_per_block * ptrs_per_block));
+                            uint32_t rem = (uint32_t)(idx % (ptrs_per_block * ptrs_per_block));
+                            uint32_t idx2 = rem / ptrs_per_block;
+                            uint32_t idx3 = rem % ptrs_per_block;
+
+                            if (ip->i_block[EXT4_TIND_BLOCK] == 0) {
+                                uint64_t tind_blk = ext4_alloc_block(mi, pref_group);
+                                if (tind_blk == 0) {
+                                    if (bytes_written > 0)
+                                        break;
+                                    return -ENOSPC;
+                                }
+                                ip->i_block[EXT4_TIND_BLOCK] = (uint32_t)tind_blk;
+                                ip->i_blocks_lo += (bs / 512);
+                                uint8_t zeros[bs];
+                                ext4_memset(zeros, 0, bs);
+                                ext4_write_fs_block(mi, tind_blk, 0, zeros, bs);
+                            }
+
+                            uint32_t dind_blk = ext4_get_indirect_block(mi,
+                                                ip->i_block[EXT4_TIND_BLOCK], idx1);
+                            if (dind_blk == 0) {
+                                dind_blk = (uint32_t)ext4_alloc_block(mi, pref_group);
+                                if (dind_blk == 0) {
+                                    if (bytes_written > 0)
+                                        break;
+                                    return -ENOSPC;
+                                }
+                                ip->i_blocks_lo += (bs / 512);
+                                uint8_t zeros[bs];
+                                ext4_memset(zeros, 0, bs);
+                                ext4_write_fs_block(mi, dind_blk, 0, zeros, bs);
+                                ext4_set_indirect_block(mi,
+                                    ip->i_block[EXT4_TIND_BLOCK], idx1, dind_blk);
+                            }
+
+                            uint32_t ind_blk = ext4_get_indirect_block(mi, dind_blk, idx2);
+                            if (ind_blk == 0) {
+                                ind_blk = (uint32_t)ext4_alloc_block(mi, pref_group);
+                                if (ind_blk == 0) {
+                                    if (bytes_written > 0)
+                                        break;
+                                    return -ENOSPC;
+                                }
+                                ip->i_blocks_lo += (bs / 512);
+                                uint8_t zeros[bs];
+                                ext4_memset(zeros, 0, bs);
+                                ext4_write_fs_block(mi, ind_blk, 0, zeros, bs);
+                                ext4_set_indirect_block(mi, dind_blk, idx2, ind_blk);
+                            }
+                            ext4_set_indirect_block(mi, ind_blk, idx3,
+                                                    (uint32_t)phys_block);
+                        }
+                    }
+                }
+
                 ip->i_blocks_lo += (bs / 512);
 
-                /* If this is a new block and we're writing a partial block,
-                 * zero it first to avoid leaking stale data */
+                /* Zero the new block if writing a partial block */
                 if (block_offset > 0 || chunk < bs) {
                     uint8_t zeros[bs];
                     ext4_memset(zeros, 0, bs);
@@ -1899,6 +2142,11 @@ ext4_vop_write(struct vnode *vp, const void *buf, uint64_t offset,
                         return err;
                     }
                 }
+            } else {
+                /* Error mapping block */
+                if (bytes_written > 0)
+                    break;
+                return map_err;
             }
         }
 
@@ -1925,6 +2173,12 @@ ext4_vop_write(struct vnode *vp, const void *buf, uint64_t offset,
 
     /* Write the updated inode back to disk */
     ext4_write_inode(mi, vd->ino, ip);
+
+#ifdef DEBUG
+    kprintf("[ext4] write done: ino=%lu written=%lu newsize=%lu\n",
+            (unsigned long)vd->ino, (unsigned long)bytes_written,
+            (unsigned long)vp->v_size);
+#endif
 
     return (int64_t)bytes_written;
 }

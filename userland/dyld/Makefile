@@ -35,6 +35,14 @@ C_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(C_SRCS))
 ASM_OBJS := $(patsubst %.S,$(OBJDIR)/%.o,$(ASM_SRCS))
 ALL_OBJS := $(ASM_OBJS) $(C_OBJS)
 
+# --- Debug flag (passed from top-level Makefile) ----------------------------
+DEBUG ?= 0
+ifeq ($(DEBUG),1)
+    DEBUG_DEF := -DDEBUG=1
+else
+    DEBUG_DEF :=
+endif
+
 # --- Compiler Flags ----------------------------------------------------------
 # -target arm64-apple-macos11 : Produce ARM64 Mach-O
 # -ffreestanding              : No hosted environment assumptions
@@ -57,7 +65,8 @@ CFLAGS := \
     -nostdlib \
     -std=gnu11 \
     -O2 -g \
-    -Wall -Wextra -Wno-unused-parameter
+    -Wall -Wextra -Wno-unused-parameter \
+    $(DEBUG_DEF)
 
 ASFLAGS := \
     -target arm64-apple-macos11 \

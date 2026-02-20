@@ -71,8 +71,11 @@ Every working syscall is a small miracle. Every binary that loads and runs is an
 
 ### Filesystems
 - Ext4 read/write with extents, directory indexing, block groups
+- **Extent-based file extension**: Allocates new blocks and extends extent tree
 - VFS layer with mount points, path resolution, file descriptor management
+- **VFS permission model**: Unix owner/group/other with root bypass
 - devfs for `/dev/console`, `/dev/null`, `/dev/zero`, `/dev/urandom`
+- **Buffer cache sync daemon**: Background kernel thread flushes dirty buffers every 30s
 - 64MB root filesystem with standard Unix directory hierarchy
 
 ### Networking
@@ -86,22 +89,34 @@ Every working syscall is a small miracle. Every binary that loads and runs is an
 - BSD socket API: socket, bind, listen, accept, connect, send, recv, shutdown, close
 
 ### Userland
-- **68 Mach-O binaries** on the root filesystem
+- **74 Mach-O binaries** on the root filesystem
 - Full bash shell with job control, pipelines, redirections, `time` keyword
 - 59 coreutils: ls, cat, grep, awk, sed, sort, find, wc, cut, head, tail, tr, xargs, and more
 - System daemons: init, getty, login (with /etc/passwd authentication)
 - Network tools: curl, nc, ping, ifconfig, ntpdate
-- User management: adduser, su, sudo, whoami, id
+- User management: useradd, usermod, passwd, su, sudo, whoami, id, groups
 - Power management: halt, reboot, shutdown
 - libSystem.B.dylib: complete freestanding C library (~3,100 lines)
 
 ### Security
 - Multi-user with UID/GID enforcement (Unix discretionary access control)
-- File permissions (rwx owner/group/other)
-- SUID/SGID support
+- **VFS permission checking**: read/write/execute checks on every file operation
+- Directory traversal requires execute permission
+- File permissions (rwx owner/group/other) enforced at VFS layer
+- SUID/SGID support with proper credential handling
 - `/etc/passwd` and `/etc/shadow` authentication
-- Process credentials (real/effective UID/GID)
+- Process credentials (real/effective UID/GID, supplementary groups)
 - Default root password: `toor`
+
+### User Management (macOS-compliant)
+- `useradd`: Creates users with home directories in `/Users/<username>`
+- UIDs start at 501 (macOS convention)
+- User private groups created automatically
+- Skeleton files copied from `/etc/skel` with correct ownership
+- Supplementary groups via `-G wheel,sudo` option
+- `passwd`: Password management with strength checking
+- `su`: Switch user with proper setgid/setuid sequence
+- `login`: Full PAM-style authentication flow
 
 ## Building
 
@@ -244,10 +259,10 @@ kiseki/
 
 | Component | Files | Lines |
 |-----------|-------|-------|
-| Kernel (C + ASM) | 37 | ~21,000 |
-| Kernel headers | 26 | ~4,800 |
-| Userland | 70+ | ~40,000 |
-| **Total** | **130+** | **~70,000** |
+| Kernel (C + ASM) | 37 | ~22,000 |
+| Kernel headers | 26 | ~4,900 |
+| Userland | 75+ | ~42,000 |
+| **Total** | **138+** | **~69,000** |
 
 ## Roadmap
 

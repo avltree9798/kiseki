@@ -251,7 +251,7 @@ User code executes `svc #0x80` with the syscall number in register `x16`:
 
 **Process lifecycle:** `exit` (1), `fork` (2), `execve` (59), `wait4` (7), `getpid` (20), `getppid` (39), `kill` (37), `setpgid` (82), `getpgrp` (81), `getpgid` (151), `setsid` (147)
 
-**Credentials:** `getuid` (24), `geteuid` (25), `setuid` (23), `getgid` (47), `getegid` (43), `setgid` (181), `issetugid` (327), `chown` (16)
+**Credentials:** `getuid` (24), `geteuid` (25), `setuid` (23), `getgid` (47), `getegid` (43), `setgid` (181), `issetugid` (327), `chown` (16), `fchown` (123), `lchown` (254), `getgroups` (79), `setgroups` (80)
 
 **File I/O:** `open` (5), `close` (6), `read` (3), `write` (4), `pread` (173), `pwrite` (174), `lseek` (199), `fstat` (153), `fstat64` (189), `stat` (338), `lstat` (340), `dup` (41), `dup2` (90), `pipe` (42), `fcntl` (92), `ioctl` (54), `access` (33), `umask` (60), `fchmod` (124), `chmod` (15), `link` (9), `unlink` (10), `symlink` (57), `readlink` (58), `rename` (128), `mkdir` (136), `rmdir` (137), `chdir` (12), `fchdir` (13), `getcwd` (304), `getdirentries` (196), `mknod` (14), `sync` (36)
 
@@ -368,6 +368,34 @@ The Virtual Filesystem provides a unified interface across filesystem types:
 - **Path resolution** with `.` and `..` traversal, symlink following.
 - **File descriptor table**: 256 per process, with `dup`/`dup2`/`fork` sharing.
 - **Operations**: lookup, read, write, readdir, create, mkdir, unlink, getattr, setattr, readlink.
+- **Permission checking**: Integrated Unix DAC at VFS layer (see Section 12.2).
+
+**Vnode structure:**
+```c
+struct vnode {
+    uint32_t    v_refcount;     // Reference count
+    enum vtype  v_type;         // VREG, VDIR, VLNK, VCHR, VBLK, VFIFO, VSOCK
+    uint64_t    v_ino;          // Inode number
+    uint64_t    v_size;         // File size in bytes
+    mode_t      v_mode;         // Permission bits
+    uid_t       v_uid;          // Owner UID
+    gid_t       v_gid;          // Owner GID
+    uint32_t    v_nlink;        // Link count
+    void       *v_data;         // Filesystem-specific data
+    struct vnode_ops *v_ops;    // Filesystem operations
+    struct mount *v_mount;      // Mount point
+    spinlock_t  v_lock;         // Per-vnode lock
+};
+```
+
+**Path resolution (`resolve_path`):**
+1. Start at root vnode (or cwd for relative paths).
+2. For each path component:
+   - Check execute permission on current directory.
+   - Look up component name in directory.
+   - Handle `.` (stay), `..` (parent), symlinks (follow).
+3. Return final vnode with reference held.
+4. For create/unlink: return parent vnode + last component name.
 
 ### 9.2. Ext4 Driver
 
@@ -384,6 +412,35 @@ Full read/write Ext4 implementation supporting:
 - **64-bit mode** (`EXT4_FEATURE_INCOMPAT_64BIT`): Large volume support.
 - **Write support**: File creation, data writing, directory entry insertion, inode allocation, block allocation, metadata update.
 
+**Extent-based file extension (`ext4_extent_alloc_block`):**
+
+When a file needs to grow beyond its current allocation:
+
+1. **Find last extent**: Walk extent tree to find the last extent covering the file.
+2. **Try contiguous extension**: Check if the block immediately after the last extent is free. If so, increment `ee_len` (most efficient).
+3. **Allocate new extent**: If contiguous extension not possible, find a free block in the same block group (or any block group), create a new extent entry.
+4. **Update extent tree**: Insert new extent into the tree, handling splits if needed.
+5. **Update inode**: Increment `i_blocks`, update `i_size`, write inode back.
+
+**Block allocation strategy:**
+- Prefer same block group as existing data (locality).
+- Prefer contiguous blocks when possible (extent-friendly).
+- Fall back to any free block in any block group.
+
+**Extent tree structure:**
+```
+Extent header (12 bytes):
+  eh_magic:   0xF30A
+  eh_entries: Number of extents/index entries
+  eh_max:     Maximum entries capacity
+  eh_depth:   0 = leaf (extents), >0 = index nodes
+
+Extent entry (12 bytes):
+  ee_block:   Logical block number (file offset / block_size)
+  ee_len:     Number of blocks in extent (max 32768)
+  ee_start:   Physical block number (48-bit)
+```
+
 ### 9.3. devfs
 
 In-memory device filesystem mounted at `/dev`:
@@ -395,7 +452,29 @@ In-memory device filesystem mounted at `/dev`:
 
 ### 9.4. Buffer Cache
 
-LRU block cache: 256 buffers × 4 KB. Supports read, write, and dirty-buffer writeback.
+LRU block cache: 256 buffers × 4 KB.
+
+**Operations:**
+- `buf_read(dev, blkno)`: Read block, return cached buffer.
+- `buf_write(buf)`: Mark buffer dirty, schedule writeback.
+- `buf_sync()`: Flush all dirty buffers to disk.
+
+**Buffer states:**
+- Clean: Matches on-disk data.
+- Dirty: Modified, pending writeback.
+- Busy: Currently being read/written.
+
+**Background sync daemon (`bufsync_thread`):**
+- Kernel thread started during boot.
+- Sleeps for 30 seconds using `thread_sleep_ticks()`.
+- Wakes up and calls `buf_sync()` to flush dirty buffers.
+- Runs silently (no logging on each sync).
+- Also triggered by `sync` syscall and before `reboot`/`halt`.
+
+**Timed sleep implementation:**
+- Threads can sleep for a specified number of timer ticks.
+- Sleep queue sorted by wakeup time.
+- `sched_wakeup_sleepers()` called on each timer tick to wake expired threads.
 
 ---
 
@@ -503,24 +582,116 @@ Supported operations: `socket`, `bind`, `listen`, `accept`, `connect`, `send`/`s
 Per-process `struct ucred`:
 - Real UID/GID (`cr_ruid`, `cr_rgid`).
 - Effective UID/GID (`cr_uid`, `cr_gid`).
-- Group membership list.
+- Supplementary group membership list (up to 16 groups).
 
 Root (UID 0) bypasses all permission checks.
 
-### 12.2. File Permissions
+Credential handling in `fork()` and `exec()`:
+- `fork()`: Child inherits credentials from `proc->p_ucred` (BSD style).
+- `setuid()`/`setgid()`: Updates both Mach task credentials and BSD proc credentials.
+- `su`/`login`: Call `setgid()` before `setuid()` (must set GID while still root).
+
+### 12.2. VFS Permission Checking
+
+The VFS layer enforces Unix discretionary access control via `vfs_check_permission()`:
+
+**Permission check algorithm:**
+```c
+if (uid == 0) return ALLOW;  // Root bypasses all checks
+if (uid == file_owner)
+    check owner bits (mode >> 6) & 0x7
+else if (gid == file_group || gid in supplementary_groups)
+    check group bits (mode >> 3) & 0x7
+else
+    check other bits (mode) & 0x7
+```
+
+**Operations requiring permission checks:**
+
+| Operation | Permission Required | Target |
+|-----------|---------------------|--------|
+| `vfs_open(O_RDONLY)` | Read | File |
+| `vfs_open(O_WRONLY)` | Write | File |
+| `vfs_open(O_RDWR)` | Read + Write | File |
+| `vfs_open(O_CREAT)` | Write | Parent directory |
+| `vfs_mkdir()` | Write | Parent directory |
+| `vfs_unlink()` | Write | Parent directory |
+| `vfs_rename()` | Write | Both parent directories |
+| Directory traversal | Execute | Each directory in path |
+
+**Error codes:**
+- `EACCES` (13): Permission denied.
+- `EPERM` (1): Operation not permitted (e.g., non-owner trying to chown).
+
+### 12.3. File Permissions
 
 Standard Unix discretionary access control:
-- Owner/group/other read/write/execute bits.
-- `vfs_access(vnode, mode, cred)` called on every file operation.
-- SUID (`S_ISUID`): During `execve()`, set effective UID to file owner.
-- SGID (`S_ISGID`): During `execve()`, set effective GID to file group.
+- Owner/group/other read/write/execute bits (9 bits total).
+- Special bits: SUID (`S_ISUID` 0o4000), SGID (`S_ISGID` 0o2000), sticky (`S_ISVTX` 0o1000).
+- SUID: During `execve()`, set effective UID to file owner.
+- SGID: During `execve()`, set effective GID to file group.
+- Sticky bit: On directories, only file owner can delete files.
 
-### 12.3. Authentication
+**Mode representation:**
+```
+15-12  11-9    8-6     5-3     2-0
+type   special owner   group   other
+       suid    rwx     rwx     rwx
+       sgid
+       sticky
+```
 
-- `/etc/passwd`: User database (username, UID, GID, home, shell).
-- `/etc/shadow`: Password hashes.
-- `/bin/login`: Authenticates against passwd/shadow, sets credentials, spawns shell.
+### 12.4. Authentication
+
+- `/etc/passwd`: User database (username:x:UID:GID:comment:home:shell).
+- `/etc/shadow`: Password hashes (username:hash:lastchg:min:max:warn:::).
+- `/etc/group`: Group database (groupname:x:GID:members).
+- `/bin/login`: Authenticates against passwd/shadow, sets GID then UID, spawns shell.
 - Default credentials: `root:toor`.
+
+**Password verification:**
+- Plain text: `plain:password`
+- Hash: `hash:XXXX` (DJB2 hash, hex encoded)
+- Locked account: `!` or `*`
+- No password: empty field
+
+### 12.5. User Management (macOS-compliant)
+
+**useradd** - Create new user accounts:
+- Default home directory: `/Users/<username>` (macOS style, not `/home`)
+- UIDs start at 501 (macOS convention for regular users)
+- User private group created automatically (same name and GID as UID)
+- Home directory created by default with mode 0700
+- Skeleton files copied from `/etc/skel/` with correct ownership
+- Options: `-d` (home), `-s` (shell), `-g` (primary GID), `-G` (supplementary groups), `-c` (comment), `-u` (UID), `-M` (no home)
+
+**Supplementary groups (-G option):**
+```bash
+useradd -G wheel,sudo alice  # Add alice to wheel and sudo groups
+```
+Modifies `/etc/group` to add user to each specified group's member list.
+
+**passwd** - Change user password:
+- Minimum password length enforcement
+- Updates `/etc/shadow` with new hash
+- Root can change any password; users can only change their own
+
+**su** - Switch user:
+1. Authenticate target user (unless caller is root)
+2. `setgid(target_gid)` - must be done while still root
+3. `setuid(target_uid)` - drops root privileges
+4. Set environment: `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`
+5. `chdir(home)` if login shell (`su -`)
+6. `execv(shell)`
+
+**login** - User authentication:
+1. Read username from terminal
+2. Look up user in `/etc/passwd`
+3. Read password (with echo disabled)
+4. Verify against `/etc/shadow`
+5. `setgid(gid)` then `setuid(uid)`
+6. Set environment variables
+7. `chdir(home)` and `exec(shell)`
 
 ---
 
@@ -532,32 +703,52 @@ Custom Mach-O dynamic linker loaded at `/usr/lib/dyld`:
 - Parses `LC_LOAD_DYLIB` commands from the main binary.
 - Maps libSystem.B.dylib into the process address space.
 - Resolves symbol references via Mach-O symbol table + string table.
+- **Sets `environ` in libSystem** before calling main (enables getenv/setenv/execv).
 - Jumps to the binary's entry point (`LC_MAIN`).
+
+**Environment variable setup:**
+
+Before calling `main()`, dyld finds and sets the `_environ` symbol in libSystem:
+```c
+for (uint32_t i = 1; i < num_images; i++) {
+    uint64_t environ_addr = lookup_symbol_in_image(&images[i], "_environ");
+    if (environ_addr != 0) {
+        *(const char ***)environ_addr = envp;
+        break;
+    }
+}
+```
+
+This ensures environment variables inherited from the parent process are accessible via `getenv()` and are passed to child processes via `execv()`.
 
 ### 13.2. libSystem.B.dylib
 
-Freestanding C library (~3,100 lines) providing:
+Freestanding C library (~3,200 lines) providing:
 - **Standard I/O**: `printf`, `fprintf`, `sprintf`, `snprintf`, `vprintf`, `puts`, `putchar`, `fopen`, `fclose`, `fread`, `fwrite`, `fgets`, `fputs`, `fflush`, `feof`, `ferror`.
-- **String/memory**: `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strstr`, `strchr`, `strrchr`, `strdup`, `strtok`, `memcpy`, `memmove`, `memset`, `memcmp`, `bzero`.
+- **String/memory**: `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strstr`, `strchr`, `strrchr`, `strdup`, `strtok`, `strtok_r`, `memcpy`, `memmove`, `memset`, `memcmp`, `bzero`.
 - **Conversion**: `atoi`, `atol`, `strtol`, `strtoul`, `strtoll`, `strtoull`, `strtod`.
 - **Memory allocation**: `malloc`, `free`, `calloc`, `realloc` (simple bump allocator with free list).
-- **Process**: `fork`, `execve`, `execvp`, `exit`, `_exit`, `wait`, `waitpid`, `getpid`, `getppid`, `kill`, `sleep`, `usleep`, `nanosleep`.
-- **File I/O**: `open`, `close`, `read`, `write`, `lseek`, `stat`, `fstat`, `lstat`, `access`, `unlink`, `rename`, `mkdir`, `rmdir`, `getcwd`, `chdir`, `dup`, `dup2`, `pipe`, `fcntl`, `ioctl`.
+- **Process**: `fork`, `execve`, `execv`, `execvp`, `exit`, `_exit`, `wait`, `waitpid`, `getpid`, `getppid`, `kill`, `sleep`, `usleep`, `nanosleep`.
+- **File I/O**: `open`, `close`, `read`, `write`, `lseek`, `stat`, `fstat`, `lstat`, `access`, `unlink`, `rename`, `mkdir`, `rmdir`, `getcwd`, `chdir`, `dup`, `dup2`, `pipe`, `fcntl`, `ioctl`, `sync`.
+- **Ownership**: `chown`, `fchown`, `lchown`, `chmod`, `fchmod`.
 - **Signals**: `signal`, `sigaction`, `sigprocmask`, `sigemptyset`, `sigfillset`, `sigaddset`.
 - **Networking**: `socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`, `getsockopt`, `htons`, `htonl`, `ntohs`, `ntohl`, `inet_addr`, `inet_ntoa`.
 - **Terminal**: `tcgetattr`, `tcsetattr`, `openpty`, `isatty`, `ttyname`.
 - **Time**: `time`, `gettimeofday`, `settimeofday`.
 - **Directory**: `opendir`, `readdir`, `closedir`.
-- **System**: `sysctl`, `getentropy`, `sysconf`, `getenv`, `setenv`, `popen`, `pclose`, `system`.
+- **Environment**: `getenv`, `setenv`, `unsetenv` (modifies `environ` global).
+- **System**: `sysctl`, `getentropy`, `sysconf`, `popen`, `pclose`, `system`.
 - **Mach**: Inline `__syscall()` wrapper for `svc #0x80`.
 
-### 13.3. Userland Binaries (68 Mach-O executables)
+### 13.3. Userland Binaries (74 Mach-O executables)
 
 **Shell:** bash (full implementation with lexer, parser, executor, job control, builtins, readline, `time` keyword)
 
-**System daemons:** init, getty, login, halt, reboot, shutdown
+**System daemons:** init, getty, login, halt, reboot, shutdown, sshd
 
-**Coreutils (59):** adduser, awk, basename, cat, chmod, chown, cp, curl, cut, date, df, dirname, du, echo, env, expr, false, find, grep, head, hostname, id, ifconfig, kill, ln, login, ls, mkdir, mount, mv, nc, ntpdate, ping, printf, ps, rm, rmdir, sed, sleep, sort, su, sudo, tail, tee, test, time, timeout, touch, tr, true, umount, uname, uniq, wc, which, whoami, xargs, yes
+**User management:** useradd, usermod, passwd, su, sudo, whoami, id
+
+**Coreutils:** awk, basename, cat, chmod, chown, clear, cp, curl, cut, date, df, dirname, du, echo, env, expr, false, find, grep, head, hostname, ifconfig, kill, ln, ls, mkdir, mount, mv, nc, ntpdate, ping, printf, ps, rm, rmdir, sed, sleep, sort, sync, tail, tee, test, time, timeout, touch, tr, true, umount, uname, uniq, wc, which, xargs, yes
 
 All compiled with `clang -target arm64-apple-macos11` using the macOS SDK headers, producing standard Mach-O binaries that link against libSystem.B.dylib.
 

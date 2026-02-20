@@ -454,7 +454,14 @@ int main(int argc, char *argv[])
 
         /* ---- Authentication succeeded ---- */
 
-        /* Set UID */
+        /* Set GID first (must be done before dropping root privileges) */
+        if (setgid(pw.gid) < 0) {
+            fprintf(stderr, "%s: setgid(%d): %s\n", progname, pw.gid,
+                    strerror(errno));
+            return 1;
+        }
+
+        /* Set UID (drops root privileges) */
         if (setuid(pw.uid) < 0) {
             fprintf(stderr, "%s: setuid(%d): %s\n", progname, pw.uid,
                     strerror(errno));

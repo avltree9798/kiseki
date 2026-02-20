@@ -338,11 +338,15 @@ FSTAB
 
     sudo tee "${MOUNT_DIR}/etc/profile" > /dev/null << 'PROFILE'
 # Kiseki OS - System-wide profile
+# Only set defaults for variables that aren't already set
+
+# PATH - always set
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
-export HOME=/root
-export USER=root
-export SHELL=/bin/bash
-export TERM=vt100
+
+# TERM - default if not set
+[ -z "$TERM" ] && export TERM=vt100
+
+# PS1 - default prompt (uses \u for username from environment)
 export PS1='\u@\h:\w\$ '
 PROFILE
 
@@ -444,11 +448,15 @@ FSTAB
 
     cat > "${DIR}/profile" << 'PROFILE'
 # Kiseki OS - System-wide profile
+# Only set defaults for variables that aren't already set
+
+# PATH - always set
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
-export HOME=/root
-export USER=root
-export SHELL=/bin/bash
-export TERM=vt100
+
+# TERM - default if not set
+[ -z "$TERM" ] && export TERM=vt100
+
+# PS1 - default prompt (uses \u for username from environment)
 export PS1='\u@\h:\w\$ '
 PROFILE
 

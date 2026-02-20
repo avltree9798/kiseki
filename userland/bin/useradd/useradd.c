@@ -208,6 +208,174 @@ static int find_next_gid(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Group membership management                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * add_user_to_group - Add a user to a single group's member list
+ *
+ * Reads /etc/group, finds the group, adds the user if not already present,
+ * and writes the file back atomically.
+ *
+ * Returns 0 on success, -1 on error.
+ */
+static int add_user_to_group(const char *username, const char *groupname)
+{
+    FILE *fp = fopen(PATH_GROUP, "r");
+    if (!fp)
+        return -1;
+
+    /* Read entire group file into memory */
+    char *lines[256];
+    int nlines = 0;
+    char buf[LINE_MAX];
+    int found_idx = -1;
+    size_t ulen = strlen(username);
+    size_t glen = strlen(groupname);
+
+    while (fgets(buf, sizeof(buf), fp) && nlines < 256) {
+        lines[nlines] = strdup(buf);
+        if (!lines[nlines])
+            break;
+
+        /* Check if this is the target group */
+        if (strncmp(buf, groupname, glen) == 0 && buf[glen] == ':') {
+            found_idx = nlines;
+        }
+        nlines++;
+    }
+    fclose(fp);
+
+    if (found_idx < 0) {
+        /* Group not found */
+        for (int i = 0; i < nlines; i++)
+            free(lines[i]);
+        return -1;
+    }
+
+    /* Parse the group line: name:password:gid:members */
+    char *line = lines[found_idx];
+    size_t len = strlen(line);
+
+    /* Remove trailing newline */
+    if (len > 0 && line[len - 1] == '\n')
+        line[--len] = '\0';
+
+    /* Find the members field (after 3rd colon) */
+    char *p = line;
+    int colons = 0;
+    char *members_start = NULL;
+    while (*p) {
+        if (*p == ':') {
+            colons++;
+            if (colons == 3) {
+                members_start = p + 1;
+                break;
+            }
+        }
+        p++;
+    }
+
+    if (!members_start) {
+        for (int i = 0; i < nlines; i++)
+            free(lines[i]);
+        return -1;
+    }
+
+    /* Check if user is already a member */
+    char *member = members_start;
+    while (*member) {
+        /* Find end of this member name */
+        char *end = member;
+        while (*end && *end != ',')
+            end++;
+
+        size_t mlen = (size_t)(end - member);
+        if (mlen == ulen && strncmp(member, username, ulen) == 0) {
+            /* Already a member */
+            for (int i = 0; i < nlines; i++)
+                free(lines[i]);
+            return 0;
+        }
+
+        if (*end == ',')
+            member = end + 1;
+        else
+            break;
+    }
+
+    /* Build new line with user added */
+    char newline[LINE_MAX];
+    if (members_start[0] == '\0') {
+        /* No existing members */
+        snprintf(newline, sizeof(newline), "%s%s\n", line, username);
+    } else {
+        /* Append to existing members */
+        snprintf(newline, sizeof(newline), "%s,%s\n", line, username);
+    }
+
+    free(lines[found_idx]);
+    lines[found_idx] = strdup(newline);
+
+    /* Write back to file */
+    fp = fopen(PATH_GROUP, "w");
+    if (!fp) {
+        for (int i = 0; i < nlines; i++)
+            free(lines[i]);
+        return -1;
+    }
+
+    for (int i = 0; i < nlines; i++) {
+        fputs(lines[i], fp);
+        free(lines[i]);
+    }
+    fclose(fp);
+
+    return 0;
+}
+
+/*
+ * add_user_to_groups - Add user to multiple groups (comma-separated)
+ *
+ * Returns 0 if all groups were successfully updated, -1 if any failed.
+ */
+static int add_user_to_groups(const char *username, const char *groups)
+{
+    char buf[512];
+    strncpy(buf, groups, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    int ret = 0;
+    char *saveptr = NULL;
+    char *group = strtok_r(buf, ",", &saveptr);
+
+    while (group) {
+        /* Trim leading/trailing whitespace */
+        while (*group == ' ' || *group == '\t')
+            group++;
+        char *end = group + strlen(group) - 1;
+        while (end > group && (*end == ' ' || *end == '\t'))
+            *end-- = '\0';
+
+        if (*group) {
+            if (!group_exists(group)) {
+                fprintf(stderr, "%s: group '%s' does not exist\n",
+                        progname, group);
+                ret = -1;
+            } else if (add_user_to_group(username, group) < 0) {
+                fprintf(stderr, "%s: failed to add user to group '%s'\n",
+                        progname, group);
+                ret = -1;
+            }
+        }
+
+        group = strtok_r(NULL, ",", &saveptr);
+    }
+
+    return ret;
+}
+
+/* ------------------------------------------------------------------ */
 /* File helpers                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -238,7 +406,7 @@ static void ensure_file_exists(const char *path)
     }
 }
 
-static int copy_file(const char *src, const char *dst)
+static int copy_file(const char *src, const char *dst, int uid, int gid)
 {
     int sfd = open(src, O_RDONLY);
     if (sfd < 0)
@@ -258,10 +426,13 @@ static int copy_file(const char *src, const char *dst)
 
     close(sfd);
     close(dfd);
+
+    /* Set ownership to the new user */
+    chown(dst, uid, gid);
     return 0;
 }
 
-static int copy_skel(const char *homedir)
+static int copy_skel(const char *homedir, int uid, int gid)
 {
     struct stat st;
     if (stat(PATH_SKEL, &st) < 0)
@@ -285,13 +456,13 @@ static int copy_skel(const char *homedir)
             continue;
 
         if (S_ISREG(es.st_mode))
-            copy_file(src, dst);
+            copy_file(src, dst, uid, gid);
     }
     closedir(dir);
     return 0;
 }
 
-static int create_home(const char *homedir)
+static int create_home(const char *homedir, int uid, int gid)
 {
     if (mkdir(homedir, 0755) < 0) {
         if (errno == EEXIST)
@@ -300,7 +471,9 @@ static int create_home(const char *homedir)
                 progname, homedir, strerror(errno));
         return -1;
     }
+    /* macOS uses 700 for home directories (private) */
     chmod(homedir, 0700);
+    chown(homedir, uid, gid);
     return 0;
 }
 
@@ -336,7 +509,7 @@ int main(int argc, char *argv[])
     const char *opt_home = NULL;
     const char *opt_shell = DEFAULT_SHELL;
     const char *opt_comment = "";
-    int opt_create_home = 0;   /* -m to enable */
+    int opt_create_home = 1;   /* default on (like macOS), -M to disable */
     int opt_user_group = 1;    /* -U default on */
     const char *opt_groups = NULL;
     const char *username = NULL;
@@ -484,12 +657,17 @@ int main(int argc, char *argv[])
         if (stat(DEFAULT_HOME, &pst) < 0)
             mkdir(DEFAULT_HOME, 0755);
 
-        if (create_home(homedir) == 0)
-            copy_skel(homedir);
+        if (create_home(homedir, uid, gid) == 0)
+            copy_skel(homedir, uid, gid);
     }
 
-    /* Handle supplementary groups (simplified) */
-    (void)opt_groups;
+    /* Add user to supplementary groups */
+    if (opt_groups) {
+        if (add_user_to_groups(username, opt_groups) < 0) {
+            fprintf(stderr, "%s: warning: failed to add user to some groups\n",
+                    progname);
+        }
+    }
 
     return 0;
 }

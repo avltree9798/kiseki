@@ -2312,6 +2312,21 @@ EXPORT int fchmod(int fd, unsigned int mode)
     return (int)_check(syscall2(124 /* SYS_fchmod */, fd, mode));
 }
 
+EXPORT int chown(const char *pathname, unsigned int owner, unsigned int group)
+{
+    return (int)_check(syscall3(16 /* SYS_chown */, pathname, owner, group));
+}
+
+EXPORT int fchown(int fd, unsigned int owner, unsigned int group)
+{
+    return (int)_check(syscall3(123 /* SYS_fchown */, fd, owner, group));
+}
+
+EXPORT int lchown(const char *pathname, unsigned int owner, unsigned int group)
+{
+    return (int)_check(syscall3(254 /* SYS_lchown */, pathname, owner, group));
+}
+
 EXPORT int gettimeofday(void *tv, void *tz)
 {
     return (int)_check(syscall2(116 /* SYS_gettimeofday */, tv, tz));

@@ -388,7 +388,14 @@ int main(int argc, char *argv[])
     else
         shell = DEFAULT_SHELL;
 
-    /* Set UID */
+    /* Set GID first (must be done before dropping root privileges) */
+    if (setgid(target_pw.gid) < 0) {
+        fprintf(stderr, "%s: setgid(%d): %s\n", progname, target_pw.gid,
+                strerror(errno));
+        return 1;
+    }
+
+    /* Set UID (drops root privileges) */
     if (setuid(target_pw.uid) < 0) {
         fprintf(stderr, "%s: setuid(%d): %s\n", progname, target_pw.uid,
                 strerror(errno));

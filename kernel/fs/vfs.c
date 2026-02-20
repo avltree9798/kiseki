@@ -8,6 +8,7 @@
 #include <kiseki/types.h>
 #include <kern/kprintf.h>
 #include <kern/sync.h>
+#include <kern/proc.h>
 #include <fs/vfs.h>
 
 /* ============================================================================
@@ -81,6 +82,65 @@ kstrcmp(const char *a, const char *b)
 }
 
 /* ============================================================================
+ * Permission Checking
+ *
+ * Unix permission model: owner/group/other with read/write/execute bits.
+ * Root (uid 0) bypasses all permission checks.
+ * ============================================================================ */
+
+/* Access mode bits for vfs_check_permission */
+#define VREAD   0x04
+#define VWRITE  0x02
+#define VEXEC   0x01
+
+/*
+ * vfs_check_permission - Check if current process can access vnode
+ *
+ * @vp:   Vnode to check
+ * @mode: Access mode (VREAD, VWRITE, VEXEC, or combination)
+ *
+ * Returns 0 if access is allowed, -EACCES if denied.
+ */
+static int
+vfs_check_permission(struct vnode *vp, int mode)
+{
+    struct proc *p = proc_current();
+    if (p == NULL)
+        return 0;  /* Kernel context - allow all */
+
+    uid_t uid = p->p_ucred.cr_uid;
+    gid_t gid = p->p_ucred.cr_gid;
+
+    /* Root bypasses all permission checks */
+    if (uid == 0)
+        return 0;
+
+    mode_t file_mode = vp->v_mode;
+    mode_t perm_bits;
+
+    if (uid == vp->v_uid) {
+        /* Owner permissions (bits 8-6) */
+        perm_bits = (file_mode >> 6) & 0x7;
+    } else if (gid == vp->v_gid) {
+        /* Group permissions (bits 5-3) */
+        perm_bits = (file_mode >> 3) & 0x7;
+    } else {
+        /* Other permissions (bits 2-0) */
+        perm_bits = file_mode & 0x7;
+    }
+
+    /* Check if requested access is allowed */
+    if ((mode & VREAD) && !(perm_bits & 0x4))
+        return -EACCES;
+    if ((mode & VWRITE) && !(perm_bits & 0x2))
+        return -EACCES;
+    if ((mode & VEXEC) && !(perm_bits & 0x1))
+        return -EACCES;
+
+    return 0;
+}
+
+/* ============================================================================
  * Vnode Pool Management
  * ============================================================================ */
 
@@ -147,7 +207,7 @@ vnode_release(struct vnode *vp)
  * ============================================================================ */
 
 static int
-fd_alloc(void)
+vfs_fd_alloc(void)
 {
     spin_lock(&fd_lock);
     for (int i = 0; i < VFS_MAX_FD; i++) {
@@ -309,7 +369,7 @@ vfs_dup_fd(int oldfd, int minfd)
 int
 vfs_alloc_sockfd(int sockidx)
 {
-    int fd = fd_alloc();
+    int fd = vfs_fd_alloc();
     if (fd < 0)
         return fd;
 
@@ -347,7 +407,7 @@ vfs_free_fd(int fd)
 int
 vfs_alloc_pipefd(void *pipe_data, int dir)
 {
-    int fd = fd_alloc();
+    int fd = vfs_fd_alloc();
     if (fd < 0)
         return fd;
 
@@ -390,7 +450,7 @@ vfs_get_pty(int fd, int *side)
 int
 vfs_alloc_pty_fd(void *pty_ptr, int side)
 {
-    int fd = fd_alloc();
+    int fd = vfs_fd_alloc();
     if (fd < 0)
         return fd;
     fd_table[fd].f_pty = pty_ptr;
@@ -540,6 +600,13 @@ resolve_path(const char *path, struct vnode **result,
             return -ENOTDIR;
         }
 
+        /* Check execute permission to traverse this directory */
+        int perr = vfs_check_permission(current, VEXEC);
+        if (perr != 0) {
+            vnode_release(current);
+            return perr;
+        }
+
         if (current->v_ops == NULL || current->v_ops->lookup == NULL) {
             vnode_release(current);
             return -ENOSYS;
@@ -593,7 +660,7 @@ vfs_init(void)
      * Reserve fds 0, 1, 2 for console stdin/stdout/stderr.
      * These are handled by the console fast path in sys_read/sys_write,
      * not by VFS vnodes. Marking them with refcount=1 and f_vnode=NULL
-     * prevents fd_alloc() from ever returning them for file opens.
+     * prevents vfs_fd_alloc() from ever returning them for file opens.
      */
     fd_table[0].f_refcount = 1;  /* stdin  - console */
     fd_table[0].f_vnode = NULL;
@@ -762,7 +829,12 @@ vfs_open(const char *path, uint32_t flags, mode_t mode)
             /* Try to look up the last component */
             err = parent->v_ops->lookup(parent, last_name, last_len, &vp);
             if (err == -ENOENT) {
-                /* File doesn't exist -- create it */
+                /* File doesn't exist -- need write permission on parent to create */
+                err = vfs_check_permission(parent, VWRITE);
+                if (err != 0) {
+                    vnode_release(parent);
+                    return err;
+                }
                 if (parent->v_ops->create == NULL) {
                     vnode_release(parent);
                     return -ENOSYS;
@@ -801,8 +873,25 @@ vfs_open(const char *path, uint32_t flags, mode_t mode)
         return -ENOTDIR;
     }
 
+    /* Check access permissions based on open mode */
+    {
+        uint32_t accmode = flags & O_ACCMODE;
+        int perm = 0;
+        if (accmode == O_RDONLY || accmode == O_RDWR)
+            perm |= VREAD;
+        if (accmode == O_WRONLY || accmode == O_RDWR)
+            perm |= VWRITE;
+        if (perm != 0) {
+            err = vfs_check_permission(vp, perm);
+            if (err != 0) {
+                vnode_release(vp);
+                return err;
+            }
+        }
+    }
+
     /* Allocate file descriptor */
-    int fd = fd_alloc();
+    int fd = vfs_fd_alloc();
     if (fd < 0) {
         vnode_release(vp);
         return fd;
@@ -967,6 +1056,13 @@ vfs_mkdir(const char *path, mode_t mode)
         return -ENOSYS;
     }
 
+    /* Check write permission on parent directory */
+    err = vfs_check_permission(parent, VWRITE);
+    if (err != 0) {
+        vnode_release(parent);
+        return err;
+    }
+
     struct vnode *newdir = NULL;
     err = parent->v_ops->mkdir(parent, last_name, last_len, mode, &newdir);
     vnode_release(parent);
@@ -1011,6 +1107,13 @@ vfs_unlink(const char *path)
     if (parent->v_ops == NULL || parent->v_ops->unlink == NULL) {
         vnode_release(parent);
         return -ENOSYS;
+    }
+
+    /* Check write permission on parent directory */
+    err = vfs_check_permission(parent, VWRITE);
+    if (err != 0) {
+        vnode_release(parent);
+        return err;
     }
 
     err = parent->v_ops->unlink(parent, last_name, last_len);

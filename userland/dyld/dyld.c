@@ -2085,7 +2085,23 @@ void dyld_main(const struct mach_header_64 *main_mh,
     }
 
     /* ----------------------------------------------------------------
-     * Phase 5: Find entry point and jump to main()
+     * Phase 5: Set up environ in libSystem
+     *
+     * Before calling main(), we need to set the 'environ' global in
+     * libSystem so that getenv/setenv/execv work correctly. Look up
+     * the symbol and write envp to it.
+     * ---------------------------------------------------------------- */
+    for (uint32_t i = 1; i < num_images; i++) {
+        uint64_t environ_addr = lookup_symbol_in_image(&images[i], "_environ");
+        if (environ_addr != 0) {
+            /* Found environ - write envp to it */
+            *(const char ***)environ_addr = envp;
+            break;
+        }
+    }
+
+    /* ----------------------------------------------------------------
+     * Phase 6: Find entry point and jump to main()
      *
      * Read LC_MAIN from the main binary to get entryoff.
      * Compute main_addr = text_base + entryoff.

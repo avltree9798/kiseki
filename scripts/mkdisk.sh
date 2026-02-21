@@ -317,6 +317,11 @@ ISSUE
         echo "write ${TMPDIR}/skel_profile /etc/skel/.profile" >> "${CMDS}"
     fi
 
+    # Set SUID bit on su and sudo (mode 04755 = 0104755 octal)
+    # sif <file> mode <value> sets the inode mode field
+    echo "sif /bin/su mode 0104755" >> "${CMDS}"
+    echo "sif /sbin/sudo mode 0104755" >> "${CMDS}"
+
     # Run debugfs
     "${DEBUGFS}" -w -f "${CMDS}" "${DISK_IMG}" >/dev/null 2>&1
 
@@ -388,6 +393,7 @@ PROFILE
     sudo tee "${MOUNT_DIR}/etc/sudoers" > /dev/null << 'SUDOERS'
 # Kiseki OS sudoers
 root ALL=(ALL) NOPASSWD: ALL
+%sudo ALL=(ALL) ALL
 SUDOERS
     sudo chmod 440 "${MOUNT_DIR}/etc/sudoers"
 
@@ -498,6 +504,7 @@ PROFILE
     cat > "${DIR}/sudoers" << 'SUDOERS'
 # Kiseki OS sudoers
 root ALL=(ALL) NOPASSWD: ALL
+%sudo ALL=(ALL) ALL
 SUDOERS
 
     date +%s > "${DIR}/epoch"

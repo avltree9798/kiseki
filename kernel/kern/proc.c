@@ -26,6 +26,7 @@
 #include <kern/sync.h>
 #include <fs/vfs.h>
 #include <bsd/signal.h>
+#include <bsd/security.h>
 #include <machine/trap.h>
 
 /* ============================================================================
@@ -756,6 +757,18 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
     char *scratch = (char *)scratch_pa;
     memset_p(scratch, 0, 4 * PAGE_SIZE);
 
+    /*
+     * Get the executable's stat info for SUID/SGID handling.
+     * Must be done before destroying the old VM space.
+     */
+    struct stat exec_stat;
+    memset_p(&exec_stat, 0, sizeof(exec_stat));
+    int stat_err = vfs_stat(path, &exec_stat);
+    if (stat_err < 0) {
+        pmm_free_pages(scratch_pa, 2);
+        return -stat_err;
+    }
+
     /* Copy path */
     char *k_path = scratch;
     {
@@ -874,6 +887,23 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
     if (result->needs_dynlinker) {
         strncpy_p(p->p_dylinker, result->dylinker_path,
                   sizeof(p->p_dylinker) - 1);
+    }
+
+    /*
+     * Handle SUID/SGID bits.
+     * If the executable has S_ISUID or S_ISGID set, update the process
+     * credentials to the file owner/group. This allows su/sudo to work.
+     */
+    if ((exec_stat.st_mode & (S_ISUID | S_ISGID)) != 0) {
+        suid_check(&p->p_ucred, exec_stat.st_mode,
+                   exec_stat.st_uid, exec_stat.st_gid);
+        /* Also update Mach task credentials for syscall checks */
+        if (p->p_task) {
+            if (exec_stat.st_mode & S_ISUID)
+                p->p_task->euid = exec_stat.st_uid;
+            if (exec_stat.st_mode & S_ISGID)
+                p->p_task->egid = exec_stat.st_gid;
+        }
     }
 
     /*

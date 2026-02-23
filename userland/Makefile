@@ -23,7 +23,7 @@ COREUTILS := cat cp mv rm ln touch mkdir rmdir \
              chmod chown df du mount umount \
              login su sudo passwd adduser useradd usermod \
              printf test true false yes basename dirname expr \
-             vi
+             vi file objdump
 
 # Networking tools
 NETTOOLS := ifconfig ping nc curl ntpdate

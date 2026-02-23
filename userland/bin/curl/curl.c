@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 #define DEFAULT_PORT    80
 #define RECV_BUF_SIZE   4096
@@ -249,34 +250,40 @@ int main(int argc, char **argv)
     if (verbose)
         fprintf(stderr, "* Connecting to %s port %d...\n", host, port);
 
-    /* Resolve host to IP address.
-     * We only support numeric IP addresses (no DNS yet). */
-    struct in_addr addr;
-    if (inet_pton(AF_INET, host, &addr) != 1) {
-        fprintf(stderr, "curl: could not resolve host: %s\n", host);
-        fprintf(stderr, "  (DNS not supported; use IP address)\n");
+    /* Resolve host to IP address via getaddrinfo() (supports both
+     * numeric addresses and DNS hostnames, like macOS curl). */
+    char portstr[8];
+    snprintf(portstr, sizeof(portstr), "%d", port);
+
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int gai_err = getaddrinfo(host, portstr, &hints, &res);
+    if (gai_err != 0) {
+        fprintf(stderr, "curl: could not resolve host: %s (%s)\n",
+                host, gai_strerror(gai_err));
         return 1;
     }
 
     /* Create TCP socket */
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sockfd < 0) {
         fprintf(stderr, "curl: socket() failed\n");
+        freeaddrinfo(res);
         return 1;
     }
 
     /* Connect to server */
-    struct sockaddr_in server;
-    memset(&server, 0, sizeof(server));
-    server.sin_family = AF_INET;
-    server.sin_port = htons((unsigned short)port);
-    server.sin_addr = addr;
-
-    if (connect(sockfd, (struct sockaddr *)&server, sizeof(server)) < 0) {
+    if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) {
         fprintf(stderr, "curl: connect to %s:%d failed\n", host, port);
         close(sockfd);
+        freeaddrinfo(res);
         return 1;
     }
+
+    freeaddrinfo(res);
 
     if (verbose)
         fprintf(stderr, "* Connected to %s (%s) port %d\n", host, host, port);

@@ -102,7 +102,13 @@ void timer_init_percpu(void)
  * timer_handler - Called from IRQ dispatch when TIMER_IRQ fires
  *
  * Rearms the timer and calls the scheduler tick.
+ * Also polls the network RX queue on core 0 to ensure timely
+ * packet processing (NAPI-style polling).
  */
+
+/* VirtIO-net receive (defined in virtio_net.c, no-op if no device) */
+extern void virtio_net_recv(void);
+
 void timer_handler(void)
 {
     tick_count++;
@@ -112,6 +118,24 @@ void timer_handler(void)
 
     /* Clear any pending status by re-enabling */
     write_cntv_ctl(CTL_ENABLE);
+
+    /*
+     * Poll network RX on core 0 every tick (100 Hz = 10ms).
+     *
+     * The VirtIO-net interrupt should handle packet delivery on its
+     * own, but level-triggered IRQ re-delivery can be unreliable in
+     * some QEMU configurations. Polling from the timer tick ensures
+     * packets are never stuck in the RX used ring for more than 10ms.
+     *
+     * This is analogous to Linux NAPI polling from softirq context.
+     * Only core 0 polls since VirtIO SPIs are routed to core 0.
+     */
+    {
+        struct cpu_data *cd;
+        __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
+        if (cd && cd->cpu_id == 0)
+            virtio_net_recv();
+    }
 
     /* Call scheduler tick */
     sched_tick();

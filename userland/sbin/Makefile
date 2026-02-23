@@ -29,7 +29,7 @@ LDFLAGS := -target arm64-apple-macos11 \
            -isysroot $(SYSROOT)
 
 # Programs
-PROGS := init getty login halt reboot shutdown sshd
+PROGS := init getty login halt reboot shutdown sshd mDNSResponder
 
 TARGETS := $(patsubst %,$(BINDIR)/%,$(PROGS))
 

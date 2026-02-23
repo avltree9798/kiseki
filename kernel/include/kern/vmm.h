@@ -67,6 +67,10 @@
 #define PTE_USER_RW     (PTE_USER_RWX | PTE_PXN | PTE_UXN)
 #define PTE_USER_RO     (PTE_PAGE | PTE_AF | PTE_SH_INNER | \
                          PTE_AP_RO_ALL | PTE_ATTR_IDX(MAIR_NORMAL_WB) | PTE_PXN | PTE_UXN)
+/*
+ * User read-execute: cacheable (WB), read-only from both EL0 and EL1,
+ * PXN prevents kernel execution, UXN clear allows user execution.
+ */
 #define PTE_USER_RX     (PTE_PAGE | PTE_AF | PTE_SH_INNER | \
                          PTE_AP_RO_ALL | PTE_ATTR_IDX(MAIR_NORMAL_WB) | PTE_PXN)
 
@@ -192,6 +196,15 @@ int vmm_copy_space(struct vm_space *dst, struct vm_space *src);
  * vmm_get_kernel_pgd - Get the kernel's L0 page table
  */
 pte_t *vmm_get_kernel_pgd(void);
+
+/*
+ * vmm_init_percpu - Enable MMU on a secondary CPU core
+ *
+ * Configures MAIR, TCR, TTBR0/TTBR1 (from kernel_pgd) and enables
+ * the MMU + data/instruction caches.  Must be called before any
+ * spinlock or shared-data access on the secondary core.
+ */
+void vmm_init_percpu(void);
 
 /*
  * vmm_get_pte - Walk page table and return pointer to L3 PTE

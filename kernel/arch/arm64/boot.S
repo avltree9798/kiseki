@@ -136,11 +136,21 @@ _secondary_at_el1:
     mrs     x0, mpidr_el1
     and     x0, x0, #0xFF
 
+    /*
+     * Enable FP/SIMD access (must match primary core setup).
+     * CPACR_EL1.FPEN (bits [21:20]) = 0b11: no trapping.
+     * Without this, any FP/SIMD instruction traps with EC=0x7.
+     */
+    mov     x1, #(3 << 20)
+    msr     cpacr_el1, x1
+    isb
+
     /* Set up per-core stack
      * SP = __stack_top - (core_id * KERNEL_STACK_SIZE)
+     * KERNEL_STACK_SIZE = 0x8000 (32KB), matching linker script
      */
     ldr     x1, =__stack_top
-    mov     x2, #0x4000            /* KERNEL_STACK_SIZE = 16KB */
+    mov     x2, #0x8000            /* KERNEL_STACK_SIZE = 32KB */
     mul     x3, x0, x2
     sub     x1, x1, x3
     mov     sp, x1

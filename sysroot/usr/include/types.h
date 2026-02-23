@@ -60,7 +60,7 @@ struct timespec {
     long        tv_nsec;        /* Nanoseconds */
 };
 
-typedef int64_t             suseconds_t;
+typedef int32_t             suseconds_t;    /* Darwin: __int32_t (NOT int64_t!) */
 typedef uint32_t            useconds_t;
 typedef uint32_t            id_t;
 

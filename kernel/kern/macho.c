@@ -222,6 +222,31 @@ load_segment(int fd, struct segment_command_64 *seg,
             file_remaining -= chunk;
         }
 
+        /*
+         * SMP Cache Coherency: Clean data cache and invalidate instruction cache.
+         * When we write code to memory on one CPU and another CPU tries to
+         * execute it, we need to ensure:
+         * 1. Data cache is cleaned to Point of Coherency (PoC) so all CPUs
+         *    can see the written data
+         * 2. Instruction cache is invalidated so CPUs fetch fresh instructions
+         *
+         * DC CVAC: Clean data cache by VA to PoC (writes to main memory)
+         * IC IVAU: Invalidate instruction cache by VA to PoU
+         *
+         * We do this per-page after writing to ensure coherency on SMP.
+         */
+        for (uint64_t offset = 0; offset < PAGE_SIZE; offset += 64) {
+            uint64_t addr = pa + offset;
+            __asm__ volatile("dc cvac, %0" :: "r"(addr) : "memory");
+        }
+        __asm__ volatile("dsb ish" ::: "memory");
+        for (uint64_t offset = 0; offset < PAGE_SIZE; offset += 64) {
+            uint64_t addr = pa + offset;
+            __asm__ volatile("ic ivau, %0" :: "r"(addr) : "memory");
+        }
+        __asm__ volatile("dsb ish" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+
         uint64_t va = vmaddr + (p * PAGE_SIZE);
         int ret = vmm_map_page(space->pgd, va, pa, pte_flags);
         if (ret != 0) {
@@ -754,12 +779,27 @@ load_return_t macho_load(const char *path, struct vm_space *space,
     }
 
     /*
-     * Parse and load at depth 1 (main binary), slide 0.
+     * ASLR slide for PIE binaries.
      *
-     * When ASLR is implemented, compute a random slide here and
-     * pass it to parse_machfile (only for PIE binaries).
+     * The infrastructure for ASLR is in place: parse_machfile() applies the
+     * slide to all segment vmaddrs, entry points, etc. To enable ASLR, set
+     * aslr_slide to a non-zero value here.
+     *
+     * macOS uses a random slide in the range [0, 1GB) with page alignment.
+     * A typical scheme: 16MB aligned, 4 bits of entropy (16 positions).
+     *
+     * For now, ASLR is DISABLED (slide=0) to ensure stability. Enable by
+     * uncommenting the block below after thorough testing:
+     *
+     *   if (hdr.flags & MH_PIE) {
+     *       uint64_t entropy;
+     *       __asm__ volatile("mrs %0, cntvct_el0" : "=r"(entropy));
+     *       uint64_t slot = ((entropy >> 8) & 0xF) + 1;
+     *       aslr_slide = (int64_t)(slot << 24);
+     *   }
      */
     int64_t aslr_slide = 0;
+    (void)hdr.flags;  /* Suppress unused warning until ASLR enabled */
 
     load_return_t lret = parse_machfile(fd, &hdr, space, 1,
                                         aslr_slide, result, NULL);

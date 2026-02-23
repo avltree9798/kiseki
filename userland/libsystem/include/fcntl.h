@@ -24,9 +24,10 @@
 #define O_CREAT         0x0200
 #define O_TRUNC         0x0400
 #define O_EXCL          0x0800
-#define O_NOCTTY        0x20000
-#define O_DIRECTORY     0x100000
-#define O_CLOEXEC       0x1000000
+#define O_NOCTTY        0x20000     /* Don't assign controlling terminal */
+#define O_DIRECTORY     0x100000    /* Fail if not a directory */
+#define O_SYMLINK       0x200000    /* Allow open of symlink itself */
+#define O_CLOEXEC       0x1000000   /* Close on exec */
 
 /* fcntl commands */
 #define F_DUPFD         0       /* Duplicate file descriptor */

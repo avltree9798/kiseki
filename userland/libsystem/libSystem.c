@@ -233,26 +233,58 @@ static inline long _check(long ret)
 }
 
 /* ============================================================================
- * errno
+ * errno (per-thread)
  *
- * Note: For full thread-local errno, each thread would need its own errno
- * location. For simplicity, we use a global errno for now. Programs that
- * need thread-local errno should use pthread_getspecific/setspecific.
+ * Each thread has its own errno stored in struct __pthread at a fixed offset.
+ * The __error() function returns a pointer to the current thread's errno_val.
+ * This is how macOS implements thread-safe errno.
  *
- * TODO: Implement true thread-local errno by storing it in the pthread struct.
+ * We read TPIDR_EL0 directly here to avoid circular dependency with pthread.
+ * The errno_val field is at offset 44 in struct __pthread:
+ *   tid (8) + stack_base (8) + stack_size (8) + start_routine (8) +
+ *   arg (8) + retval (8) + detached (4) + joined (4) + exited (4) = 60
+ *   Wait, let me recalculate: errno_val is after exited (int), so offset 60.
+ *
+ * Actually, for safety we use a fallback for early boot and the pthread
+ * implementation handles the per-thread case via pthread_getspecific.
  * ============================================================================ */
 
-EXPORT int errno = 0;
+static int _errno_fallback = 0;
 
 /*
- * __error() — returns pointer to errno.
+ * __error() — returns pointer to current thread's errno.
  * macOS libc exports this as ___error in the symbol table.
  * Used by code compiled against macOS SDK (e.g., bash).
+ *
+ * We read TPIDR_EL0 directly. The errno_val is at a known offset in the
+ * pthread structure. If TPIDR_EL0 is NULL, fall back to global.
  */
 EXPORT int *__error(void)
 {
-    return &errno;
+    void *tls;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tls));
+    
+    if (tls != NULL) {
+        /*
+         * Offset of errno_val in struct __pthread:
+         * unsigned long tid:          8 bytes (offset 0)
+         * void *stack_base:           8 bytes (offset 8)
+         * size_t stack_size:          8 bytes (offset 16)
+         * void *(*start_routine)():   8 bytes (offset 24)
+         * void *arg:                  8 bytes (offset 32)
+         * void *retval:               8 bytes (offset 40)
+         * int detached:               4 bytes (offset 48)
+         * int joined:                 4 bytes (offset 52)
+         * int exited:                 4 bytes (offset 56)
+         * int errno_val:              4 bytes (offset 60)
+         */
+        return (int *)((char *)tls + 60);
+    }
+    return &_errno_fallback;
 }
+
+/* For legacy code that references errno directly (deprecated but kept for compat) */
+EXPORT int errno __attribute__((weak)) = 0;
 
 /* ============================================================================
  * Stack protector support
@@ -1114,7 +1146,7 @@ EXPORT int fflush(FILE *stream)
 
 EXPORT NORETURN void exit(int status)
 {
-#ifdef DEBUG
+#if DEBUG
     /* Debug: show we're in exit and stdout buffer state */
     const char *msg1 = "libSystem: exit() called, status=";
     syscall3(SYS_write, 2, (long)msg1, 33);
@@ -1177,7 +1209,7 @@ EXPORT int fputc(int c, FILE *stream)
 {
     unsigned char ch = (unsigned char)c;
 
-#ifdef DEBUG
+#if DEBUG
     static int _fputc_debug_count = 0;
     if (_fputc_debug_count < 3) {
         _fputc_debug_count++;
@@ -1207,7 +1239,7 @@ EXPORT int fputc(int c, FILE *stream)
     _ensure_write_buf(stream);
 
     if (stream->buf == NULL) {
-#ifdef DEBUG
+#if DEBUG
         const char *msg2 = "libSystem: fputc - buf NULL, direct write\n";
         syscall3(SYS_write, 2, (long)msg2, 42);
 #endif
@@ -1712,7 +1744,7 @@ EXPORT int vfprintf(FILE *stream, const char *fmt, va_list ap)
 {
     struct _file_ctx ctx = { .fp = stream };
     _fmt_out out = { .putch = _file_putch, .ctx = &ctx, .count = 0 };
-#ifdef DEBUG
+#if DEBUG
     const char *msg = "libSystem: vfprintf fmt='";
     syscall3(SYS_write, 2, (long)msg, 25);
     /* Print first 20 chars of fmt */
@@ -1722,7 +1754,7 @@ EXPORT int vfprintf(FILE *stream, const char *fmt, va_list ap)
     syscall3(SYS_write, 2, (long)"'\n", 2);
 #endif
     int ret = _fmt_core(&out, fmt, ap);
-#ifdef DEBUG
+#if DEBUG
     const char *msg2 = "libSystem: vfprintf returned ";
     syscall3(SYS_write, 2, (long)msg2, 29);
     char dbuf[12];
@@ -1772,7 +1804,7 @@ EXPORT int _fprintf_tcc(FILE *stream, const char *fmt, void *a1, void *a2, void 
 
 EXPORT int vprintf(const char *fmt, va_list ap)
 {
-#ifdef DEBUG
+#if DEBUG
     const char *msg = "libSystem: vprintf stdout=0x";
     syscall3(SYS_write, 2, (long)msg, 28);
     /* Print stdout pointer as hex */
@@ -5658,9 +5690,14 @@ struct __pthread {
     int                 detached;       /* 1 if detached */
     int                 joined;         /* 1 if another thread is joining */
     int                 exited;         /* 1 if thread has exited */
+    int                 errno_val;      /* Per-thread errno (macOS compliance) */
     void               *tls[PTHREAD_KEYS_MAX];  /* Thread-local storage */
     struct __pthread   *joiner;         /* Thread waiting to join us */
 };
+
+/* Verify errno_val offset matches what __error() expects (see errno section above) */
+_Static_assert(__builtin_offsetof(struct __pthread, errno_val) == 60,
+               "errno_val offset changed - update __error() in errno section");
 
 /* Global TLS key management (shared across threads) */
 static void (*_pthread_key_destructors[PTHREAD_KEYS_MAX])(void *);
@@ -6732,6 +6769,628 @@ EXPORT NORETURN void __assert_fail(const char *expr, const char *file, int line,
     write(2, msg5, 1);
     
     abort();
+}
+
+/* ============================================================================
+ * Mach IPC — Userland Wrappers
+ *
+ * Mach traps use the same svc #0x80 as BSD syscalls but with NEGATIVE
+ * x16 values. The kernel checks sign and routes accordingly.
+ *
+ * Unlike BSD syscalls, Mach traps return kern_return_t directly in x0
+ * without the carry-flag error convention.
+ *
+ * Trap numbers (matching XNU):
+ *   -26 = mach_reply_port
+ *   -27 = thread_self_trap
+ *   -28 = task_self_trap
+ *   -31 = mach_msg_trap
+ *   -32 = mach_msg_overwrite_trap
+ *   -36 = _kernelrpc_mach_port_allocate_trap
+ *   -37 = _kernelrpc_mach_port_deallocate_trap
+ * ============================================================================ */
+
+/*
+ * __mach_trap - Invoke a Mach trap via svc #0x80 with negative x16
+ *
+ * Returns the raw x0 value (kern_return_t or mach_port_t).
+ * No carry-flag check — Mach traps use return codes, not errno.
+ */
+static inline long __mach_trap(long number, long a0, long a1, long a2,
+                               long a3, long a4, long a5)
+{
+    register long x16 __asm__("x16") = number;
+    register long x0  __asm__("x0")  = a0;
+    register long x1  __asm__("x1")  = a1;
+    register long x2  __asm__("x2")  = a2;
+    register long x3  __asm__("x3")  = a3;
+    register long x4  __asm__("x4")  = a4;
+    register long x5  __asm__("x5")  = a5;
+
+    __asm__ volatile(
+        "svc    #0x80"
+        : "+r" (x0)
+        : "r" (x16), "r" (x1), "r" (x2), "r" (x3), "r" (x4), "r" (x5)
+        : "memory", "cc"
+    );
+
+    return x0;
+}
+
+#define mach_trap0(n)                   __mach_trap((n), 0, 0, 0, 0, 0, 0)
+#define mach_trap1(n, a)                __mach_trap((n), (long)(a), 0, 0, 0, 0, 0)
+#define mach_trap2(n, a, b)             __mach_trap((n), (long)(a), (long)(b), 0, 0, 0, 0)
+#define mach_trap3(n, a, b, c)          __mach_trap((n), (long)(a), (long)(b), (long)(c), 0, 0, 0)
+#define mach_trap4(n, a, b, c, d)       __mach_trap((n), (long)(a), (long)(b), (long)(c), (long)(d), 0, 0)
+#define mach_trap5(n, a, b, c, d, e)    __mach_trap((n), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e), 0)
+#define mach_trap6(n, a, b, c, d, e, f) __mach_trap((n), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e), (long)(f))
+
+/* Mach trap numbers (must match kernel/bsd/syscalls.c mach_trap_dispatch) */
+#define TRAP_mach_reply_port            (-26)
+#define TRAP_thread_self_trap           (-27)
+#define TRAP_task_self_trap             (-28)
+#define TRAP_mach_msg_trap              (-31)
+#define TRAP_mach_msg_overwrite_trap    (-32)
+#define TRAP_mach_port_allocate         (-36)
+#define TRAP_mach_port_deallocate       (-37)
+
+/* Mach return codes (must match kernel/include/mach/ipc.h) */
+#define _KERN_SUCCESS           0
+#define _MACH_MSG_SUCCESS       0
+#define _MACH_SEND_MSG          0x00000001
+#define _MACH_RCV_MSG           0x00000002
+#define _MACH_PORT_RIGHT_RECEIVE 1
+
+/*
+ * mach_task_self_ - Cached task self port
+ *
+ * On macOS, mach_task_self() is:
+ *   #define mach_task_self() mach_task_self_
+ * where mach_task_self_ is set once during libSystem initialization.
+ * We lazily initialize it on first call.
+ */
+EXPORT uint32_t mach_task_self_ = 0;
+
+/*
+ * mach_task_self - Get the calling task's self port
+ *
+ * Invokes task_self_trap (trap -28). Caches the result in mach_task_self_
+ * since the task port never changes for the lifetime of a process.
+ */
+EXPORT uint32_t mach_task_self(void)
+{
+    if (mach_task_self_ == 0)
+        mach_task_self_ = (uint32_t)mach_trap0(TRAP_task_self_trap);
+    return mach_task_self_;
+}
+
+/*
+ * mach_reply_port - Allocate a temporary reply port
+ *
+ * Invokes mach_reply_port_trap (trap -26).
+ * Returns a new port name with receive right.
+ */
+EXPORT uint32_t mach_reply_port(void)
+{
+    return (uint32_t)mach_trap0(TRAP_mach_reply_port);
+}
+
+/*
+ * mach_thread_self - Get the calling thread's self port
+ *
+ * Invokes thread_self_trap (trap -27).
+ * Returns a send right to the thread's control port.
+ * Caller must deallocate with mach_port_deallocate().
+ */
+EXPORT uint32_t mach_thread_self(void)
+{
+    return (uint32_t)mach_trap0(TRAP_thread_self_trap);
+}
+
+/*
+ * mach_msg - Send and/or receive a Mach message
+ *
+ * Invokes mach_msg_trap (trap -31).
+ * Parameters exactly match XNU's mach_msg_trap:
+ *   msg      - pointer to message header (user buffer)
+ *   option   - MACH_SEND_MSG, MACH_RCV_MSG, or both
+ *   send_size - size of message to send
+ *   rcv_size  - size of receive buffer
+ *   rcv_name  - port to receive on (or MACH_PORT_NULL)
+ *   timeout   - timeout in milliseconds (0 = infinite)
+ *   notify    - notification port (usually MACH_PORT_NULL)
+ *
+ * Returns mach_msg_return_t (0 = MACH_MSG_SUCCESS).
+ *
+ * On macOS, mach_msg() in libsystem_kernel.dylib is a wrapper that
+ * handles retry on MACH_SEND_INTERRUPTED / MACH_RCV_INTERRUPTED.
+ * We implement the same retry logic.
+ */
+EXPORT int mach_msg(void *msg, int option, unsigned int send_size,
+                    unsigned int rcv_size, unsigned int rcv_name,
+                    unsigned int timeout, unsigned int notify)
+{
+    int ret;
+    for (;;) {
+        ret = (int)__mach_trap(TRAP_mach_msg_trap,
+                               (long)msg,
+                               (long)option,
+                               (long)send_size,
+                               (long)rcv_size,
+                               (long)rcv_name,
+                               (long)timeout);
+        /* Retry on interrupt (same as macOS libsystem_kernel) */
+        if (ret == 0x10000007 /* MACH_SEND_INTERRUPTED */ && (option & _MACH_SEND_MSG))
+            continue;
+        if (ret == 0x10004005 /* MACH_RCV_INTERRUPTED */ && (option & _MACH_RCV_MSG))
+            continue;
+        break;
+    }
+    return ret;
+}
+
+/*
+ * mach_port_allocate - Allocate a new port with given right
+ *
+ * Invokes _kernelrpc_mach_port_allocate_trap (trap -36).
+ *   task  - target task port (should be mach_task_self())
+ *   right - MACH_PORT_RIGHT_RECEIVE, etc.
+ *   name  - out pointer to new port name
+ *
+ * Returns kern_return_t (0 = KERN_SUCCESS).
+ */
+EXPORT int mach_port_allocate(unsigned int task, unsigned int right, void *name)
+{
+    return (int)mach_trap3(TRAP_mach_port_allocate, task, right, name);
+}
+
+/*
+ * mach_port_deallocate - Release a send right on a port
+ *
+ * Invokes _kernelrpc_mach_port_deallocate_trap (trap -37).
+ *   task - target task port
+ *   name - port name to deallocate
+ *
+ * Returns kern_return_t.
+ */
+EXPORT int mach_port_deallocate(unsigned int task, unsigned int name)
+{
+    return (int)mach_trap2(TRAP_mach_port_deallocate, task, name);
+}
+
+/* ============================================================================
+ * Bootstrap Service Registry — register / look_up
+ *
+ * On macOS, these are MIG-generated stubs that send Mach messages to
+ * launchd's bootstrap port. On Kiseki, they are kernel-managed traps
+ * with the same userland API semantics.
+ * ============================================================================ */
+
+/* Bootstrap trap numbers */
+#define TRAP_bootstrap_register     (-40)
+#define TRAP_bootstrap_look_up      (-41)
+#define TRAP_bootstrap_check_in     (-42)
+
+/*
+ * bootstrap_register - Register a named service port
+ *
+ * bp = bootstrap port (ignored, kernel manages registry)
+ * service_name = name string (e.g. "uk.co.avltree9798.mDNSResponder")
+ * sp = port name to register (must be in caller's IPC space)
+ */
+EXPORT int bootstrap_register(unsigned int bp, const void *service_name,
+                              unsigned int sp)
+{
+    (void)bp;
+    return (int)mach_trap3(TRAP_bootstrap_register, bp, service_name, sp);
+}
+
+/*
+ * bootstrap_look_up - Look up a named service port
+ *
+ * bp = bootstrap port (ignored)
+ * service_name = name string to look up
+ * sp = out pointer to mach_port_t, receives send right
+ */
+EXPORT int bootstrap_look_up(unsigned int bp, const void *service_name,
+                             void *sp)
+{
+    (void)bp;
+    return (int)mach_trap3(TRAP_bootstrap_look_up, bp, service_name, sp);
+}
+
+/*
+ * bootstrap_check_in - Daemon claims a pre-registered service port
+ *
+ * bp = bootstrap port (ignored)
+ * service_name = name string to check in to
+ * sp = out pointer to mach_port_t, receives receive+send rights
+ *
+ * On macOS, launchd pre-creates service ports declared in the daemon's
+ * launchd plist. The daemon calls bootstrap_check_in() to receive the
+ * receive right. This eliminates race conditions.
+ */
+EXPORT int bootstrap_check_in(unsigned int bp, const void *service_name,
+                              void *sp)
+{
+    (void)bp;
+    return (int)mach_trap3(TRAP_bootstrap_check_in, bp, service_name, sp);
+}
+
+/* ============================================================================
+ * DNS Resolver — getaddrinfo() / freeaddrinfo()
+ *
+ * On macOS, DNS resolution is handled by mDNSResponder via Mach IPC.
+ * getaddrinfo() in libSystem sends a Mach message to mDNSResponder
+ * (looked up via bootstrap_look_up) containing the hostname, and receives
+ * a reply with resolved IPv4 addresses.
+ *
+ * This is the XNU-accurate architecture:
+ *   1. bootstrap_look_up("uk.co.avltree9798.mDNSResponder") -> service_port
+ *   2. mach_reply_port() -> reply_port
+ *   3. mach_msg(SEND) request with hostname to service_port
+ *   4. mach_msg(RCV) reply with addresses from reply_port
+ *   5. Build struct addrinfo chain from addresses
+ * ============================================================================ */
+
+/* Local struct definitions for the resolver (libSystem.c is freestanding) */
+struct _dns_in_addr { unsigned int s_addr; };
+struct _dns_sockaddr { unsigned char sa_len; unsigned char sa_family; char sa_data[14]; };
+struct _dns_sockaddr_in {
+    unsigned char       sin_len;
+    unsigned char       sin_family;
+    unsigned short      sin_port;
+    struct _dns_in_addr sin_addr;
+    char                sin_zero[8];
+};
+struct _dns_addrinfo {
+    int              ai_flags;
+    int              ai_family;
+    int              ai_socktype;
+    int              ai_protocol;
+    unsigned int     ai_addrlen;
+    char            *ai_canonname;
+    struct _dns_sockaddr *ai_addr;
+    struct _dns_addrinfo *ai_next;
+};
+
+/* Forward declarations for functions already in this file */
+static unsigned short _htons(unsigned short h);
+static unsigned int _htonl(unsigned int h);
+static unsigned int _ntohl(unsigned int n);
+
+/* mDNSResponder IPC protocol constants (must match mDNSResponder.c) */
+#define _MDNS_SERVICE_NAME      "uk.co.avltree9798.mDNSResponder"
+#define _MDNS_MSG_RESOLVE       1000
+#define _MDNS_MSG_RESOLVE_REPLY 1001
+#define _MDNS_MAX_HOSTNAME      256
+#define _MDNS_MAX_ADDRS         8
+
+/* Mach message bits macros (freestanding, no mach headers) */
+#define _MSGH_BITS(remote, local)   ((unsigned int)((remote) | ((local) << 8)))
+#define _MSG_TYPE_COPY_SEND         19
+#define _MSG_TYPE_MAKE_SEND_ONCE    21
+
+/* IPC request message to mDNSResponder */
+struct _mdns_request {
+    /* mach_msg_header_t: 24 bytes */
+    unsigned int    msgh_bits;
+    unsigned int    msgh_size;
+    unsigned int    msgh_remote_port;
+    unsigned int    msgh_local_port;
+    unsigned int    msgh_voucher_port;
+    int             msgh_id;
+    /* Body */
+    unsigned int    msg_id;
+    char            hostname[_MDNS_MAX_HOSTNAME];
+};
+
+/* IPC reply message from mDNSResponder */
+struct _mdns_reply {
+    /* mach_msg_header_t: 24 bytes */
+    unsigned int    msgh_bits;
+    unsigned int    msgh_size;
+    unsigned int    msgh_remote_port;
+    unsigned int    msgh_local_port;
+    unsigned int    msgh_voucher_port;
+    int             msgh_id;
+    /* Body */
+    int             error;          /* 0 = success */
+    unsigned int    addr_count;
+    unsigned int    addrs[_MDNS_MAX_ADDRS];
+    /* Trailer may follow */
+    unsigned int    trailer_type;
+    unsigned int    trailer_size;
+};
+
+/* Cached mDNSResponder service port (lazily initialized) */
+static unsigned int _mdns_port = 0;
+
+/*
+ * _mdns_get_port - Look up the mDNSResponder service port via bootstrap.
+ *
+ * Caches the result for subsequent calls.
+ * Returns the port name, or 0 on failure.
+ */
+static unsigned int _mdns_get_port(void)
+{
+    if (_mdns_port != 0)
+        return _mdns_port;
+
+    unsigned int port = 0;
+    int kr = bootstrap_look_up(0, _MDNS_SERVICE_NAME, &port);
+    if (kr == 0 && port != 0) {
+        _mdns_port = port;
+        return port;
+    }
+
+    return 0;
+}
+
+/*
+ * _dns_resolve - Resolve a hostname via mDNSResponder Mach IPC.
+ *
+ * Sends a resolve request to mDNSResponder and receives the reply.
+ * Returns the number of addresses resolved (stored in out_addrs),
+ * or -1 on failure.
+ *
+ * @hostname:   Hostname to resolve
+ * @out_addrs:  Output array of IPv4 addresses (network byte order)
+ * @max_addrs:  Maximum addresses to return
+ *
+ * Returns count of addresses, or -1 on failure.
+ */
+static int _dns_resolve(const char *hostname, unsigned int *out_addrs,
+                        int max_addrs)
+{
+    /* Find mDNSResponder */
+    unsigned int service_port = _mdns_get_port();
+    if (service_port == 0)
+        return -1;
+
+    /* Allocate a reply port */
+    unsigned int reply_port = mach_reply_port();
+    if (reply_port == 0)
+        return -1;
+
+    /* Build request message */
+    struct _mdns_request req;
+    for (unsigned int i = 0; i < sizeof(req); i++)
+        ((unsigned char *)&req)[i] = 0;
+
+    req.msgh_bits = _MSGH_BITS(_MSG_TYPE_COPY_SEND, _MSG_TYPE_MAKE_SEND_ONCE);
+    req.msgh_size = sizeof(req);
+    req.msgh_remote_port = service_port;
+    req.msgh_local_port = reply_port;
+    req.msgh_voucher_port = 0;
+    req.msgh_id = _MDNS_MSG_RESOLVE;
+    req.msg_id = _MDNS_MSG_RESOLVE;
+
+    /* Copy hostname (safely) */
+    int hlen = 0;
+    while (hostname[hlen] && hlen < _MDNS_MAX_HOSTNAME - 1) {
+        req.hostname[hlen] = hostname[hlen];
+        hlen++;
+    }
+    req.hostname[hlen] = '\0';
+
+    /* Send request to mDNSResponder */
+    int kr = mach_msg(&req, _MACH_SEND_MSG, sizeof(req), 0, 0, 0, 0);
+    if (kr != 0) {
+        mach_port_deallocate(mach_task_self(), reply_port);
+        return -1;
+    }
+
+    /* Receive reply */
+    struct _mdns_reply reply;
+    for (unsigned int i = 0; i < sizeof(reply); i++)
+        ((unsigned char *)&reply)[i] = 0;
+
+    kr = mach_msg(&reply, _MACH_RCV_MSG, 0, sizeof(reply), reply_port, 0, 0);
+
+    /* Deallocate reply port */
+    mach_port_deallocate(mach_task_self(), reply_port);
+
+    if (kr != 0)
+        return -1;
+
+    /* Check reply */
+    if (reply.msgh_id != _MDNS_MSG_RESOLVE_REPLY)
+        return -1;
+    if (reply.error != 0)
+        return -1;
+    if (reply.addr_count == 0)
+        return -1;
+
+    /* Copy addresses */
+    int count = (int)reply.addr_count;
+    if (count > max_addrs)
+        count = max_addrs;
+    for (int i = 0; i < count; i++)
+        out_addrs[i] = reply.addrs[i];
+
+    return count;
+}
+
+/* EAI error strings */
+static const char *_eai_strings[] = {
+    "Success",                          /* 0 */
+    "Address family not supported",     /* 1 */
+    "Temporary failure",                /* 2  EAI_AGAIN */
+    "Invalid flags",                    /* 3  EAI_BADFLAGS */
+    "Non-recoverable failure",          /* 4  EAI_FAIL */
+    "Address family not supported",     /* 5  EAI_FAMILY */
+    "Memory allocation failure",        /* 6  EAI_MEMORY */
+    "Unknown error",                    /* 7 */
+    "Name or service not known",        /* 8  EAI_NONAME */
+    "Service not supported",            /* 9  EAI_SERVICE */
+    "Socket type not supported",        /* 10 EAI_SOCKTYPE */
+    "System error",                     /* 11 EAI_SYSTEM */
+};
+
+EXPORT const char *gai_strerror(int ecode)
+{
+    if (ecode >= 0 && ecode <= 11)
+        return _eai_strings[ecode];
+    return "Unknown error";
+}
+
+/*
+ * freeaddrinfo - Free addrinfo linked list.
+ *
+ * Uses void * in signature (libSystem.c is freestanding); the public
+ * header <netdb.h> declares the properly-typed version for clients.
+ * Internally uses _dns_addrinfo which has the same layout as struct addrinfo.
+ */
+EXPORT void freeaddrinfo(void *_ai)
+{
+    struct _dns_addrinfo *ai = (struct _dns_addrinfo *)_ai;
+    while (ai) {
+        struct _dns_addrinfo *next = ai->ai_next;
+        if (ai->ai_addr)
+            free(ai->ai_addr);
+        if (ai->ai_canonname)
+            free(ai->ai_canonname);
+        free(ai);
+        ai = next;
+    }
+}
+
+/*
+ * getaddrinfo - Resolve hostname to socket addresses.
+ *
+ * Matches macOS/XNU API (POSIX.1-2001). On macOS this talks to
+ * mDNSResponder; on Kiseki we resolve directly via UDP DNS.
+ *
+ * Supports:
+ *   - Numeric addresses ("1.2.3.4") via inet_pton
+ *   - Hostnames ("example.com") via DNS A-record query
+ *   - Service names: only numeric ports (no /etc/services)
+ *
+ * Uses void * in signature for freestanding compatibility.
+ * The public header <netdb.h> declares the properly-typed version.
+ *
+ * Returns 0 on success, or EAI_* error code.
+ */
+EXPORT int getaddrinfo(const char *hostname, const char *servname,
+                       const void *_hints, void **_res)
+{
+    const struct _dns_addrinfo *hints = (const struct _dns_addrinfo *)_hints;
+    struct _dns_addrinfo **res = (struct _dns_addrinfo **)_res;
+
+    if (!res)
+        return 3; /* EAI_BADFLAGS */
+
+    *res = (void *)0;
+
+    int family   = hints ? hints->ai_family   : 0;  /* AF_UNSPEC */
+    int socktype = hints ? hints->ai_socktype : 0;
+    int protocol = hints ? hints->ai_protocol : 0;
+    int flags    = hints ? hints->ai_flags    : 0;
+
+    /* Only AF_INET and AF_UNSPEC supported */
+    if (family != 0 && family != 2 /* AF_INET */)
+        return 5; /* EAI_FAMILY */
+
+    /* Parse service/port */
+    unsigned short port = 0;
+    if (servname && servname[0]) {
+        /* Only numeric ports supported */
+        int p = 0;
+        const char *s = servname;
+        while (*s >= '0' && *s <= '9') {
+            p = p * 10 + (*s - '0');
+            s++;
+        }
+        if (*s != '\0')
+            return 9; /* EAI_SERVICE */
+        port = _htons((unsigned short)p);
+    }
+
+    /* Resolve address */
+    unsigned int addr = 0; /* network byte order */
+
+    if (!hostname || hostname[0] == '\0') {
+        /* NULL hostname: INADDR_ANY or INADDR_LOOPBACK depending on AI_PASSIVE */
+        addr = (flags & 0x0001 /* AI_PASSIVE */) ? 0 : _htonl(0x7F000001);
+    } else {
+        /* Try numeric first */
+        if (inet_pton(2, hostname, &addr) == 1) {
+            /* Success — numeric address */
+        } else if (flags & 0x0004 /* AI_NUMERICHOST */) {
+            return 8; /* EAI_NONAME */
+        } else {
+            /* DNS resolution via mDNSResponder Mach IPC */
+            unsigned int resolved_addrs[_MDNS_MAX_ADDRS];
+            int count = _dns_resolve(hostname, resolved_addrs, _MDNS_MAX_ADDRS);
+            if (count <= 0)
+                return 8; /* EAI_NONAME */
+            addr = resolved_addrs[0]; /* Use first address */
+        }
+    }
+
+    /* Build result: _dns_addrinfo + _dns_sockaddr_in
+     * These have the same layout as struct addrinfo / struct sockaddr_in
+     * from the public headers, so callers can cast freely. */
+    struct _dns_addrinfo *ai = malloc(sizeof(struct _dns_addrinfo));
+    if (!ai)
+        return 6; /* EAI_MEMORY */
+
+    struct _dns_sockaddr_in *sa = malloc(sizeof(struct _dns_sockaddr_in));
+    if (!sa) {
+        free(ai);
+        return 6; /* EAI_MEMORY */
+    }
+
+    /* Zero fill */
+    for (unsigned int i = 0; i < sizeof(*ai); i++)
+        ((unsigned char *)ai)[i] = 0;
+    for (unsigned int i = 0; i < sizeof(*sa); i++)
+        ((unsigned char *)sa)[i] = 0;
+
+    sa->sin_len         = sizeof(struct _dns_sockaddr_in);
+    sa->sin_family      = 2; /* AF_INET */
+    sa->sin_port        = port;
+    sa->sin_addr.s_addr = addr;
+
+    ai->ai_flags    = flags;
+    ai->ai_family   = 2; /* AF_INET */
+    ai->ai_socktype = socktype ? socktype : 1 /* SOCK_STREAM */;
+    ai->ai_protocol = protocol;
+    ai->ai_addrlen  = sizeof(struct _dns_sockaddr_in);
+    ai->ai_addr     = (struct _dns_sockaddr *)sa;
+    ai->ai_next     = (void *)0;
+
+    /* If caller didn't specify socktype, return both STREAM and DGRAM
+     * like macOS getaddrinfo() does */
+    if (socktype == 0) {
+        struct _dns_addrinfo *ai2 = malloc(sizeof(struct _dns_addrinfo));
+        struct _dns_sockaddr_in *sa2 = malloc(sizeof(struct _dns_sockaddr_in));
+        if (ai2 && sa2) {
+            for (unsigned int i = 0; i < sizeof(*ai2); i++)
+                ((unsigned char *)ai2)[i] = 0;
+            for (unsigned int i = 0; i < sizeof(*sa2); i++)
+                ((unsigned char *)sa2)[i] = 0;
+
+            *sa2 = *sa;
+            ai2->ai_flags    = flags;
+            ai2->ai_family   = 2;
+            ai2->ai_socktype = 2 /* SOCK_DGRAM */;
+            ai2->ai_protocol = 17 /* IPPROTO_UDP */;
+            ai2->ai_addrlen  = sizeof(struct _dns_sockaddr_in);
+            ai2->ai_addr     = (struct _dns_sockaddr *)sa2;
+            ai2->ai_next     = (void *)0;
+
+            ai->ai_protocol = 6 /* IPPROTO_TCP */;
+            ai->ai_next     = ai2;
+        } else {
+            if (ai2) free(ai2);
+            if (sa2) free(sa2);
+        }
+    }
+
+    *res = ai;
+    return 0;
 }
 
 /* ============================================================================

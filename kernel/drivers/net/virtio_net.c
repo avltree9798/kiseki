@@ -248,10 +248,15 @@ static void virtio_net_fill_rx(void)
 }
 
 /*
- * virtio_net_recv - Poll for received packets.
+ * virtio_net_recv - Process received packets from the RX used ring.
  *
- * Checks the RX used ring for completed receive buffers,
- * passes them up to the ethernet layer, then re-posts the buffers.
+ * Called from the VirtIO-net interrupt handler (irq_dispatch) and
+ * also from polling paths in socket syscalls.
+ *
+ * Uses a drain-then-ACK-then-recheck loop to avoid the classic race
+ * where a packet arrives between the last ring check and the ISR ACK.
+ * Without the recheck, the ISR ACK de-asserts the IRQ line and the
+ * new packet would sit unprocessed until the next unrelated interrupt.
  */
 void virtio_net_recv(void)
 {
@@ -260,43 +265,65 @@ void virtio_net_recv(void)
 
     struct virtqueue *vq = &netdev.vq[0];
 
-    dsb();  /* Ensure we see device's latest writes to used ring */
-    while (vq->last_used_idx != vq->used->idx) {
-        dsb();
+    for (;;) {
+        /* Drain all completed RX buffers */
+        dsb();  /* Ensure we see device's latest writes to used ring */
+        while (vq->last_used_idx != vq->used->idx) {
+            dsb();
 
-        uint32_t used_idx = vq->last_used_idx % vq->num;
-        uint32_t desc_idx = vq->used->ring[used_idx].id;
-        uint32_t total_len = vq->used->ring[used_idx].len;
+            uint32_t used_idx = vq->last_used_idx % vq->num;
+            uint32_t desc_idx = vq->used->ring[used_idx].id;
+            uint32_t total_len = vq->used->ring[used_idx].len;
 
-        vq->last_used_idx++;
+            vq->last_used_idx++;
 
-        /* Skip virtio_net_hdr to get the actual frame */
-        if (total_len > VIRTIO_NET_HDR_SIZE) {
-            uint8_t *frame = (uint8_t *)((uint64_t)vq->desc[desc_idx].addr)
-                             + VIRTIO_NET_HDR_SIZE;
-            uint32_t frame_len = total_len - VIRTIO_NET_HDR_SIZE;
+            /* Skip virtio_net_hdr to get the actual frame */
+            if (total_len > VIRTIO_NET_HDR_SIZE) {
+                uint8_t *frame = (uint8_t *)((uint64_t)vq->desc[desc_idx].addr)
+                                 + VIRTIO_NET_HDR_SIZE;
+                uint32_t frame_len = total_len - VIRTIO_NET_HDR_SIZE;
 
-            eth_input(frame, frame_len);
+                eth_input(frame, frame_len);
+            }
+
+            /* Re-post the buffer */
+            vq->desc[desc_idx].len   = NET_RX_BUFSZ;
+            vq->desc[desc_idx].flags = VIRTQ_DESC_F_WRITE;
+
+            uint16_t avail_idx = vq->avail->idx;
+            vq->avail->ring[avail_idx % vq->num] = (uint16_t)desc_idx;
+            dsb();
+            vq->avail->idx = avail_idx + 1;
+            dsb();
+
+            /* Notify device */
+            mmio_write32(netdev.base + VIRTIO_MMIO_QUEUE_NOTIFY, 0);
         }
 
-        /* Re-post the buffer */
-        vq->desc[desc_idx].len   = NET_RX_BUFSZ;
-        vq->desc[desc_idx].flags = VIRTQ_DESC_F_WRITE;
+        /*
+         * ACK the interrupt AFTER draining the ring.
+         *
+         * VirtIO MMIO ISR bit 0 is shared between RX and TX queues.
+         * By ACKing only after we've processed all pending packets,
+         * we ensure we don't lose any notifications.
+         */
+        uint32_t isr = mmio_read32(netdev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
+        if (isr)
+            mmio_write32(netdev.base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
-        uint16_t avail_idx = vq->avail->idx;
-        vq->avail->ring[avail_idx % vq->num] = (uint16_t)desc_idx;
+        /*
+         * Re-check the used ring after ACKing. If a new packet arrived
+         * between our last check and the ACK, we need to process it now
+         * because the ACK may have de-asserted the IRQ line — meaning
+         * the GIC won't re-deliver the interrupt for this packet.
+         *
+         * This is the standard pattern for level-triggered interrupt
+         * handlers to avoid lost notifications.
+         */
         dsb();
-        vq->avail->idx = avail_idx + 1;
-        dsb();
-
-        /* Notify device */
-        mmio_write32(netdev.base + VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+        if (vq->last_used_idx == vq->used->idx)
+            break;  /* Ring is truly empty — safe to return */
     }
-
-    /* Acknowledge interrupts */
-    uint32_t isr = mmio_read32(netdev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (isr)
-        mmio_write32(netdev.base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
 }
 
 /* ============================================================================
@@ -380,11 +407,18 @@ int virtio_net_send(const void *frame, uint32_t len)
     vq->last_used_idx++;
     vq_free_desc(vq, (uint32_t)d);
 
-    /* Only acknowledge TX-specific interrupt bit (bit 0 = used buffer).
-     * Don't blindly ACK all bits — that would clear pending RX interrupts. */
-    uint32_t isr = mmio_read32(netdev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (isr & 1)
-        mmio_write32(netdev.base + VIRTIO_MMIO_INTERRUPT_ACK, 1);
+    /*
+     * Do NOT ACK the ISR here. VirtIO MMIO has a single shared ISR bit 0
+     * ("used buffer notification") for ALL queues — both RX and TX.
+     * ACKing it here would clear pending RX interrupt notifications,
+     * causing incoming packets to be silently dropped until something
+     * else triggers virtio_net_recv(). The RX interrupt handler in
+     * virtio_net_recv() is responsible for ACKing the ISR after it has
+     * drained the RX used ring.
+     *
+     * Since TX uses synchronous polling (the while loop above), we don't
+     * need interrupt notification for TX completion anyway.
+     */
 
     spin_unlock_irqrestore(&net_tx_lock, flags);
 

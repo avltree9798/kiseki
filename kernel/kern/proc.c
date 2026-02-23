@@ -24,6 +24,7 @@
 #include <kern/thread.h>
 #include <kern/kprintf.h>
 #include <kern/sync.h>
+#include <mach/ipc.h>
 #include <fs/vfs.h>
 #include <bsd/signal.h>
 #include <bsd/security.h>
@@ -443,6 +444,12 @@ void proc_exit(struct proc *p, int status)
         vmm_destroy_space(p->p_vmspace);
         p->p_vmspace = NULL;
     }
+    /* Destroy the task's IPC space (release all port rights) */
+    if (p->p_task && p->p_task->ipc_space) {
+        ipc_space_destroy(p->p_task->ipc_space);
+        p->p_task->ipc_space = NULL;
+    }
+
     /* Clear task pointer to avoid dangling reference in scheduler */
     if (p->p_task)
         p->p_task->vm_space = NULL;
@@ -532,6 +539,94 @@ retry:
 #define ECHILD  10
 #endif
 
+/*
+ * debug_fork_child_return - Called from fork_child_return assembly to verify
+ * TTBR0 setup before switching address spaces.
+ *
+ * This helps debug fork failures by showing exactly what values are being used.
+ */
+void debug_fork_child_return(struct vm_space *space)
+{
+#if DEBUG
+    uint64_t ttbr0_before;
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0_before));
+    
+    kprintf("[fork_child_return] vm_space=%p pgd=%p asid=%lu\n",
+            space, space ? (void *)space->pgd : NULL,
+            space ? (unsigned long)space->asid : 0);
+    kprintf("[fork_child_return] current TTBR0=0x%lx (before switch)\n", ttbr0_before);
+    
+    if (space && space->pgd) {
+        pte_t *pgd = space->pgd;
+        kprintf("[fork_child_return] pgd[0]=0x%lx\n", pgd[0]);
+        if (pgd[0] & PTE_VALID) {
+            pte_t *l1 = (pte_t *)PTE_TO_PHYS(pgd[0]);
+            kprintf("[fork_child_return] L1[12]=0x%lx (for VA 0x300000000)\n", l1[12]);
+        }
+    }
+#else
+    (void)space;
+#endif
+}
+
+/*
+ * debug_fork_trapframe - Called from fork_child_return to verify trap frame
+ * contents before RESTORE_REGS.
+ *
+ * The trap frame pointer is passed in x20 (saved by sys_fork_impl in context.x20).
+ */
+void debug_fork_trapframe(struct trap_frame *tf)
+{
+#if DEBUG
+    kprintf("[fork_child_return] trap frame at %p:\n", (void *)tf);
+    kprintf("  elr=0x%lx sp=0x%lx spsr=0x%lx\n", tf->elr, tf->sp, tf->spsr);
+    kprintf("  x0=0x%lx x30=0x%lx\n", tf->regs[0], tf->regs[30]);
+    
+    /* Verify ELR is a user address (< 0xFFFF...) */
+    if (tf->elr >= 0xFFFF000000000000ULL) {
+        kprintf("!!! ERROR: trap frame elr=0x%lx is a KERNEL address!\n", tf->elr);
+    }
+    /* Verify SP is a user address */
+    if (tf->sp >= 0xFFFF000000000000ULL) {
+        kprintf("!!! ERROR: trap frame sp=0x%lx is a KERNEL address!\n", tf->sp);
+    }
+    /* Verify SPSR has EL0 mode (bits [3:0] should be 0x0 for EL0) */
+    uint64_t spsr_mode = tf->spsr & 0xF;
+    if (spsr_mode != 0x0) {
+        kprintf("!!! ERROR: trap frame spsr mode=0x%lx (expected 0x0 for EL0)!\n",
+                spsr_mode);
+    }
+#else
+    (void)tf;
+#endif
+}
+
+/*
+ * fork_trapframe_panic_c - Called from assembly when fork_child_return
+ * detects a corrupted trap frame.
+ */
+void fork_trapframe_panic_c(uint64_t elr, uint64_t sp)
+{
+    kprintf("\n!!! FORK TRAP FRAME CORRUPTION !!!\n");
+    kprintf("  trap frame ELR=0x%lx (expected user address < 0xFFFF...)\n", elr);
+    kprintf("  trap frame SP=0x%lx\n", sp);
+    
+    /* Get current CPU info */
+    struct cpu_data *cd;
+    __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
+    if (cd && cd->current_thread) {
+        struct thread *th = cd->current_thread;
+        kprintf("  Current thread: tid=%lu\n", th->tid);
+        kprintf("  kernel_stack=%p size=0x%lx\n",
+                (void *)th->kernel_stack, th->kernel_stack_size);
+        if (th->task) {
+            kprintf("  task pid=%d\n", th->task->pid);
+        }
+    }
+    
+    panic("fork_child_return: trap frame corrupted");
+}
+
 /* ============================================================================
  * sys_fork_impl - Fork the current process
  *
@@ -557,10 +652,19 @@ int sys_fork_impl(struct trap_frame *tf)
     if (parent == NULL)
         return EINVAL;
 
+#if DEBUG
+    kprintf("[fork] parent PID=%d '%s' forking...\n", parent->p_pid, parent->p_comm);
+#endif
+
     /* 1. Create the child process (gets fresh VM space via proc_create) */
     struct proc *child = proc_create(parent->p_comm, parent);
     if (child == NULL)
         return ENOMEM;
+
+#if DEBUG
+    kprintf("[fork] child PID=%d created, parent_pgd=0x%lx child_pgd=0x%lx\n",
+            child->p_pid, (uint64_t)parent->p_vmspace->pgd, (uint64_t)child->p_vmspace->pgd);
+#endif
 
     /* 2. Deep-copy parent's user pages into child's address space */
     if (parent->p_vmspace && child->p_vmspace) {
@@ -574,6 +678,23 @@ int sys_fork_impl(struct trap_frame *tf)
             return ENOMEM;
         }
     }
+
+#if DEBUG
+    kprintf("[fork] vmm_copy_space done for child PID=%d\n", child->p_pid);
+    /* Verify child's L0[0] and L1[12] entries */
+    if (child->p_vmspace && child->p_vmspace->pgd) {
+        pte_t *cpgd = child->p_vmspace->pgd;
+        kprintf("[fork] child L0[0]=0x%lx\n", cpgd[0]);
+        if (cpgd[0] & PTE_VALID) {
+            pte_t *cl1 = (pte_t *)PTE_TO_PHYS(cpgd[0]);
+            kprintf("[fork] child L1[12]=0x%lx\n", cl1[12]);
+            if (cl1[12] & PTE_VALID) {
+                pte_t *cl2 = (pte_t *)PTE_TO_PHYS(cl1[12]);
+                kprintf("[fork] child L2[0]=0x%lx\n", cl2[0]);
+            }
+        }
+    }
+#endif
 
     /* 3. Copy file descriptor table (bumps refcounts on shared files) */
     fd_dup_table(&child->p_fd, &parent->p_fd);
@@ -598,6 +719,18 @@ int sys_fork_impl(struct trap_frame *tf)
     ctask->euid = parent->p_ucred.cr_uid;
     ctask->egid = parent->p_ucred.cr_gid;
     strncpy_p(ctask->name, child->p_comm, sizeof(ctask->name) - 1);
+
+    /* Allocate a per-task IPC space (XNU: task_create_internal → ipc_space_create) */
+    ctask->ipc_space = ipc_space_create();
+    if (ctask->ipc_space == NULL) {
+        kprintf("[fork] cannot create IPC space for child PID %d\n", child->p_pid);
+        vmm_destroy_space(child->p_vmspace);
+        child->p_vmspace = NULL;
+        pid_free(child->p_pid);
+        memset_p(child, 0, sizeof(*child));
+        return ENOMEM;
+    }
+
     child->p_task = ctask;
 
     /* 5. Create a kernel thread for the child */
@@ -640,15 +773,105 @@ int sys_fork_impl(struct trap_frame *tf)
      *    context.x30 (LR) = fork_child_return
      *    context.sp        = child_tf_base (where the trap frame lives)
      *    context.x19       = child->p_vmspace (for TTBR0 switch in trampoline)
+     *    context.x20       = child_tf_base (trap frame ptr for debug)
      */
     child_thread->context.x30 = (uint64_t)fork_child_return;
     child_thread->context.sp  = child_tf_base;
     child_thread->context.x19 = (uint64_t)child->p_vmspace;
+    child_thread->context.x20 = child_tf_base;  /* For debug_fork_trapframe */
     child_thread->context.x29 = 0;  /* FP sentinel */
 
-    /* 8. Enqueue the child thread so the scheduler can run it */
+#if DEBUG
+    {
+        /* Dump EVERYTHING about the child thread setup */
+        struct thread *parent_thread = current_thread_get();
+        pid_t parent_pid = parent->p_pid;
+        kprintf("[FORK] === Child thread setup for child PID=%d ===\n", child->p_pid);
+        kprintf("[FORK]   child_thread tid=%lu kstack=[0x%lx..0x%lx]\n",
+                child_thread->tid,
+                (uint64_t)child_thread->kernel_stack,
+                (uint64_t)child_thread->kernel_stack + child_thread->kernel_stack_size);
+        kprintf("[FORK]   child ctx: x30=0x%lx (fork_child_return) sp=0x%lx x19=0x%lx x20=0x%lx x29=0x%lx\n",
+                child_thread->context.x30, child_thread->context.sp,
+                child_thread->context.x19, child_thread->context.x20,
+                child_thread->context.x29);
+        kprintf("[FORK]   child_tf at 0x%lx: ELR=0x%lx SP=0x%lx x0=0x%lx x30=0x%lx SPSR=0x%lx\n",
+                (uint64_t)child_tf, child_tf->elr, child_tf->sp,
+                child_tf->regs[0], child_tf->regs[30], child_tf->spsr);
+
+        /* Dump parent thread info */
+        kprintf("[FORK]   parent_thread tid=%lu pid=%d kstack=[0x%lx..0x%lx]\n",
+                parent_thread ? parent_thread->tid : 0, parent_pid,
+                parent_thread ? (uint64_t)parent_thread->kernel_stack : 0,
+                parent_thread ? ((uint64_t)parent_thread->kernel_stack + parent_thread->kernel_stack_size) : 0);
+        kprintf("[FORK]   parent tf at 0x%lx: ELR=0x%lx SP=0x%lx x30=0x%lx\n",
+                (uint64_t)tf, tf->elr, tf->sp, tf->regs[30]);
+
+        /* Dump parent's CURRENT saved context (will be overwritten on next context_switch) */
+        if (parent_thread) {
+            kprintf("[FORK]   parent saved ctx: x30=0x%lx sp=0x%lx x19=0x%lx\n",
+                    parent_thread->context.x30, parent_thread->context.sp,
+                    parent_thread->context.x19);
+        }
+
+        /* Check for overlap between parent and child kernel stacks */
+        if (parent_thread && parent_thread->kernel_stack) {
+            uint64_t p_lo = (uint64_t)parent_thread->kernel_stack;
+            uint64_t p_hi = p_lo + parent_thread->kernel_stack_size;
+            uint64_t c_lo = (uint64_t)child_thread->kernel_stack;
+            uint64_t c_hi = c_lo + child_thread->kernel_stack_size;
+            if (c_lo < p_hi && c_hi > p_lo) {
+                kprintf("[FORK]   !!! BUG: KERNEL STACK OVERLAP parent=[0x%lx..0x%lx] child=[0x%lx..0x%lx]\n",
+                        p_lo, p_hi, c_lo, c_hi);
+                panic("fork: kernel stacks overlap");
+            }
+        }
+
+        /* Verify child tf_base is within child's kernel stack */
+        {
+            uint64_t c_lo = (uint64_t)child_thread->kernel_stack;
+            uint64_t c_hi = c_lo + child_thread->kernel_stack_size;
+            if (child_tf_base < c_lo || child_tf_base >= c_hi) {
+                kprintf("[FORK]   !!! BUG: child_tf_base=0x%lx OUTSIDE child kstack [0x%lx..0x%lx]\n",
+                        child_tf_base, c_lo, c_hi);
+                panic("fork: child trap frame outside kernel stack");
+            }
+        }
+
+        /* Verify tf (parent trap frame) is within parent's kernel stack */
+        if (parent_thread && parent_thread->kernel_stack) {
+            uint64_t p_lo = (uint64_t)parent_thread->kernel_stack;
+            uint64_t p_hi = p_lo + parent_thread->kernel_stack_size;
+            uint64_t tf_addr = (uint64_t)tf;
+            if (tf_addr < p_lo || tf_addr >= p_hi) {
+                kprintf("[FORK]   !!! WARNING: parent tf=0x%lx OUTSIDE parent kstack [0x%lx..0x%lx]\n",
+                        tf_addr, p_lo, p_hi);
+            }
+        }
+
+        /* Dump current hardware SP to verify we're on the right stack */
+        uint64_t hw_sp;
+        __asm__ volatile("mov %0, sp" : "=r"(hw_sp));
+        kprintf("[FORK]   current hw_sp=0x%lx\n", hw_sp);
+    }
+#endif
+
+    /*
+     * 8. Full memory barrier before making the child runnable.
+     * Ensure ALL writes (page tables, trap frame, thread context) are
+     * globally visible before any other CPU can pick up this thread.
+     * This is critical for SMP: without this barrier, another CPU might
+     * see the thread on the run queue before seeing the page table updates.
+     */
+    __asm__ volatile("dsb sy" ::: "memory");
+    
     child_thread->state = TH_RUN;
     sched_enqueue(child_thread);
+
+#if DEBUG
+    kprintf("[FORK] child PID=%d (tid=%lu) enqueued. Setting parent return x0=%d\n",
+            child->p_pid, child_thread->tid, child->p_pid);
+#endif
 
     /* Parent return value: child's PID */
     tf->regs[0] = (uint64_t)child->p_pid;
@@ -1158,20 +1381,15 @@ static const char *init_envp[] = {
 /*
  * Static task structure for PID 1 (init).
  *
- * kernel_init_process() runs on the boot CPU's idle thread, which has
- * task = NULL.  Before entering user mode via eret we must set up a
- * proper thread→task→pid chain so that syscalls (which call
- * proc_current() → current_thread_get()→task→pid) can find the proc
- * entry for PID 1.
- *
- * We allocate a dedicated thread + task for init instead of reusing the
- * idle thread, because the idle thread must remain available to the
- * scheduler.  However, we don't context-switch to this thread normally;
- * we simply install it as current_thread and eret directly to user mode.
- * When a syscall re-enters the kernel, TPIDR_EL1 still holds the same
- * cpu_data, and current_thread points to init_thread.
+ * kernel_init_process() sets up init's thread with a trap frame and
+ * context so the scheduler can dispatch it via init_thread_return.
+ * This is the XNU-correct approach: PID 1 is launched by the scheduler,
+ * not via a manual eret hack from the boot path.
  */
 static struct task init_task;
+
+/* Assembly trampoline: switches TTBR0, restores trap frame, erets to EL0 */
+extern void init_thread_return(void);
 
 void kernel_init_process(void)
 {
@@ -1338,20 +1556,11 @@ void kernel_init_process(void)
 
     strncpy_p(init->p_comm, chosen_path, PROC_NAME_MAX - 1);
 
-    /* Switch to init's address space */
-    vmm_switch_space(init->p_vmspace);
-
     /*
-     * Set up a proper thread → task → pid chain for PID 1.
+     * Set up the task structure for PID 1.
      *
-     * The boot path runs on the idle thread (task = NULL).  Syscalls
-     * from user mode call proc_current() which walks:
+     * Syscalls from user mode call proc_current() which walks:
      *   TPIDR_EL1 → cpu_data → current_thread → task → pid → proc_table[pid]
-     *
-     * We create a dedicated thread for the init process and install it
-     * as the CPU's current_thread.  This thread's kernel stack will be
-     * used when syscalls trap back into the kernel (SP_EL1 is set by
-     * the exception vectors from the thread's kernel stack).
      */
     memset_p(&init_task, 0, sizeof(init_task));
     init_task.pid = init->p_pid;
@@ -1362,9 +1571,19 @@ void kernel_init_process(void)
     init_task.egid = 0;
     strncpy_p(init_task.name, "init", sizeof(init_task.name) - 1);
 
-    /* Create a kernel thread for init.
-     * We won't use its entry function — we eret to user mode directly.
-     * But it gives us a kernel stack for handling syscall traps. */
+    /* Allocate a per-task IPC space (XNU: task_create_internal → ipc_space_create) */
+    init_task.ipc_space = ipc_space_create();
+    if (init_task.ipc_space == NULL)
+        panic("Cannot create IPC space for init");
+
+    /*
+     * Create a kernel thread for init.
+     * Unlike the old code, we DO NOT manually eret to user mode.
+     * Instead, we set up the thread's context so the scheduler
+     * dispatches it to init_thread_return (assembly trampoline in
+     * vectors.S) which switches TTBR0, restores the trap frame, and
+     * erets to user mode. This is the XNU-correct approach.
+     */
     struct thread *init_thread = thread_create("init", NULL, NULL, PRI_DEFAULT);
     if (init_thread == NULL)
         panic("Cannot create init thread");
@@ -1374,77 +1593,78 @@ void kernel_init_process(void)
     init->p_task = &init_task;
     init_task.threads = init_thread;
 
-    /* Install init_thread as the current thread on this CPU.
-     * This means all subsequent current_thread_get() calls (including
-     * from within syscall handlers) will see this thread. */
-    {
-        struct cpu_data *cd;
-        __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
-        cd->current_thread = init_thread;
-    }
-
-    kprintf("[init] === End of kernel bootstrap ===\n\n");
-
     /*
-     * Drop to EL0 via eret.
+     * Place a trap frame at the TOP of init_thread's kernel stack.
+     * init_thread_return expects SP to point to a valid trap frame
+     * when it runs RESTORE_REGS.
      *
-     * Set up the registers:
-     *   ELR_EL1 = entry point (dyld or direct)
-     *   SP_EL0  = user stack pointer
-     *   SPSR_EL1 = 0 (EL0t, interrupts enabled)
-     *
-     * We also set SP (SP_EL1) to the top of init_thread's kernel stack.
-     * This is critical: when an exception occurs from EL0, the CPU
-     * switches to SP_EL1, so it must point to a valid kernel stack.
+     * This is identical to how sys_fork_impl sets up fork children
+     * and how thread_create_user sets up pthread threads.
      */
     uint64_t kstack_top = (uint64_t)init_thread->kernel_stack +
                           init_thread->kernel_stack_size;
+    uint64_t tf_base = kstack_top - TF_SIZE;
+    struct trap_frame *init_tf = (struct trap_frame *)tf_base;
 
-    /* Capture entry point and free the load result before eret */
+    /* Zero out the trap frame */
+    memset_p(init_tf, 0, TF_SIZE);
+
+    /* User entry point */
+    init_tf->elr = result->entry_point;
+
+    /* User stack pointer */
+    init_tf->sp = sp;
+
+    /* SPSR: EL0t (user mode), IRQs enabled */
+    init_tf->spsr = 0x0;
+
+    /*
+     * Set up the kernel-mode context for the first context switch.
+     * context_switch will restore this, then "return" to init_thread_return.
+     *
+     * context.x30 (LR) = init_thread_return (assembly trampoline)
+     * context.sp        = tf_base (where the trap frame lives)
+     * context.x19       = init->p_vmspace (for TTBR0 switch in trampoline)
+     * context.x29       = 0 (FP sentinel)
+     */
+    init_thread->context.x30 = (uint64_t)init_thread_return;
+    init_thread->context.sp  = tf_base;
+    init_thread->context.x19 = (uint64_t)init->p_vmspace;
+    init_thread->context.x29 = 0;
+
+    /* Capture entry point for logging, then free the load result */
     uint64_t entry = result->entry_point;
     pmm_free_pages(lr_pa, 3);
 
-    __asm__ volatile(
-        "mov  sp, %2\n"                /* SP_EL1 = kernel stack top */
-        "msr  spsr_el1, xzr\n"         /* SPSR = 0 (EL0t) */
-        "msr  elr_el1, %0\n"           /* ELR = entry point */
-        "msr  sp_el0, %1\n"            /* SP_EL0 = user stack */
-        "mov  x0, xzr\n"               /* Clear all GPRs */
-        "mov  x1, xzr\n"
-        "mov  x2, xzr\n"
-        "mov  x3, xzr\n"
-        "mov  x4, xzr\n"
-        "mov  x5, xzr\n"
-        "mov  x6, xzr\n"
-        "mov  x7, xzr\n"
-        "mov  x8, xzr\n"
-        "mov  x9, xzr\n"
-        "mov  x10, xzr\n"
-        "mov  x11, xzr\n"
-        "mov  x12, xzr\n"
-        "mov  x13, xzr\n"
-        "mov  x14, xzr\n"
-        "mov  x15, xzr\n"
-        "mov  x16, xzr\n"
-        "mov  x17, xzr\n"
-        "mov  x18, xzr\n"
-        "mov  x19, xzr\n"
-        "mov  x20, xzr\n"
-        "mov  x21, xzr\n"
-        "mov  x22, xzr\n"
-        "mov  x23, xzr\n"
-        "mov  x24, xzr\n"
-        "mov  x25, xzr\n"
-        "mov  x26, xzr\n"
-        "mov  x27, xzr\n"
-        "mov  x28, xzr\n"
-        "mov  x29, xzr\n"
-        "mov  x30, xzr\n"
-        "eret\n"
-        :
-        : "r"(entry), "r"(sp), "r"(kstack_top)
-        : "memory"
-    );
+    kprintf("[init] Init thread (tid=%lu) ready: entry=0x%lx user_sp=0x%lx\n",
+            init_thread->tid, entry, sp);
+    kprintf("[init]   kstack=[0x%lx..0x%lx] tf_base=0x%lx\n",
+            (uint64_t)init_thread->kernel_stack, kstack_top, tf_base);
 
-    __builtin_unreachable();
+    /*
+     * Full memory barrier before making init runnable.
+     * Ensure ALL writes (page tables, trap frame, thread context) are
+     * globally visible before any other CPU can pick up this thread.
+     */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /*
+     * Enqueue init_thread on the run queue. The scheduler will pick
+     * it up and context_switch into it, which will "return" to
+     * init_thread_return → TTBR0 switch → RESTORE_REGS → eret to EL0.
+     *
+     * This is the XNU-correct way: PID 1 is launched by the scheduler,
+     * not by a manual eret from the boot path.
+     */
+    init_thread->state = TH_RUN;
+    sched_enqueue(init_thread);
+
+    kprintf("[init] Init process (PID %d) enqueued on run queue\n", init->p_pid);
+    kprintf("[init] === End of kernel bootstrap ===\n\n");
+
+    /*
+     * Return to caller (kernel_bootstrap_thread), which will
+     * call thread_exit() or enter the idle loop. The scheduler
+     * will eventually pick up init_thread and dispatch it.
+     */
 }

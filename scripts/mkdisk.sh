@@ -83,10 +83,10 @@ if [ "${INCLUDE_TESTS:-0}" = "1" ]; then
 fi
 
 # Binaries that go in /usr/bin (non-essential utilities)
-USR_BIN_PROGS="find xargs id whoami which env du wc yes tcc"
+USR_BIN_PROGS="find xargs id whoami which env du wc yes tcc file"
 
 # Binaries that go in /sbin (system admin)
-SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd"
+SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd mDNSResponder"
 
 # Test binary
 MACHO_HELLO="${PROJDIR}/build/hello"
@@ -165,6 +165,18 @@ populate_linux() {
 
     # Install configuration files
     install_config_files "${MOUNT_DIR}"
+
+    # Create LaunchDaemons directories and install plists
+    sudo mkdir -p "${MOUNT_DIR}/System/Library/LaunchDaemons"
+    sudo mkdir -p "${MOUNT_DIR}/Library/LaunchDaemons"
+    local CONFIGDIR="${PROJDIR}/config/LaunchDaemons"
+    if [ -d "${CONFIGDIR}" ]; then
+        for plist in ${CONFIGDIR}/*.plist; do
+            if [ -f "$plist" ]; then
+                sudo cp "$plist" "${MOUNT_DIR}/System/Library/LaunchDaemons/$(basename $plist)"
+            fi
+        done
+    fi
 
     sudo umount "${MOUNT_DIR}"
     rmdir "${MOUNT_DIR}" 2>/dev/null || true
@@ -279,6 +291,39 @@ DIRS
         fi
     done
 
+    # Install Mach headers for TCC
+    echo "mkdir /usr/include/mach" >> "${CMDS}"
+    for hdr in ${INCDIR}/mach/*.h; do
+        if [ -f "$hdr" ]; then
+            echo "write $hdr /usr/include/mach/$(basename $hdr)" >> "${CMDS}"
+        fi
+    done
+
+    # Install servers/ headers for TCC (bootstrap.h)
+    echo "mkdir /usr/include/servers" >> "${CMDS}"
+    if [ -f "${INCDIR}/servers/bootstrap.h" ]; then
+        echo "write ${INCDIR}/servers/bootstrap.h /usr/include/servers/bootstrap.h" >> "${CMDS}"
+    fi
+
+    # Create /System/Library/LaunchDaemons directory hierarchy
+    echo "mkdir /System" >> "${CMDS}"
+    echo "mkdir /System/Library" >> "${CMDS}"
+    echo "mkdir /System/Library/LaunchDaemons" >> "${CMDS}"
+
+    # Create /Library/LaunchDaemons for third-party daemons
+    echo "mkdir /Library" >> "${CMDS}"
+    echo "mkdir /Library/LaunchDaemons" >> "${CMDS}"
+
+    # Install plist config files for system daemons
+    local CONFIGDIR="${PROJDIR}/config/LaunchDaemons"
+    if [ -d "${CONFIGDIR}" ]; then
+        for plist in ${CONFIGDIR}/*.plist; do
+            if [ -f "$plist" ]; then
+                echo "write $plist /System/Library/LaunchDaemons/$(basename $plist)" >> "${CMDS}"
+            fi
+        done
+    fi
+
     # Install hello test binary
     if [ -f "${MACHO_HELLO}" ]; then
         echo "write ${MACHO_HELLO} /bin/hello" >> "${CMDS}"
@@ -303,7 +348,7 @@ ISSUE
     TMPDIR="$(mktemp -d)"
     create_config_tmpfiles "${TMPDIR}"
 
-    for f in passwd shadow group hostname fstab profile sudoers epoch; do
+    for f in passwd shadow group hostname fstab profile sudoers epoch resolv.conf; do
         if [ -f "${TMPDIR}/${f}" ]; then
             echo "write ${TMPDIR}/${f} /etc/${f}" >> "${CMDS}"
         fi
@@ -406,6 +451,17 @@ SUDOERS
 
     # Boot epoch (seconds since Unix epoch, for date command)
     sudo bash -c "date +%s > '${MOUNT_DIR}/etc/epoch'"
+
+    # DNS resolver configuration
+    # On macOS, DNS is configured via scutil/configd. On Unix, /etc/resolv.conf.
+    # Default to Google Public DNS (8.8.8.8) and Cloudflare (1.1.1.1).
+    sudo tee "${MOUNT_DIR}/etc/resolv.conf" > /dev/null << 'RESOLV'
+# Kiseki OS - DNS Resolver Configuration
+# Edit this file to change DNS servers.
+# Format: nameserver <IPv4 address>
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+RESOLV
 
     # Root user dotfiles
     sudo tee "${MOUNT_DIR}/root/.bashrc" > /dev/null << 'BASHRC'
@@ -515,6 +571,15 @@ root ALL=(ALL) NOPASSWD: ALL
 SUDOERS
 
     date +%s > "${DIR}/epoch"
+
+    # DNS resolver configuration
+    cat > "${DIR}/resolv.conf" << 'RESOLV'
+# Kiseki OS - DNS Resolver Configuration
+# Edit this file to change DNS servers.
+# Format: nameserver <IPv4 address>
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+RESOLV
 
     cat > "${DIR}/bashrc" << 'BASHRC'
 # Kiseki OS - Root .bashrc

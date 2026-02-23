@@ -65,10 +65,22 @@ typedef int32_t             integer_t;
 
 /* --- Kernel return codes --- */
 #define KERN_SUCCESS            0
-#define KERN_INVALID_ARGUMENT   4
+#define KERN_INVALID_ADDRESS    1
+#define KERN_PROTECTION_FAILURE 2
 #define KERN_NO_SPACE           3
+#define KERN_INVALID_ARGUMENT   4
 #define KERN_FAILURE            5
 #define KERN_RESOURCE_SHORTAGE  6
+#define KERN_NOT_RECEIVER       7
+#define KERN_NO_ACCESS          8
+#define KERN_NAME_EXISTS        13
+#define KERN_ABORTED            14
+#define KERN_INVALID_NAME       15
+#define KERN_INVALID_TASK       16
+#define KERN_INVALID_RIGHT      17
+#define KERN_INVALID_VALUE      18
+#define KERN_NOT_SUPPORTED      46
+#define KERN_NOT_FOUND          56
 
 /* --- Convenience macros --- */
 #define ARRAY_SIZE(a)       (sizeof(a) / sizeof((a)[0]))

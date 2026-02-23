@@ -68,6 +68,20 @@ static pte_t *walk_pgd(pte_t *pgd, uint64_t va, bool alloc)
         l1 = alloc_pt_page();
         if (!l1) return NULL;
         *l0e = (uint64_t)l1 | PTE_TABLE | PTE_VALID;
+        /*
+         * DSB ensures the table entry write is visible to the hardware
+         * page table walker before we continue. Without this, the walker
+         * may see stale/zero data and report a translation fault even
+         * though the software sees the correct value (cached).
+         *
+         * Use DSB ISH (not just ISHST) to ensure all observers see the write,
+         * then ISB to synchronize the instruction stream.
+         */
+        __asm__ volatile("dsb ish" ::: "memory");
+#if DEBUG
+        kprintf("[walk_pgd] alloc L1: pgd[%lu]=0x%lx -> L1@0x%lx\n",
+                L0_IDX(va), *l0e, (uint64_t)l1);
+#endif
     }
 
     /* L1 -> L2 */
@@ -80,6 +94,11 @@ static pte_t *walk_pgd(pte_t *pgd, uint64_t va, bool alloc)
         l2 = alloc_pt_page();
         if (!l2) return NULL;
         *l1e = (uint64_t)l2 | PTE_TABLE | PTE_VALID;
+        __asm__ volatile("dsb ish" ::: "memory");
+#if DEBUG
+        kprintf("[walk_pgd] alloc L2: L1[%lu]=0x%lx -> L2@0x%lx (VA=0x%lx)\n",
+                L1_IDX(va), *l1e, (uint64_t)l2, va);
+#endif
     }
 
     /* L2 -> L3 */
@@ -92,6 +111,11 @@ static pte_t *walk_pgd(pte_t *pgd, uint64_t va, bool alloc)
         l3 = alloc_pt_page();
         if (!l3) return NULL;
         *l2e = (uint64_t)l3 | PTE_TABLE | PTE_VALID;
+        __asm__ volatile("dsb ish" ::: "memory");
+#if DEBUG
+        kprintf("[walk_pgd] alloc L3: L2[%lu]=0x%lx -> L3@0x%lx (VA=0x%lx)\n",
+                L2_IDX(va), *l2e, (uint64_t)l3, va);
+#endif
     }
 
     return &l3[L3_IDX(va)];
@@ -110,6 +134,21 @@ int vmm_map_page(pte_t *pgd, uint64_t va, uint64_t pa, uint64_t flags)
         return -1;
     }
     *pte = (pa & PTE_ADDR_MASK) | flags;
+
+    /*
+     * Ensure the L3 PTE write is visible to the hardware page table walker.
+     * DSB ISH: Data Synchronization Barrier, Inner Shareable.
+     * This ensures all preceding stores to the page tables are complete
+     * before any subsequent memory access or page table walk.
+     */
+    __asm__ volatile("dsb ish" ::: "memory");
+
+#if DEBUG
+    if (va >= 0x200000000UL && va < 0x400000000UL) {
+        kprintf("[vmm_map_page] VA=0x%lx PA=0x%lx flags=0x%lx pte@0x%lx=0x%lx\n",
+                va, pa, flags, (uint64_t)pte, *pte);
+    }
+#endif
 
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return 0;
@@ -350,7 +389,8 @@ struct vm_space *vmm_create_space(void)
     space->asid = next_asid++;
     if (next_asid > 255) {
         next_asid = 1;
-        __asm__ volatile("tlbi vmalle1; dsb sy; isb");
+        /* Broadcast TLB invalidate for SMP when ASIDs wrap */
+        __asm__ volatile("tlbi vmalle1is; dsb ish; isb" ::: "memory");
     }
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return space;
@@ -454,18 +494,24 @@ void vmm_destroy_space(struct vm_space *space)
 void vmm_switch_space(struct vm_space *space)
 {
     uint64_t ttbr0 = (uint64_t)space->pgd | (space->asid << 48);
+
+    /* Debug TTBR0 switch logging removed (too verbose for per-switch) */
+
     __asm__ volatile("msr ttbr0_el1, %0" :: "r"(ttbr0));
     /*
      * Full TLB invalidation on every TTBR0 switch.
      *
      * With only 8-bit ASIDs (TCR_EL1.AS=0) and no ASID recycling logic,
      * stale TLB entries from previous address spaces can alias after
-     * wrapping. A full tlbi vmalle1 is the safe approach. Once we have
-     * proper ASID lifecycle management we can switch to targeted
-     * invalidation (tlbi aside1is) or skip the flush when ASIDs differ.
+     * wrapping. A full tlbi vmalle1is is the safe approach for SMP.
+     * Once we have proper ASID lifecycle management we can switch to
+     * targeted invalidation (tlbi aside1is) or skip the flush when
+     * ASIDs differ.
+     *
+     * Use Inner Shareable variant (vmalle1is) to broadcast to all CPUs.
      */
-    __asm__ volatile("tlbi vmalle1");
-    __asm__ volatile("dsb sy");
+    __asm__ volatile("tlbi vmalle1is" ::: "memory");
+    __asm__ volatile("dsb ish" ::: "memory");
     __asm__ volatile("isb");
 }
 
@@ -497,8 +543,9 @@ int vmm_copy_on_write(struct vm_space *space, uint64_t va)
     if (refcount <= 1) {
         /* Sole owner — make writable in-place */
         *pte = (old_pa & PTE_ADDR_MASK) | new_flags;
-        __asm__ volatile("tlbi vale1, %0" :: "r"(va >> 12));
-        __asm__ volatile("dsb sy; isb");
+        /* Use Inner Shareable TLBI for SMP correctness */
+        __asm__ volatile("tlbi vale1is, %0" :: "r"(va >> 12) : "memory");
+        __asm__ volatile("dsb ish; isb" ::: "memory");
         spin_unlock_irqrestore(&vmm_lock, irq_flags);
         return 0;
     }
@@ -525,8 +572,9 @@ int vmm_copy_on_write(struct vm_space *space, uint64_t va)
     /* Drop reference on old page */
     pmm_page_unref(old_pa);
 
-    __asm__ volatile("tlbi vale1, %0" :: "r"(va >> 12));
-    __asm__ volatile("dsb sy; isb");
+    /* Use Inner Shareable TLBI for SMP correctness */
+    __asm__ volatile("tlbi vale1is, %0" :: "r"(va >> 12) : "memory");
+    __asm__ volatile("dsb ish; isb" ::: "memory");
 
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
     return 0;
@@ -535,6 +583,59 @@ int vmm_copy_on_write(struct vm_space *space, uint64_t va)
 pte_t *vmm_get_kernel_pgd(void)
 {
     return kernel_pgd;
+}
+
+/*
+ * vmm_init_percpu - Enable the MMU on a secondary CPU core
+ *
+ * Secondary cores start with the MMU off (PSCI CPU_ON brings up cores
+ * with SCTLR_EL1 at reset value). They must configure MAIR, TCR,
+ * TTBR0/TTBR1 identically to the boot CPU (set up by vmm_init()),
+ * then enable the MMU+caches before touching any spinlocks or shared
+ * data structures.  Without cacheable memory, the exclusive monitor
+ * (LDAXR/STXR) used by spinlocks may not function correctly across
+ * cores, and cached stores from the boot CPU may be invisible.
+ */
+void vmm_init_percpu(void)
+{
+    /* MAIR: must match vmm_init() exactly */
+    uint64_t mair = (0x00UL << (MAIR_DEVICE_nGnRnE * 8)) |
+                    (0x44UL << (MAIR_NORMAL_NC * 8)) |
+                    (0xFFUL << (MAIR_NORMAL_WB * 8));
+    __asm__ volatile("msr mair_el1, %0" :: "r"(mair));
+
+    /* TCR: must match vmm_init() exactly */
+    uint64_t tcr = (16UL << 0)  |   /* T0SZ */
+                   (16UL << 16) |   /* T1SZ */
+                   (0UL << 14)  |   /* TG0 = 4KB */
+                   (2UL << 30)  |   /* TG1 = 4KB */
+                   (3UL << 12)  |   /* SH0 = Inner shareable */
+                   (1UL << 10)  |   /* ORGN0 = WB WA */
+                   (1UL << 8)   |   /* IRGN0 = WB WA */
+                   (3UL << 28)  |   /* SH1 = Inner shareable */
+                   (1UL << 26)  |   /* ORGN1 = WB WA */
+                   (1UL << 24);     /* IRGN1 = WB WA */
+    __asm__ volatile("msr tcr_el1, %0" :: "r"(tcr));
+
+    /* Load the same kernel page tables that CPU0 set up */
+    __asm__ volatile("msr ttbr0_el1, %0" :: "r"((uint64_t)kernel_pgd));
+    __asm__ volatile("msr ttbr1_el1, %0" :: "r"((uint64_t)kernel_pgd));
+
+    /* Barriers + TLB invalidate before enabling */
+    __asm__ volatile("isb");
+    __asm__ volatile("dsb sy");
+    __asm__ volatile("tlbi vmalle1");
+    __asm__ volatile("dsb sy");
+    __asm__ volatile("isb");
+
+    /* Enable MMU + caches */
+    uint64_t sctlr;
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    sctlr |= (1UL << 0);   /* M: MMU enable */
+    sctlr |= (1UL << 2);   /* C: Data cache enable */
+    sctlr |= (1UL << 12);  /* I: Instruction cache enable */
+    __asm__ volatile("msr sctlr_el1, %0" :: "r"(sctlr));
+    __asm__ volatile("isb");
 }
 
 int vmm_protect_page(pte_t *pgd, uint64_t va, uint64_t new_flags)
@@ -592,6 +693,11 @@ int vmm_copy_space(struct vm_space *dst, struct vm_space *src)
     pte_t *src_l0 = src->pgd;
     uint64_t pages_shared = 0;
     uint64_t irq_flags;
+
+#if DEBUG
+    kprintf("[vmm_copy_space] src_pgd=0x%lx dst_pgd=0x%lx\n",
+            (uint64_t)src->pgd, (uint64_t)dst->pgd);
+#endif
 
     spin_lock_irqsave(&vmm_lock, &irq_flags);
 
@@ -663,6 +769,21 @@ int vmm_copy_space(struct vm_space *dst, struct vm_space *src)
                         
                         /* Update parent's PTE to be COW read-only */
                         src_l3[i3] = (pa & PTE_ADDR_MASK) | cow_flags;
+
+                        /*
+                         * Immediately invalidate the parent's TLB entry for
+                         * this VA. Without this, the parent CPU may hold a
+                         * stale writable TLB entry and silently write to
+                         * the now-shared page without triggering a COW fault,
+                         * corrupting the child's data.
+                         *
+                         * Must use IS (Inner Shareable) variant on SMP to
+                         * broadcast to all CPUs. DSB ensures the PTE store
+                         * and TLBI complete before we continue.
+                         */
+                        __asm__ volatile("dsb ishst" ::: "memory");
+                        __asm__ volatile("tlbi vale1is, %0" :: "r"(va >> 12) : "memory");
+                        __asm__ volatile("dsb ish" ::: "memory");
                         
                         /* Map into child with same COW read-only flags */
                         spin_unlock_irqrestore(&vmm_lock, irq_flags);
@@ -684,14 +805,52 @@ int vmm_copy_space(struct vm_space *dst, struct vm_space *src)
                     /* Increment reference count on the shared page */
                     pmm_page_ref(pa);
                     pages_shared++;
+
+#if DEBUG
+                    /* Log dyld range pages specifically */
+                    if (va >= 0x200000000UL && va < 0x400000000UL) {
+                        kprintf("[vmm_copy_space] dyld page VA=0x%lx PA=0x%lx\n", va, pa);
+                    }
+#endif
                 }
             }
         }
     }
 
-    /* Flush TLB for parent since we changed its PTEs to read-only */
-    __asm__ volatile("tlbi vmalle1" ::: "memory");
-    __asm__ volatile("dsb sy; isb");
+#if DEBUG
+    kprintf("[vmm_copy_space] copied %lu pages total\n", pages_shared);
+    /* Verify dst page tables before flush */
+    kprintf("[vmm_copy_space] dst L0[0]=0x%lx\n", dst->pgd[0]);
+    if (dst->pgd[0] & PTE_VALID) {
+        pte_t *dst_l1 = (pte_t *)PTE_TO_PHYS(dst->pgd[0]);
+        kprintf("[vmm_copy_space] dst L1[12]=0x%lx\n", dst_l1[12]);
+    }
+#endif
+
+    /*
+     * Ensure all page table modifications are visible to other CPUs.
+     * On ARM, the page table walker uses the data cache, so we need to
+     * ensure PTE writes reach the Point of Coherency before other CPUs
+     * can see them via their page table walkers.
+     *
+     * DSB ISHST ensures all stores (PTE writes) are visible to all CPUs
+     * in the Inner Shareable domain before the TLBI.
+     *
+     * Also invalidate instruction caches here - when sharing code pages,
+     * other CPUs may have stale instruction cache entries for the same
+     * physical addresses but different virtual addresses (from previous
+     * processes). The IC IALLUIS ensures all CPUs refetch from memory.
+     */
+    __asm__ volatile("dsb ishst" ::: "memory");   /* Ensure PTE stores visible */
+    __asm__ volatile("tlbi vmalle1is" ::: "memory"); /* Broadcast TLB invalidate */
+    __asm__ volatile("dsb ish" ::: "memory");     /* Wait for TLBI completion */
+    __asm__ volatile("ic ialluis" ::: "memory");  /* Broadcast I-cache invalidate */
+    __asm__ volatile("dsb ish" ::: "memory");     /* Wait for IC completion */
+    __asm__ volatile("isb");
+
+#if DEBUG
+    kprintf("[vmm_copy_space] TLB flushed, DSB done\n");
+#endif
 
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
 

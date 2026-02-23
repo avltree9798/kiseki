@@ -106,6 +106,7 @@ static volatile int dhcp_state = 0;      /* 0=init, 1=discovering, 2=requesting,
 static uint32_t g_dhcp_ip = 0;
 static uint32_t g_dhcp_mask = 0;
 static uint32_t g_dhcp_gateway = 0;
+static uint32_t g_dhcp_dns = 0;
 static volatile int g_dhcp_complete = 0;
 
 /*
@@ -193,13 +194,15 @@ static int dhcp_send(int msg_type, uint32_t requested_ip, uint32_t server_id)
  * Parse DHCP options from a received message
  */
 static void dhcp_parse_options(const uint8_t *options, int len,
-                                int *msg_type, uint32_t *server_id,
-                                uint32_t *subnet, uint32_t *router)
+                                 int *msg_type, uint32_t *server_id,
+                                 uint32_t *subnet, uint32_t *router,
+                                 uint32_t *dns)
 {
     *msg_type = 0;
     *server_id = 0;
     *subnet = 0;
     *router = 0;
+    *dns = 0;
     
     const uint8_t *p = options;
     const uint8_t *end = options + len;
@@ -236,6 +239,10 @@ static void dhcp_parse_options(const uint8_t *options, int len,
             if (opt_len >= 4)
                 *router = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
             break;
+        case DHCP_OPT_DNS:
+            if (opt_len >= 4)
+                *dns = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+            break;
         }
         
         p += opt_len;
@@ -268,12 +275,12 @@ void dhcp_input(const void *data, uint32_t len)
     /* Parse options - calculate actual options length from packet size.
      * Options start at offset 240 (DHCP_MIN_SIZE) in the DHCP message. */
     int msg_type;
-    uint32_t server_id, subnet, router;
+    uint32_t server_id, subnet, router, dns;
     uint32_t opts_len = (len > DHCP_MIN_SIZE) ? (len - DHCP_MIN_SIZE) : 0;
     if (opts_len > sizeof(dhcp->options))
         opts_len = sizeof(dhcp->options);
     dhcp_parse_options(dhcp->options, opts_len,
-                       &msg_type, &server_id, &subnet, &router);
+                       &msg_type, &server_id, &subnet, &router, &dns);
     
     uint32_t offered_ip = ntohl(dhcp->yiaddr);
     
@@ -293,6 +300,7 @@ void dhcp_input(const void *data, uint32_t len)
         g_dhcp_ip = offered_ip;
         g_dhcp_mask = subnet ? subnet : 0xFFFFFF00;  /* Default /24 */
         g_dhcp_gateway = router ? router : 0;
+        g_dhcp_dns = dns;
         
         dhcp_state = 3;
         g_dhcp_complete = 1;
@@ -383,4 +391,9 @@ uint32_t dhcp_get_netmask(void)
 uint32_t dhcp_get_gateway(void)
 {
     return g_dhcp_gateway;
+}
+
+uint32_t dhcp_get_dns(void)
+{
+    return g_dhcp_dns;
 }

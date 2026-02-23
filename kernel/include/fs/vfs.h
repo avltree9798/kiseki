@@ -350,15 +350,17 @@ struct stat {
 
 #define O_RDONLY    0x0000       /* Open for reading only */
 #define O_WRONLY    0x0001       /* Open for writing only */
-#define O_RDWR      0x0002      /* Open for reading and writing */
-#define O_ACCMODE   0x0003      /* Mask for access mode */
-#define O_CREAT     0x0200      /* Create file if it doesn't exist */
-#define O_TRUNC     0x0400      /* Truncate to zero length */
-#define O_EXCL      0x0800      /* Error if O_CREAT and file exists */
-#define O_APPEND    0x0008      /* Append on each write */
-#define O_NONBLOCK  0x0004      /* Non-blocking I/O */
-#define O_DIRECTORY 0x100000    /* Must be a directory */
-#define O_CLOEXEC   0x1000000   /* Close on exec */
+#define O_RDWR      0x0002       /* Open for reading and writing */
+#define O_ACCMODE   0x0003       /* Mask for access mode */
+#define O_NONBLOCK  0x0004       /* Non-blocking I/O */
+#define O_APPEND    0x0008       /* Append on each write */
+#define O_CREAT     0x0200       /* Create file if it doesn't exist */
+#define O_TRUNC     0x0400       /* Truncate to zero length */
+#define O_EXCL      0x0800       /* Error if O_CREAT and file exists */
+#define O_NOCTTY    0x20000      /* Don't assign controlling terminal */
+#define O_DIRECTORY 0x100000     /* Must be a directory */
+#define O_SYMLINK   0x200000     /* Allow open of symlink itself */
+#define O_CLOEXEC   0x1000000    /* Close on exec */
 
 /* ============================================================================
  * File Descriptor

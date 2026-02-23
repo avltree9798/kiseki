@@ -118,11 +118,6 @@ void icmp_input(uint32_t src_addr, uint32_t dst_addr,
     switch (icmp->icmp_type) {
     case ICMP_ECHO_REQUEST: {
         /* Respond with echo reply */
-        kprintf("[icmp] echo request from %u.%u.%u.%u\n",
-                (ntohl(src_addr) >> 24) & 0xFF,
-                (ntohl(src_addr) >> 16) & 0xFF,
-                (ntohl(src_addr) >> 8) & 0xFF,
-                ntohl(src_addr) & 0xFF);
         uint8_t reply_buf[1500];
         if (len > sizeof(reply_buf))
             return;
@@ -140,23 +135,12 @@ void icmp_input(uint32_t src_addr, uint32_t dst_addr,
         rh->icmp_cksum = icmp_checksum(reply_buf, len);
 
         /* Send via IP layer — swap src/dst */
-        kprintf("[icmp] sending echo reply to %u.%u.%u.%u\n",
-                (ntohl(src_addr) >> 24) & 0xFF,
-                (ntohl(src_addr) >> 16) & 0xFF,
-                (ntohl(src_addr) >> 8) & 0xFF,
-                ntohl(src_addr) & 0xFF);
-        int ret = ip_output(dst_addr, src_addr, IPPROTO_ICMP, reply_buf, len);
-        kprintf("[icmp] ip_output returned %d\n", ret);
+        ip_output(dst_addr, src_addr, IPPROTO_ICMP, reply_buf, len);
         break;
     }
 
     case ICMP_ECHO_REPLY: {
         /* Deliver to any open ICMP datagram socket */
-        kprintf("[icmp] echo reply from %u.%u.%u.%u len=%u\n",
-                (ntohl(src_addr) >> 24) & 0xFF,
-                (ntohl(src_addr) >> 16) & 0xFF,
-                (ntohl(src_addr) >> 8) & 0xFF,
-                ntohl(src_addr) & 0xFF, len);
         icmp_deliver_to_socket(src_addr, data, len);
         break;
     }

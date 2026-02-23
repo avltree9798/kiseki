@@ -149,8 +149,6 @@ int tcp_connect(struct socket *so)
     /* Transition to SYN_SENT */
     tp->t_state = TCPS_SYN_SENT;
 
-    kprintf("[tcp] connect: sending SYN (iss=%u)\n", tp->iss);
-
     /* Send SYN segment */
     int ret = tcp_output(tp);
     if (ret < 0) {
@@ -187,7 +185,6 @@ int tcp_close(struct tcpcb *tp)
         /* Abort: send RST */
         tp->t_state = TCPS_CLOSED;
         spin_unlock_irqrestore(&tp->t_lock, flags);
-        kprintf("[tcp] close: RST (state was SYN)\n");
         tcp_free(tp);
         return 0;
 
@@ -195,7 +192,6 @@ int tcp_close(struct tcpcb *tp)
         /* Active close: send FIN */
         tp->t_state = TCPS_FIN_WAIT_1;
         spin_unlock_irqrestore(&tp->t_lock, flags);
-        kprintf("[tcp] close: sending FIN (ESTABLISHED -> FIN_WAIT_1)\n");
         tcp_output(tp);
         return 0;
 
@@ -203,7 +199,6 @@ int tcp_close(struct tcpcb *tp)
         /* Remote already closed: send our FIN */
         tp->t_state = TCPS_LAST_ACK;
         spin_unlock_irqrestore(&tp->t_lock, flags);
-        kprintf("[tcp] close: sending FIN (CLOSE_WAIT -> LAST_ACK)\n");
         tcp_output(tp);
         return 0;
 
@@ -386,15 +381,6 @@ int tcp_output(struct tcpcb *tp)
     hdr->th_sum = 0;
     hdr->th_sum = tcp_checksum(src_ip, dst_ip, seg_buf, seg_len);
 
-    kprintf("[tcp-out] flags=0x%x seq=%u ack=%u src=%u.%u.%u.%u:%u -> %u.%u.%u.%u:%u len=%u\n",
-            hdr->th_flags, ntohl(hdr->th_seq), ntohl(hdr->th_ack),
-            (ntohl(src_ip) >> 24) & 0xFF, (ntohl(src_ip) >> 16) & 0xFF,
-            (ntohl(src_ip) >> 8) & 0xFF, ntohl(src_ip) & 0xFF,
-            ntohs(hdr->th_sport),
-            (ntohl(dst_ip) >> 24) & 0xFF, (ntohl(dst_ip) >> 16) & 0xFF,
-            (ntohl(dst_ip) >> 8) & 0xFF, ntohl(dst_ip) & 0xFF,
-            ntohs(hdr->th_dport), seg_len);
-
     /* Send via IP layer */
     int ret = ip_output(src_ip, dst_ip, IPPROTO_TCP, seg_buf, seg_len);
 
@@ -482,14 +468,6 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
     }
 
     const struct tcp_hdr *th = (const struct tcp_hdr *)data;
-
-    kprintf("[tcp-in] %u.%u.%u.%u:%u -> :%u flags=0x%x seq=%u ack=%u len=%u\n",
-            (ntohl(src_addr) >> 24) & 0xFF,
-            (ntohl(src_addr) >> 16) & 0xFF,
-            (ntohl(src_addr) >> 8) & 0xFF,
-            ntohl(src_addr) & 0xFF,
-            ntohs(th->th_sport), ntohs(th->th_dport),
-            th->th_flags, ntohl(th->th_seq), ntohl(th->th_ack), len);
 
     /* Find matching connection */
     struct tcpcb *tp = tcp_find_tcb(src_addr, th->th_sport,
@@ -650,15 +628,6 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
         /* Transition child to SYN_RCVD */
         child_tp->t_state = TCPS_SYN_RCVD;
 
-        kprintf("[tcp] LISTEN: SYN from %u.%u.%u.%u:%u -> child socket %d, "
-                "irs=%u iss=%u\n",
-                (ntohl(src_addr) >> 24) & 0xFF,
-                (ntohl(src_addr) >> 16) & 0xFF,
-                (ntohl(src_addr) >> 8) & 0xFF,
-                ntohl(src_addr) & 0xFF,
-                ntohs(th->th_sport), child_idx,
-                child_tp->irs, child_tp->iss);
-
         /* Listener stays in LISTEN — unlock listener's TCB lock */
         spin_unlock_irqrestore(&tp->t_lock, irq_flags);
 
@@ -682,7 +651,6 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
             tp->snd_una = seg_ack;
             tp->snd_wnd = ntohs(th->th_win);
             tp->t_state = TCPS_ESTABLISHED;
-            kprintf("[tcp] connection established (SYN_SENT -> ESTABLISHED)\n");
             /* Send ACK */
             spin_unlock_irqrestore(&tp->t_lock, irq_flags);
             tcp_output(tp);
@@ -703,7 +671,6 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
         }
         /* SYN retransmit — peer didn't get our SYN-ACK, resend it */
         if ((seg_flags & TH_SYN) && !(seg_flags & TH_ACK)) {
-            kprintf("[tcp] SYN_RCVD: SYN retransmit, resending SYN-ACK\n");
             spin_unlock_irqrestore(&tp->t_lock, irq_flags);
             tcp_output(tp);
             return;
@@ -715,7 +682,6 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
             /* Mark the socket as connected — this is what net_accept() polls for */
             if (tp->t_socket)
                 tp->t_socket->so_state = SS_CONNECTED;
-            kprintf("[tcp] connection established (SYN_RCVD -> ESTABLISHED)\n");
         }
         break;
 
@@ -759,7 +725,6 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
                 tp->t_state = TCPS_CLOSE_WAIT;
                 if (tp->t_socket)
                     tp->t_socket->so_state = SS_DISCONNECTED;
-                kprintf("[tcp] received FIN (ESTABLISHED -> CLOSE_WAIT)\n");
             }
 
             /* Send ACK if we received data or FIN */
@@ -778,10 +743,8 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
                 /* Simultaneous close */
                 tp->rcv_nxt = seg_seq + 1;
                 tp->t_state = TCPS_TIME_WAIT;
-                kprintf("[tcp] FIN_WAIT_1 -> TIME_WAIT (simultaneous close)\n");
             } else {
                 tp->t_state = TCPS_FIN_WAIT_2;
-                kprintf("[tcp] FIN_WAIT_1 -> FIN_WAIT_2\n");
             }
         }
         break;
@@ -790,7 +753,6 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
         if (seg_flags & TH_FIN) {
             tp->rcv_nxt = seg_seq + 1;
             tp->t_state = TCPS_TIME_WAIT;
-            kprintf("[tcp] FIN_WAIT_2 -> TIME_WAIT\n");
             /* Send ACK */
             spin_unlock_irqrestore(&tp->t_lock, irq_flags);
             tcp_output(tp);
@@ -801,7 +763,6 @@ void tcp_input(uint32_t src_addr, uint32_t dst_addr,
     case TCPS_LAST_ACK:
         if (seg_flags & TH_ACK) {
             tp->t_state = TCPS_CLOSED;
-            kprintf("[tcp] LAST_ACK -> CLOSED\n");
             spin_unlock_irqrestore(&tp->t_lock, irq_flags);
             tcp_free(tp);
             return;

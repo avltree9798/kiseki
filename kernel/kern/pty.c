@@ -211,6 +211,12 @@ int64_t pty_master_write(struct pty *pp, const void *buf, uint64_t count)
     if (nwritten == 0)
         return -EAGAIN;
 
+    /*
+     * Wake any slave thread sleeping in pty_slave_getc().
+     * XNU wakeup(chan) pattern — wake all waiters on this channel.
+     */
+    thread_wakeup_on(&pp->pt_m2s_count);
+
     return (int64_t)nwritten;
 }
 
@@ -227,7 +233,9 @@ int64_t pty_master_write(struct pty *pp, const void *buf, uint64_t count)
 /*
  * pty_slave_getc - Get one character from the m2s buffer.
  *
- * Blocks (with yield) until data is available from the master.
+ * Sleeps on &pp->pt_m2s_count until the master writes data.
+ * This is the XNU/BSD tsleep/wakeup pattern — the slave reader
+ * sleeps on a wait channel and pty_master_write() wakes it.
  */
 static char pty_slave_getc(struct pty *pp)
 {
@@ -249,8 +257,11 @@ static char pty_slave_getc(struct pty *pp)
         if (!pp->pt_master_open)
             return 0x04; /* EOF (Ctrl-D) */
 
-        /* Yield while waiting for master to write */
-        __asm__ volatile("yield");
+        /*
+         * No data available — sleep on &pp->pt_m2s_count until
+         * pty_master_write() calls thread_wakeup_on() after writing.
+         */
+        thread_sleep_on(&pp->pt_m2s_count, "pty_read");
     }
 }
 

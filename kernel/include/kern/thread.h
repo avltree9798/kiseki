@@ -102,6 +102,9 @@ struct thread {
     /* Thread-local storage pointer (for userspace pthread) */
     uint64_t            tls_base;           /* User TLS base address (TPIDR_EL0) */
 
+    /* Mach thread port for thread_self_trap() */
+    uint32_t            thread_port;        /* Mach port name for this thread */
+
     /* Join/detach state */
     bool                detached;           /* If true, no join possible */
     bool                joined;             /* If true, another thread is joining */
@@ -173,6 +176,15 @@ void thread_unblock(struct thread *th);
 /* Sleep for a specified number of timer ticks */
 void thread_sleep_ticks(uint64_t ticks);
 
+/*
+ * XNU-style wait channel sleep/wakeup (BSD tsleep/wakeup equivalent).
+ *
+ * thread_sleep_on:  Put current thread to sleep on a wait channel.
+ * thread_wakeup_on: Wake all threads sleeping on a wait channel.
+ */
+void thread_sleep_on(void *chan, const char *reason);
+void thread_wakeup_on(void *chan);
+
 /* Get current thread */
 struct thread *current_thread_get(void);
 
@@ -216,5 +228,17 @@ void sched_dequeue(struct thread *th);
  * Context switch (assembly, in context_switch.S)
  * ============================================================================ */
 extern void context_switch(struct cpu_context *old, struct cpu_context *new_ctx);
+
+/*
+ * load_context - One-way context switch (abandon current stack)
+ *
+ * Restores callee-saved registers and SP from the given context, then
+ * returns via the restored LR. The current stack is NOT saved and is
+ * discarded forever. Used to abandon the boot stack after creating
+ * the bootstrap thread.
+ *
+ * Equivalent to XNU's load_context() / machine_load_context().
+ */
+extern void load_context(struct cpu_context *new_ctx) __noreturn;
 
 #endif /* _KERN_THREAD_H */

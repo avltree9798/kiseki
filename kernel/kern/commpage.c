@@ -90,6 +90,30 @@ static uint64_t boot_cntfrq = 0;
 #define COMMPAGE_VERSION                1
 
 /* ============================================================================
+ * ARM64 CPU Capability Flags (macOS-compatible bit positions)
+ *
+ * These match the kHas* flags from XNU's commpage.h. User-space code
+ * (libSystem, etc.) reads COMMPAGE_CPU_CAPS_OFFSET to check for features.
+ *
+ * Reference: XNU osfmk/arm64/commpage/commpage_asm.h
+ * ============================================================================ */
+#define kHasNeon                (1ULL << 0)     /* SIMD/NEON always present on ARMv8 */
+#define kHasFP                  (1ULL << 1)     /* Floating-point always present */
+#define kHasCRC32               (1ULL << 2)     /* CRC32 instructions */
+#define kHasAES                 (1ULL << 3)     /* AES crypto */
+#define kHasSHA1                (1ULL << 4)     /* SHA-1 crypto */
+#define kHasSHA2                (1ULL << 5)     /* SHA-256 crypto */
+#define kHasSHA512              (1ULL << 6)     /* SHA-512 crypto (ARMv8.2) */
+#define kHasAtomics             (1ULL << 7)     /* LSE atomics (ARMv8.1) */
+#define kHasRDM                 (1ULL << 8)     /* SQRDMLAH (ARMv8.1) */
+#define kHasDotProd             (1ULL << 9)     /* Dot product (ARMv8.2) */
+#define kHasFHM                 (1ULL << 10)    /* FP16 multiply-accumulate */
+#define kHasFP16                (1ULL << 11)    /* FP16 support */
+#define kHasARMv8_2             (1ULL << 12)    /* ARMv8.2-A baseline */
+#define kHasARMv8_3             (1ULL << 13)    /* ARMv8.3-A baseline */
+#define kHasARMv8_4             (1ULL << 14)    /* ARMv8.4-A baseline */
+
+/* ============================================================================
  * Global State
  * ============================================================================ */
 
@@ -150,6 +174,81 @@ static uint64_t read_cntvct(void)
     uint64_t cnt;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cnt));
     return cnt;
+}
+
+/*
+ * detect_cpu_capabilities - Probe ARM64 feature registers
+ *
+ * Reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1, ID_AA64MMFR0_EL1, etc.
+ * to determine which optional features are available.
+ *
+ * Returns a bitmask of kHas* flags.
+ *
+ * Note: We're running on QEMU virt with Cortex-A72, which has:
+ *   - NEON/FP (always)
+ *   - CRC32
+ *   - AES, SHA1, SHA2
+ *   - NO LSE atomics (that's ARMv8.1, A72 is ARMv8.0)
+ */
+static uint64_t detect_cpu_capabilities(void)
+{
+    uint64_t caps = 0;
+    uint64_t isar0, isar1, pfr0;
+
+    /* All ARMv8 cores have NEON and FP */
+    caps |= kHasNeon | kHasFP;
+
+    /* Read ID_AA64ISAR0_EL1: AES, SHA1, SHA2, CRC32, atomics */
+    __asm__ volatile("mrs %0, id_aa64isar0_el1" : "=r"(isar0));
+
+    /* AES: bits [7:4], non-zero means supported */
+    if ((isar0 >> 4) & 0xF)
+        caps |= kHasAES;
+
+    /* SHA1: bits [11:8] */
+    if ((isar0 >> 8) & 0xF)
+        caps |= kHasSHA1;
+
+    /* SHA2: bits [15:12] */
+    if ((isar0 >> 12) & 0xF)
+        caps |= kHasSHA2;
+
+    /* CRC32: bits [19:16] */
+    if ((isar0 >> 16) & 0xF)
+        caps |= kHasCRC32;
+
+    /* Atomics (LSE): bits [23:20], value >= 2 means supported */
+    if (((isar0 >> 20) & 0xF) >= 2)
+        caps |= kHasAtomics;
+
+    /* SHA512: bits [15:12] of ISAR2, but let's check ISAR0[15:12] for SHA2-512 */
+    /* Actually SHA512 is in ISAR0 bits [15:12] value == 2 */
+    if (((isar0 >> 12) & 0xF) >= 2)
+        caps |= kHasSHA512;
+
+    /* RDM: bits [31:28], value >= 1 */
+    if ((isar0 >> 28) & 0xF)
+        caps |= kHasRDM;
+
+    /* Read ID_AA64ISAR1_EL1: DotProd, FHM, etc. */
+    __asm__ volatile("mrs %0, id_aa64isar1_el1" : "=r"(isar1));
+
+    /* DotProd: bits [3:0] */
+    if (isar1 & 0xF)
+        caps |= kHasDotProd;
+
+    /* FHM: bits [7:4] */
+    if ((isar1 >> 4) & 0xF)
+        caps |= kHasFHM;
+
+    /* Read ID_AA64PFR0_EL1: FP16, architecture version */
+    __asm__ volatile("mrs %0, id_aa64pfr0_el1" : "=r"(pfr0));
+
+    /* FP16: AdvSIMD [23:20] value == 1 means FP16 supported */
+    if (((pfr0 >> 20) & 0xF) == 1)
+        caps |= kHasFP16;
+
+    return caps;
 }
 
 /* ============================================================================
@@ -259,8 +358,10 @@ void commpage_init(void)
     commpage_write_u32(COMMPAGE_PAGE_SIZE_OFFSET, PAGE_SIZE);
     commpage_write_u32(COMMPAGE_CACHE_LINE_OFFSET, 64);  /* Typical A72 cache line */
 
-    /* CPU capabilities: none for now */
-    commpage_write_u64(COMMPAGE_CPU_CAPS_OFFSET, 0);
+    /* CPU capabilities: detect from ARM ID registers */
+    uint64_t cpu_caps = detect_cpu_capabilities();
+    commpage_write_u64(COMMPAGE_CPU_CAPS_OFFSET, cpu_caps);
+    kprintf("[commpage] CPU capabilities: 0x%lx\n", cpu_caps);
 
     /* Time info */
     uint64_t freq = read_cntfrq();

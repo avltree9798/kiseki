@@ -143,6 +143,11 @@
 #define MACH_TRAP_mach_port_allocate        (-36)
 #define MACH_TRAP_mach_port_deallocate      (-37)
 
+/* Bootstrap service registry (Kiseki kernel-managed, launchd-style semantics) */
+#define MACH_TRAP_bootstrap_register        (-40)
+#define MACH_TRAP_bootstrap_look_up         (-41)
+#define MACH_TRAP_bootstrap_check_in        (-42)
+
 /* ============================================================================
  * sysctl CTL_* constants (shared between kernel and userland)
  * ============================================================================ */
@@ -170,5 +175,6 @@
 #define NET_KISEKI_IFADDR   100
 #define NET_KISEKI_IFMASK   101
 #define NET_KISEKI_IFGW     102
+#define NET_KISEKI_IFDNS    103
 
 #endif /* _SYS_SYSCALL_H */

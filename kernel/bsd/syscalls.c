@@ -241,6 +241,24 @@ static void mach_trap_dispatch(struct trap_frame *tf, int32_t trap_num)
         return;
     }
 
+    case MACH_TRAP_bootstrap_register: {
+        kr = bootstrap_register_trap(tf);
+        syscall_return(tf, (int64_t)kr);
+        return;
+    }
+
+    case MACH_TRAP_bootstrap_look_up: {
+        kr = bootstrap_look_up_trap(tf);
+        syscall_return(tf, (int64_t)kr);
+        return;
+    }
+
+    case MACH_TRAP_bootstrap_check_in: {
+        kr = bootstrap_check_in_trap(tf);
+        syscall_return(tf, (int64_t)kr);
+        return;
+    }
+
     default:
         kprintf("[syscall] unhandled Mach trap %d\n", trap_num);
         syscall_return(tf, (int64_t)KERN_FAILURE);
@@ -2243,6 +2261,7 @@ int sys_sysctl(struct trap_frame *tf)
         extern uint32_t dhcp_get_ip(void);
         extern uint32_t dhcp_get_netmask(void);
         extern uint32_t dhcp_get_gateway(void);
+        extern uint32_t dhcp_get_dns(void);
         
         switch (name[1]) {
         case NET_KISEKI_IFADDR: {
@@ -2262,6 +2281,13 @@ int sys_sysctl(struct trap_frame *tf)
         case NET_KISEKI_IFGW: {
             uint32_t gw = dhcp_get_gateway();
             err = sysctl_copyout_int((int)gw, oldp, oldlenp);
+            if (err) return err;
+            syscall_return(tf, 0);
+            return 0;
+        }
+        case NET_KISEKI_IFDNS: {
+            uint32_t dns = dhcp_get_dns();
+            err = sysctl_copyout_int((int)dns, oldp, oldlenp);
             if (err) return err;
             syscall_return(tf, 0);
             return 0;
@@ -4427,6 +4453,20 @@ static int sys_sendto(struct trap_frame *tf)
                 return (int)(-ret);
             sent = (ssize_t)len;
         } else if (so->so_protocol == IPPROTO_UDP) {
+            /*
+             * Auto-bind ephemeral port if socket hasn't been bound.
+             * On BSD/XNU, sendto() on an unbound UDP socket implicitly
+             * binds to INADDR_ANY with an ephemeral port so the remote
+             * server can send the response back to us.
+             */
+            if (so->so_local.sin_port == 0) {
+                static uint16_t udp_ephemeral_next = 49152;
+                so->so_local.sin_family = AF_INET;
+                so->so_local.sin_addr.s_addr = 0; /* INADDR_ANY */
+                so->so_local.sin_port = htons(udp_ephemeral_next++);
+                if (udp_ephemeral_next == 0)
+                    udp_ephemeral_next = 49152;
+            }
             int ret = udp_output(so, buf, (uint32_t)len,
                                  dest->sin_addr.s_addr, dest->sin_port);
             if (ret < 0)

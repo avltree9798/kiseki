@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 /* ICMP header */
 struct icmp_hdr {
@@ -66,12 +67,21 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Resolve host to IP address */
+    /* Resolve host to IP address (supports both hostnames and numeric IPs) */
     struct in_addr addr;
-    if (inet_pton(AF_INET, host, &addr) != 1) {
-        fprintf(stderr, "ping: invalid address: %s\n", host);
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    int gai_err = getaddrinfo(host, NULL, &hints, &res);
+    if (gai_err != 0) {
+        fprintf(stderr, "ping: cannot resolve %s: %s\n",
+                host, gai_strerror(gai_err));
         return 1;
     }
+    addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr;
+    freeaddrinfo(res);
 
     /* Create ICMP datagram socket (IPPROTO_ICMP = 1) */
     int sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);

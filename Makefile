@@ -199,7 +199,11 @@ $(OBJDIR)/%.o: %.S
 
 # --- QEMU Targets ------------------------------------------------------------
 QEMU        := qemu-system-aarch64
-QEMU_FLAGS  := -M virt -cpu cortex-a72 -smp 4 -m 1G \
+# Use TCG (software emulation) instead of HVF to avoid Apple Silicon
+# hardware virtualization cache coherency issues. HVF on Apple Silicon
+# has stricter cache coherency requirements that cause External Aborts
+# during instruction fetch after fork.
+QEMU_FLAGS  := -M virt -accel tcg -cpu cortex-a72 -smp 4 -m 1G \
                -nographic \
                -kernel $(KERNEL_ELF) \
                -serial mon:stdio

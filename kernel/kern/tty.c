@@ -371,6 +371,12 @@ void tty_input_char(char c)
         tp->t_rawcount++;
     }
     /* else: buffer full, character dropped */
+
+    /*
+     * Wake any thread sleeping in tty_getc() on &tp->t_rawcount.
+     * This is the XNU wakeup(chan) pattern — called from IRQ context.
+     */
+    thread_wakeup_on(&tp->t_rawcount);
 }
 
 /* ============================================================================
@@ -380,10 +386,15 @@ void tty_input_char(char c)
 /*
  * tty_getc - Get one character from the TTY's raw ring buffer.
  *
- * Blocks (with a yield hint) until a character is available.
- * The UART IRQ handler fills the ring buffer via tty_input_char().
- * If the ring buffer is empty and the UART FIFO has data (e.g. IRQ
- * not yet fired), we drain it here too as a fallback.
+ * If the buffer is empty, the calling thread sleeps on the wait channel
+ * &tp->t_rawcount via thread_sleep_on(). When the UART IRQ fires and
+ * tty_input_char() places a character in the buffer, it calls
+ * thread_wakeup_on(&tp->t_rawcount) to wake all sleeping readers.
+ *
+ * This is the standard XNU/BSD tsleep/wakeup pattern: the reader sleeps
+ * on a wait channel and the interrupt handler wakes it. The CPU runs
+ * the idle thread (which does WFI) while waiting, allowing the host/QEMU
+ * to process I/O (network packets, serial input) without vCPU starvation.
  */
 static char tty_getc(struct tty *tp)
 {
@@ -402,8 +413,13 @@ static char tty_getc(struct tty *tp)
             return c;
         }
 
-        /* Yield CPU — let other threads run while we wait for input */
-        __asm__ volatile("yield");
+        /*
+         * No data available — sleep on &tp->t_rawcount until
+         * tty_input_char() calls thread_wakeup_on() after buffering
+         * a character. This deschedules the thread (TH_WAIT) so the
+         * idle thread runs WFI, letting QEMU process I/O.
+         */
+        thread_sleep_on(&tp->t_rawcount, "tty_read");
     }
 }
 

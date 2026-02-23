@@ -208,6 +208,12 @@ struct tty {
     int             t_rawhead;
     int             t_rawtail;
     int             t_rawcount;
+
+    /*
+     * Wait channel for input: readers call thread_sleep_on(&tp->t_rawcount)
+     * and the interrupt handler calls thread_wakeup_on(&tp->t_rawcount).
+     * No extra field needed — the address of t_rawcount IS the wait channel.
+     */
 };
 
 /* t_flags */

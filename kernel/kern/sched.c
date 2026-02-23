@@ -15,6 +15,7 @@
 #include <kern/pmm.h>
 #include <kern/vmm.h>
 #include <kern/kprintf.h>
+#include <machine/trap.h>
 #include <drivers/timer.h>
 #include <drivers/gic.h>
 
@@ -104,6 +105,16 @@ static struct thread *alloc_thread(void)
             }
 
             th->tid = next_tid++;
+            /*
+             * CRITICAL: Mark the slot as no longer TH_TERM *inside* the lock.
+             * Without this, another CPU calling alloc_thread() concurrently
+             * could see state==TH_TERM on this same slot (since thread_create
+             * only sets state=TH_RUN after alloc_thread returns and the lock
+             * is released), causing two CPUs to receive the same thread struct.
+             * TH_NEW (== TH_RUN) reserves the slot until thread_create fills
+             * in the rest of the fields.
+             */
+            th->state = TH_RUN;
             spin_unlock_irqrestore(&thread_lock, flags);
             return th;
         }
@@ -252,6 +263,58 @@ void thread_unblock(struct thread *th)
 }
 
 /*
+ * thread_sleep_on - Sleep the current thread on a wait channel.
+ *
+ * XNU equivalent: assert_wait(event, THREAD_UNINT) + thread_block(THREAD_CONTINUE_NULL)
+ * BSD equivalent: tsleep(chan, pri, wmsg, 0) — untimed, uninterruptible.
+ *
+ * The caller passes an arbitrary address as the wait channel. When another
+ * thread (or interrupt handler) calls thread_wakeup_on() with the same
+ * address, all threads sleeping on that channel are placed back on the
+ * run queue.
+ *
+ * @chan:   Wait channel (any kernel address; typically &some_struct_field)
+ * @reason: Debug string stored in th->wait_reason for ps/debugging
+ */
+void thread_sleep_on(void *chan, const char *reason)
+{
+    struct cpu_data *cd = get_cpu_data();
+    struct thread *th = cd->current_thread;
+
+    th->wait_channel = chan;
+    th->wait_reason = reason;
+    th->state = TH_WAIT;
+
+    sched_switch();
+}
+
+/*
+ * thread_wakeup_on - Wake all threads sleeping on a wait channel.
+ *
+ * XNU equivalent: thread_wakeup_prim(event, FALSE, THREAD_AWAKENED)
+ * BSD equivalent: wakeup(chan)
+ *
+ * Scans the thread table for any thread in TH_WAIT state whose
+ * wait_channel matches @chan, and moves each to the run queue.
+ *
+ * This is O(MAX_THREADS) which matches XNU's simple hash-bucket scan.
+ * For Kiseki's 256-thread pool this is trivially fast.
+ *
+ * Safe to call from interrupt context (does not block).
+ *
+ * @chan: Wait channel to wake (must match what was passed to thread_sleep_on)
+ */
+void thread_wakeup_on(void *chan)
+{
+    for (int i = 0; i < MAX_THREADS; i++) {
+        struct thread *th = &thread_pool[i];
+        if (th->state == TH_WAIT && th->wait_channel == chan) {
+            thread_unblock(th);
+        }
+    }
+}
+
+/*
  * thread_sleep_ticks - Sleep the current thread for a number of timer ticks
  *
  * @ticks: Number of timer ticks to sleep (at 100Hz, 100 ticks = 1 second)
@@ -319,7 +382,26 @@ void sched_init(void)
     cd->idle_thread->cpu = 0;
     cd->idle_thread->cpu_affinity = 0;  /* Can run on any CPU */
 
-    /* Boot thread becomes the "current" thread temporarily */
+    /*
+     * XNU-style boot flow: the idle thread keeps its PMM-allocated stack.
+     * The boot stack is abandoned entirely when kmain() calls load_context()
+     * to jump into the bootstrap thread. No boot stack adoption needed.
+     *
+     * The idle thread will be scheduled normally by the scheduler when
+     * no other threads are runnable. Its context was set up by
+     * thread_create() with SP = PMM stack top and LR = thread_trampoline.
+     */
+    kprintf("[sched] Idle thread (tid=%lu) kstack=[0x%lx..0x%lx]\n",
+            cd->idle_thread->tid,
+            (uint64_t)cd->idle_thread->kernel_stack,
+            (uint64_t)cd->idle_thread->kernel_stack +
+            cd->idle_thread->kernel_stack_size);
+
+    /*
+     * Set idle thread as current_thread temporarily.
+     * kmain() will later set current_thread = bootstrap_thread before
+     * calling load_context().
+     */
     cd->current_thread = cd->idle_thread;
 
     /* Store per-CPU data pointer in TPIDR_EL1 */
@@ -358,6 +440,17 @@ void sched_init_percpu(void)
         cd->idle_thread->state = TH_IDLE;
         cd->idle_thread->cpu = cpuid;
         cd->idle_thread->cpu_affinity = 0;
+
+        /*
+         * XNU-style: idle thread keeps its PMM-allocated stack.
+         * The secondary CPU's boot stack will be abandoned when we
+         * call load_context() below to switch into the idle thread.
+         */
+        kprintf("[sched] CPU%d idle thread (tid=%lu) kstack=[0x%lx..0x%lx]\n",
+                cpuid, cd->idle_thread->tid,
+                (uint64_t)cd->idle_thread->kernel_stack,
+                (uint64_t)cd->idle_thread->kernel_stack +
+                cd->idle_thread->kernel_stack_size);
     }
 
     cd->current_thread = cd->idle_thread;
@@ -598,7 +691,29 @@ void sched_switch(void)
 
     cd->need_resched = false;
 
-    spin_lock_irqsave(&cd->run_lock, &flags);
+    /*
+     * CRITICAL: Mask IRQs for the entire pick-next + context-switch
+     * sequence. This prevents a timer IRQ from triggering a NESTED
+     * sched_switch (via trap_irq_el1 → sched_switch) between the
+     * moment we release the run_lock and the moment context_switch
+     * saves the old thread's context. A nested sched_switch would
+     * save the idle thread's context at a deep nested SP, and then
+     * when the outer sched_switch resumes after eret, it would call
+     * context_switch AGAIN, overwriting the context with the outer
+     * SP — but the stack frames from the nested path (which the
+     * thread might have been resumed into) are now lost, leading to
+     * corrupted return addresses (x30=0x0) when the frames unwind.
+     *
+     * This mirrors XNU's approach: machine_switch_context() runs
+     * with interrupts disabled across the entire switch path.
+     *
+     * We save DAIF once, mask IRQs, and only restore DAIF after
+     * context_switch returns (on the RESUMED thread's path).
+     */
+    __asm__ volatile("mrs %0, daif" : "=r"(flags));
+    __asm__ volatile("msr daifset, #0x2" ::: "memory"); /* Mask IRQs */
+
+    spin_lock(&cd->run_lock);
 
     /* Put old thread back on run queue if still runnable */
     if (old && old->state == TH_RUN && old != cd->idle_thread) {
@@ -630,10 +745,15 @@ void sched_switch(void)
     if (!new_thread)
         new_thread = cd->idle_thread;
 
-    spin_unlock_irqrestore(&cd->run_lock, flags);
+    spin_unlock(&cd->run_lock);
+    /* NOTE: IRQs remain MASKED — we only release the spinlock here,
+     * not the IRQ state. IRQs will be restored after context_switch. */
 
-    if (new_thread == old)
-        return;  /* Same thread, no switch needed */
+    if (new_thread == old) {
+        /* Same thread, no switch needed — restore IRQs and return */
+        __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
+        return;
+    }
 
     new_thread->cpu = cd->cpu_id;
     new_thread->quantum = SCHED_QUANTUM_DEFAULT;
@@ -655,10 +775,108 @@ void sched_switch(void)
     }
 
     /* Perform the actual context switch (assembly) */
+#if DEBUG
+    /* Critical validation only - no verbose prints per context switch */
+    {
+        /* Validate new context.sp is within new thread's kernel stack */
+        uint64_t new_klo = (uint64_t)new_thread->kernel_stack;
+        uint64_t new_khi = new_klo + new_thread->kernel_stack_size;
+        uint64_t nsp = new_thread->context.sp;
+        if (nsp < new_klo || nsp > new_khi) {
+            kprintf("[CTX] BUG: new tid=%lu ctx.sp=0x%lx OUTSIDE kstack [0x%lx..0x%lx]\n",
+                    new_thread->tid, nsp, new_klo, new_khi);
+            panic("sched_switch: new thread SP outside its kernel stack");
+        }
+
+        /* Validate x30 is a kernel address (not user) */
+        uint64_t x30_val = new_thread->context.x30;
+        if (x30_val != 0) {
+            bool is_kernel = (x30_val >= RAM_BASE && x30_val < (RAM_BASE + RAM_SIZE));
+            if (!is_kernel) {
+                pid_t new_pid = (new_thread->task) ? new_thread->task->pid : -1;
+                kprintf("[CTX] BUG: new tid=%lu pid=%d x30=0x%lx NOT in kernel RAM!\n",
+                        new_thread->tid, new_pid, x30_val);
+                panic("sched_switch: switching to thread with non-kernel x30");
+            }
+        }
+    }
+#endif
+
     if (old)
         context_switch(&old->context, &new_thread->context);
     else
         context_switch(&cd->idle_thread->context, &new_thread->context);
+
+    /*
+     * We are now running on the RESUMED thread (not necessarily 'old').
+     * Restore IRQs. The 'flags' variable is on the resumed thread's
+     * stack frame, so it contains the DAIF state that was saved when
+     * THIS thread called sched_switch (which may be a different
+     * invocation than the one above — it's whichever invocation saved
+     * this thread's context).
+     */
+    __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
+
+#if DEBUG
+    /*
+     * Validate the sched_switch stack frame BEFORE the compiler's
+     * epilogue loads x29/x30 from it. The compiler saves x29 at [sp]
+     * and x30 at [sp+8] in the prologue (stp x29, x30, [sp, #-N]!).
+     * If these were corrupted while this thread was switched out,
+     * the epilogue's ldp will load bad values and ret will crash.
+     *
+     * We read them directly from the stack here.
+     */
+    {
+        uint64_t sp_val;
+        __asm__ volatile("mov %0, sp" : "=r"(sp_val));
+        uint64_t *frame = (uint64_t *)sp_val;
+        uint64_t saved_x29 = frame[0];
+        uint64_t saved_x30 = frame[1];
+
+        /* x30 (LR) must be a kernel address [0x40000000, 0x80000000) */
+        if (saved_x30 < RAM_BASE || saved_x30 >= (RAM_BASE + RAM_SIZE)) {
+            kprintf("\n!!! SCHED_SWITCH STACK CORRUPTION !!!\n");
+            kprintf("  Resumed thread's stack frame at SP=0x%lx has:\n", sp_val);
+            kprintf("    [sp+0x00] saved_x29 = 0x%lx (expected kernel FP or 0)\n", saved_x29);
+            kprintf("    [sp+0x08] saved_x30 = 0x%lx (expected kernel LR)\n", saved_x30);
+            for (int i = 2; i < 8; i++)
+                kprintf("    [sp+0x%02x] = 0x%lx\n", i * 8, frame[i]);
+            struct cpu_data *cd2 = get_cpu_data();
+            struct thread *cur = cd2 ? cd2->current_thread : NULL;
+            kprintf("  CPU=%d current_tid=%lu\n",
+                    cd2 ? (int)cd2->cpu_id : -1, cur ? cur->tid : 0);
+            if (cur) {
+                kprintf("  kstack=[0x%lx..0x%lx]\n",
+                        (uint64_t)cur->kernel_stack,
+                        (uint64_t)cur->kernel_stack + cur->kernel_stack_size);
+            }
+            /* Also dump a wider range around the frame to find the corruption source */
+            kprintf("  Wider stack dump:\n");
+            for (int i = -4; i < 16; i++) {
+                uint64_t addr = sp_val + (int64_t)(i * 8);
+                if (addr >= RAM_BASE && addr < (RAM_BASE + RAM_SIZE))
+                    kprintf("    [0x%lx] = 0x%lx\n", addr, *(uint64_t *)addr);
+            }
+            panic("sched_switch: stack frame corrupted while thread was switched out");
+        }
+    }
+
+    /* Validate resumed SP is in our kernel stack (silent unless error) */
+    {
+        if (old && old->kernel_stack) {
+            uint64_t resumed_sp;
+            __asm__ volatile("mov %0, sp" : "=r"(resumed_sp));
+            uint64_t klo = (uint64_t)old->kernel_stack;
+            uint64_t khi = klo + old->kernel_stack_size;
+            if (resumed_sp < klo || resumed_sp > khi) {
+                kprintf("[CTX]   !!! BUG: RESUMED hw_sp=0x%lx OUTSIDE kstack [0x%lx..0x%lx] !!!\n",
+                        resumed_sp, klo, khi);
+                panic("sched_switch: resumed with SP outside kernel stack");
+            }
+        }
+    }
+#endif
 }
 
 void sched_yield(void)
@@ -758,6 +976,49 @@ void sched_tick(void)
         
         spin_unlock_irqrestore(&cd->run_lock, aging_flags);
     }
+
+#if DEBUG
+    /* Periodic thread state dump - every 2000 ticks (~2 seconds at 1kHz) */
+    if ((cd->total_ticks % 2000) == 0) {
+        kprintf("\n=== Thread state dump (tick %lu, cpu=%d) ===\n",
+                cd->total_ticks, cd->cpu_id);
+        kprintf("  Current: tid=%lu pid=%d\n",
+                th ? th->tid : 0,
+                (th && th->task) ? th->task->pid : -1);
+        /* Show run queue info for all online CPUs */
+        for (uint32_t c = 0; c < MAX_CPUS; c++) {
+            struct cpu_data *cdi = &cpu_data_array[c];
+            if (!cdi->online) continue;
+            struct thread *cur = cdi->current_thread;
+            kprintf("  CPU%d: run_count=%d current_tid=%lu idle_tid=%lu\n",
+                    c, cdi->run_count,
+                    cur ? cur->tid : 0,
+                    cdi->idle_thread ? cdi->idle_thread->tid : 0);
+        }
+        extern struct thread thread_pool[];
+        for (int i = 0; i < MAX_THREADS; i++) {
+            struct thread *t = &thread_pool[i];
+            if (t->tid == 0)
+                continue;
+            const char *state_str = "???";
+            switch (t->state) {
+                case TH_RUN:  state_str = "RUN"; break;
+                case TH_WAIT: state_str = "WAIT"; break;
+                case TH_IDLE: state_str = "IDLE"; break;
+            }
+            pid_t tpid = t->task ? t->task->pid : -1;
+            kprintf("  tid=%lu pid=%d cpu=%d state=%s prio=%d",
+                    t->tid, tpid, t->cpu, state_str, t->effective_priority);
+            if (t->state == TH_WAIT && t->wait_reason)
+                kprintf(" wait=\"%s\"", t->wait_reason);
+            if (t->state == TH_WAIT && t->wait_channel)
+                kprintf(" chan=0x%lx", (uint64_t)t->wait_channel);
+            kprintf(" ctx.x30=0x%lx ctx.sp=0x%lx\n",
+                    t->context.x30, t->context.sp);
+        }
+        kprintf("=== end thread dump ===\n\n");
+    }
+#endif
 }
 
 /* ============================================================================
@@ -850,17 +1111,10 @@ struct thread *thread_create_user(struct task *task, uint64_t entry,
      */
     uint64_t kstack_top = stack_pa + th->kernel_stack_size;
 
-    /* TF_SIZE is defined in machine/trap.h - it's the size of trap_frame */
-    /* trap_frame is: 31 regs (x0-x30) + sp + elr + spsr = 34 * 8 = 272 bytes */
-    #define TF_SIZE_LOCAL 272
-
-    uint64_t tf_base = kstack_top - TF_SIZE_LOCAL;
-    struct {
-        uint64_t regs[31];  /* x0-x30 */
-        uint64_t sp;
-        uint64_t elr;
-        uint64_t spsr;
-    } *user_tf = (void *)tf_base;
+    /* Use the real TF_SIZE from machine/trap.h (36 * 8 = 288 bytes) */
+    /* trap_frame: 31 regs (x0-x30) + sp + elr + spsr + esr + far */
+    uint64_t tf_base = kstack_top - TF_SIZE;
+    struct trap_frame *user_tf = (struct trap_frame *)tf_base;
 
     /* Zero out the trap frame */
     for (int i = 0; i < 31; i++)
@@ -878,6 +1132,11 @@ struct thread *thread_create_user(struct task *task, uint64_t entry,
     /* SPSR: EL0t (user mode), IRQs enabled */
     /* SPSR_EL1 for EL0: M[4:0] = 0b00000 (EL0t), DAIF = 0 (all enabled) */
     user_tf->spsr = 0x0;
+
+    /* Zero the remaining trap frame fields (not restored by RESTORE_REGS
+     * but must be initialized so the frame is clean) */
+    user_tf->esr = 0;
+    user_tf->far = 0;
 
     /*
      * Set up the kernel-mode context for the first context switch.

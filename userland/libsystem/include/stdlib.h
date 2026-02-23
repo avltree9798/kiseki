@@ -87,24 +87,7 @@ void   *aligned_alloc(size_t alignment, size_t size);
 int     system(const char *command);
 int     getloadavg(double loadavg[], int nelem);
 
-/* Resource limits */
-struct rlimit {
-    unsigned long rlim_cur;
-    unsigned long rlim_max;
-};
-
-#define RLIMIT_CPU      0
-#define RLIMIT_FSIZE    1
-#define RLIMIT_DATA     2
-#define RLIMIT_STACK    3
-#define RLIMIT_CORE     4
-#define RLIMIT_RSS      5
-#define RLIMIT_MEMLOCK  6
-#define RLIMIT_NPROC    7
-#define RLIMIT_NOFILE   8
-#define RLIM_INFINITY   ((unsigned long)-1)
-
-int     getrlimit(int resource, struct rlimit *rlim);
-int     setrlimit(int resource, const struct rlimit *rlim);
+/* Resource limits - include the proper definitions from sys/resource.h */
+#include <sys/resource.h>
 
 #endif /* _LIBSYSTEM_STDLIB_H */

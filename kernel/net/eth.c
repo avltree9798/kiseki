@@ -266,12 +266,8 @@ static void arp_send(uint16_t op, const uint8_t *dst_mac, uint32_t dst_ip)
 
     uint32_t frame_len = ETH_HDRLEN + sizeof(struct arp_hdr);
 
-    kprintf("[arp] sending %s to %02x:%02x:%02x:%02x:%02x:%02x\n",
-            op == ARP_OP_REQUEST ? "request" : "reply",
-            dst_mac[0], dst_mac[1], dst_mac[2],
-            dst_mac[3], dst_mac[4], dst_mac[5]);
     int ret = nic_send(eth_tx_buf, frame_len);
-    kprintf("[arp] nic_send returned %d\n", ret);
+    (void)ret;
 
     spin_unlock_irqrestore(&eth_tx_lock, flags);
 }
@@ -301,16 +297,8 @@ static void arp_input(const void *data, uint32_t len)
     uint16_t op = ntohs(ah->ar_op);
 
     if (op == ARP_OP_REQUEST) {
-        uint32_t req_ip = ntohl(ah->ar_tpa);
-        uint32_t sender_ip = ntohl(ah->ar_spa);
-        kprintf("[arp] request: who-has %u.%u.%u.%u tell %u.%u.%u.%u\n",
-                (req_ip >> 24) & 0xFF, (req_ip >> 16) & 0xFF,
-                (req_ip >> 8) & 0xFF, req_ip & 0xFF,
-                (sender_ip >> 24) & 0xFF, (sender_ip >> 16) & 0xFF,
-                (sender_ip >> 8) & 0xFF, sender_ip & 0xFF);
         /* Is this request for our IP? */
         if (local_ip != 0 && ah->ar_tpa == local_ip) {
-            kprintf("[arp] replying with our MAC\n");
             arp_send(ARP_OP_REPLY, ah->ar_sha, ah->ar_spa);
         }
     }
@@ -472,11 +460,6 @@ int eth_output(uint32_t dst_ip, uint16_t ethertype, const void *data,
         /* Look up destination MAC in ARP cache */
         if (!arp_lookup(dst_ip, dst_mac)) {
             /* Not in cache: queue packet and send ARP request */
-            kprintf("[arp] miss for %u.%u.%u.%u, queuing packet\n",
-                    (ntohl(dst_ip) >> 24) & 0xFF,
-                    (ntohl(dst_ip) >> 16) & 0xFF,
-                    (ntohl(dst_ip) >> 8) & 0xFF,
-                    ntohl(dst_ip) & 0xFF);
             arp_enqueue_pending(dst_ip, ethertype, data, len);
             arp_send(ARP_OP_REQUEST, broadcast_mac, dst_ip);
             return 0;  /* Queued; will be sent when ARP resolves */
@@ -499,13 +482,6 @@ int eth_output(uint32_t dst_ip, uint16_t ethertype, const void *data,
         dst[i] = src[i];
 
     uint32_t frame_len = ETH_HDRLEN + len;
-
-    kprintf("[eth] TX: dst=%02x:%02x:%02x:%02x:%02x:%02x src=%02x:%02x:%02x:%02x:%02x:%02x type=0x%04x len=%u\n",
-            eh->eth_dst[0], eh->eth_dst[1], eh->eth_dst[2],
-            eh->eth_dst[3], eh->eth_dst[4], eh->eth_dst[5],
-            eh->eth_src[0], eh->eth_src[1], eh->eth_src[2],
-            eh->eth_src[3], eh->eth_src[4], eh->eth_src[5],
-            ntohs(eh->eth_type), frame_len);
 
     /* Send via NIC driver */
     int ret = nic_send(eth_tx_buf, frame_len);

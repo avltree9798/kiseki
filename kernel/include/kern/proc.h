@@ -279,13 +279,16 @@ int sys_wait4_impl(struct trap_frame *tf);
 /*
  * kernel_init_process - Launch the first user process
  *
- * Called from kmain after all subsystems are initialized.
+ * Called from kernel_bootstrap_thread after all subsystems are initialized.
  * Tries to load /sbin/init, then /bin/sh as fallback.
- * Creates PID 1 and begins executing it.
+ * Creates PID 1, sets up its thread with a trap frame, and enqueues it
+ * on the run queue for the scheduler to dispatch.
  *
- * Does not return on success. Panics if no init can be loaded.
+ * Returns normally. The scheduler will pick up init's thread and
+ * dispatch it to init_thread_return → eret → EL0.
+ * Panics if no init can be loaded.
  */
-void kernel_init_process(void) __noreturn;
+void kernel_init_process(void);
 
 /* ============================================================================
  * File Descriptor Helpers

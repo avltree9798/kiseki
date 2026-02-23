@@ -182,15 +182,6 @@ int tcp_accept_alloc(int listener_idx, uint32_t remote_addr,
     listener->so_qlen++;
     spin_unlock_irqrestore(&listener->so_lock, flags);
 
-    kprintf("[net] child socket %d allocated for listener %d "
-            "(remote=%u.%u.%u.%u:%u)\n",
-            child_idx, listener_idx,
-            (ntohl(remote_addr) >> 24) & 0xFF,
-            (ntohl(remote_addr) >> 16) & 0xFF,
-            (ntohl(remote_addr) >> 8) & 0xFF,
-            ntohl(remote_addr) & 0xFF,
-            ntohs(remote_port));
-
     return child_idx;
 }
 
@@ -273,9 +264,6 @@ int net_socket(int domain, int type, int protocol)
     so->so_type     = type;
     so->so_protocol = protocol;
 
-    kprintf("[net] socket created: fd=%d type=%d proto=%d\n",
-            fd, type, protocol);
-
     return fd;
 }
 
@@ -301,9 +289,6 @@ int net_bind(int sockfd, const struct sockaddr_in *addr)
     so->so_state = SS_BOUND;
 
     spin_unlock_irqrestore(&so->so_lock, flags);
-
-    kprintf("[net] socket %d bound to port %u\n",
-            sockfd, ntohs(addr->sin_port));
 
     return 0;
 }
@@ -343,9 +328,6 @@ int net_listen(int sockfd, int backlog)
     so->so_qlen   = 0;
 
     spin_unlock_irqrestore(&so->so_lock, flags);
-
-    kprintf("[net] socket %d listening on port %u (backlog=%d)\n",
-            sockfd, ntohs(so->so_local.sin_port), so->so_qlimit);
 
     return 0;
 }
@@ -397,7 +379,6 @@ int net_accept(int sockfd, struct sockaddr_in *addr)
                 *addr = child->so_remote;
             }
 
-            kprintf("[net] accept: returning child socket %d\n", i);
             return i;
         }
 
@@ -475,7 +456,6 @@ int net_connect(int sockfd, const struct sockaddr_in *addr)
                 if (attempt > 0 && (attempt % 100) == 0 &&
                     tp->t_state == TCPS_SYN_SENT && syn_retries < 5) {
                     syn_retries++;
-                    kprintf("[tcp] SYN retransmit #%d\n", syn_retries);
                     tcp_output(tp);
                 }
             }
@@ -492,14 +472,6 @@ int net_connect(int sockfd, const struct sockaddr_in *addr)
         /* UDP: "connect" just sets the default destination */
         so->so_state = SS_CONNECTED;
     }
-
-    kprintf("[net] socket %d connected to %u.%u.%u.%u:%u\n",
-            sockfd,
-            (ntohl(addr->sin_addr.s_addr) >> 24) & 0xFF,
-            (ntohl(addr->sin_addr.s_addr) >> 16) & 0xFF,
-            (ntohl(addr->sin_addr.s_addr) >> 8) & 0xFF,
-            ntohl(addr->sin_addr.s_addr) & 0xFF,
-            ntohs(addr->sin_port));
 
     return 0;
 }
@@ -609,8 +581,6 @@ int net_close(int sockfd)
     so->so_active = false;
 
     spin_unlock_irqrestore(&so->so_lock, flags);
-
-    kprintf("[net] socket %d closed\n", sockfd);
 
     return 0;
 }

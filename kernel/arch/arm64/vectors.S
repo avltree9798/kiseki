@@ -84,6 +84,7 @@
     ldr     x30, [sp, #(30 * 8)]
 
     add     sp, sp, #TF_SIZE
+    isb             /* Ensure all prior operations complete before eret */
     eret
 .endm
 
@@ -165,21 +166,125 @@ _handle_el0_irq:
  * ============================================================================ */
 .global fork_child_return
 fork_child_return:
-    /* x19 = pointer to child's vm_space (set by thread_create context)
+    /*
+     * TTBR0 switch with full cache/TLB maintenance (Inner Shareable).
+     *
+     * x19 = pointer to child's vm_space (set by sys_fork_impl)
      * vm_space layout: [pgd (8 bytes)][asid (8 bytes)]
-     * We need TTBR0 = pgd | (asid << 48) */
-    ldr     x0, [x19, #0]      /* x0 = pgd */
-    ldr     x1, [x19, #8]      /* x1 = asid */
+     * TTBR0 format: pgd | (asid << 48)
+     */
+    dsb     sy                  /* Ensure ALL page table writes globally visible */
+    
+    /* Build TTBR0 value: pgd | (asid << 48) */
+    ldr     x0, [x19, #0]       /* x0 = pgd (physical address) */
+    ldr     x1, [x19, #8]       /* x1 = asid */
     orr     x0, x0, x1, lsl #48
-    msr     ttbr0_el1, x0
-    tlbi    vmalle1             /* Flush TLB — child has a fresh address space */
+    
+    msr     ttbr0_el1, x0       /* Switch to child's address space */
+    isb                         /* Context sync - TTBR change takes effect */
+    
+    tlbi    vmalle1is           /* Invalidate ALL TLB entries (broadcast) */
+    dsb     ish                 /* Ensure TLBI completes on all CPUs */
+    
+    ic      ialluis             /* Invalidate ALL instruction caches (broadcast) */
+    dsb     ish                 /* Ensure IC completes on all CPUs */
+    isb                         /* Sync instruction stream */
+
+    /*
+     * WORKAROUND: Add a delay to allow cache maintenance to fully propagate.
+     */
+    mov     x0, #0x1000         /* Delay counter */
+1:  sub     x0, x0, #1
+    cbnz    x0, 1b
+    
+    /* Second barrier sequence after delay */
     dsb     sy
     isb
+
+    /*
+     * DEBUG: Validate trap frame before RESTORE_REGS.
+     */
+    ldr     x0, [sp, #TF_ELR]       /* x0 = trap frame's ELR (user return PC) */
+    
+    /* Check if ELR is in kernel RAM range [0x40000000, 0x80000000) */
+    mov     x1, #0x4000
+    lsl     x1, x1, #16             /* x1 = 0x40000000 (RAM_BASE) */
+    cmp     x0, x1
+    b.lo    1f                      /* Branch if x0 < 0x40000000 (not in kernel RAM) */
+    mov     x1, #0x8000
+    lsl     x1, x1, #16             /* x1 = 0x80000000 (RAM_BASE + RAM_SIZE) */
+    cmp     x0, x1
+    b.hs    1f                      /* Branch if x0 >= 0x80000000 (not in kernel RAM) */
+    /* ELR is in kernel RAM range - BUG! */
+    mov     x2, x0                  /* Save bad ELR for panic */
+    ldr     x3, [sp, #TF_SP]        /* Load user SP for context */
+    b       _fork_trapframe_panic
+1:
 
     /* Enable interrupts (child starts with IRQs masked from context_switch) */
     msr     daifclr, #0x2
 
+    /*
+     * NUCLEAR OPTION: Complete TLB and I-cache flush right before eret.
+     */
+    tlbi    vmalle1is
+    dsb     sy
+    ic      ialluis
+    dsb     sy
+    isb
+
     /* SP already points to the trap frame. Do RESTORE_REGS 0 inline. */
+    RESTORE_REGS 0
+
+/*
+ * _fork_trapframe_panic - Called when fork_child_return detects bad trap frame
+ * x2 = ELR value, x3 = SP value
+ */
+_fork_trapframe_panic:
+    /* Call panic with trap frame info */
+    /* For now, just halt - proper panic would need stack setup */
+    mov     x0, x2      /* Pass ELR as arg */
+    mov     x1, x3      /* Pass SP as arg */
+    bl      fork_trapframe_panic_c
+    b       _halt
+
+/* ============================================================================
+ * init_thread_return - Entry point for the init (PID 1) process thread
+ *
+ * Called via the scheduler when init's thread gets its first context
+ * switch. The thread was set up by kernel_init_process() with:
+ *   - context.x30 = init_thread_return
+ *   - context.sp  = top of kernel stack (where trap frame is placed)
+ *   - context.x19 = pointer to init's vm_space (for TTBR0 switch)
+ *
+ * Identical flow to fork_child_return:
+ *   1. Switch to init's address space (TTBR0)
+ *   2. Enable interrupts
+ *   3. Restore the trap frame and eret to user mode
+ * ============================================================================ */
+.global init_thread_return
+init_thread_return:
+    /* x19 = pointer to init's vm_space
+     * vm_space layout: [pgd (8 bytes)][asid (8 bytes)]
+     * TTBR0 = pgd | (asid << 48) */
+    dsb     sy                  /* Ensure ALL page table writes globally visible */
+
+    ldr     x0, [x19, #0]       /* x0 = pgd */
+    ldr     x1, [x19, #8]       /* x1 = asid */
+    orr     x0, x0, x1, lsl #48
+    msr     ttbr0_el1, x0
+    isb
+
+    tlbi    vmalle1is
+    dsb     ish
+    ic      ialluis
+    dsb     ish
+    isb
+
+    /* Enable interrupts (thread starts with IRQs masked from context_switch) */
+    msr     daifclr, #0x2
+
+    /* SP already points to the trap frame. Restore and eret to EL0. */
     RESTORE_REGS 0
 
 /* ============================================================================
@@ -203,11 +308,20 @@ user_thread_return:
     /* x19 = pointer to task's vm_space (set by thread_create_user context)
      * vm_space layout: [pgd (8 bytes)][asid (8 bytes)]
      * We need TTBR0 = pgd | (asid << 48) */
+    dsb     sy                  /* Ensure prior stores visible */
+    
     ldr     x0, [x19, #0]       /* x0 = pgd */
     ldr     x1, [x19, #8]       /* x1 = asid */
     orr     x0, x0, x1, lsl #48
     msr     ttbr0_el1, x0
     isb                         /* Ensure TTBR0 change takes effect */
+    
+    /* Full TLB and I-cache invalidation for SMP correctness */
+    tlbi    vmalle1is
+    dsb     ish
+    ic      ialluis
+    dsb     ish
+    isb
 
     /* x20 = TLS base address - set TPIDR_EL0 for user-space pthread TLS */
     msr     tpidr_el0, x20
@@ -228,3 +342,5 @@ _vec_unhandled:
     mrs     x3, spsr_el1
     bl      exception_handler_early
     b       _halt
+
+.section .text

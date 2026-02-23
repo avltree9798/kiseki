@@ -1,6 +1,6 @@
 # Kiseki Operating System: Architecture & Design Specification
 
-**Version:** 2.0
+**Version:** 3.0
 **Target Architecture:** ARM64 (AArch64)
 **Primary Hardware:** QEMU `virt` machine (development), Raspberry Pi 4/5 (production)
 **Kernel Type:** Hybrid (Mach microkernel + BSD personality)
@@ -40,7 +40,7 @@ Kiseki is a Unix-like operating system that runs native macOS ARM64 CLI binaries
 The system comprises:
 - A **hybrid kernel** (~22,000 lines of C and ARM64 assembly) implementing the Mach microkernel, BSD personality, Ext4 filesystem, TCP/IP networking, and device drivers
 - A **dynamic linker** (dyld) and **C library** (libSystem.B.dylib, ~4,800 lines) providing the Darwin userland ABI
-- **76 Mach-O userland binaries** including bash, awk, sed, grep, curl, TCC compiler, and a full set of coreutils
+- **79 Mach-O userland binaries** including bash, awk, sed, grep, curl, TCC compiler, and a full set of coreutils
 - A **comprehensive unit test suite** for libSystem validation
 - A **native C compiler** (TCC) that runs on Kiseki and produces working Mach-O ARM64 binaries
 - A **4-core SMP** scheduler with pre-emptive multitasking
@@ -116,7 +116,7 @@ Seventeen-phase boot, executed sequentially on core 0:
 | 3 | Physical memory | `pmm_init(__heap_start, RAM_BASE + RAM_SIZE)`. Buddy allocator. |
 | 4 | Virtual memory | `vmm_init()`. Page table setup, identity mapping. |
 | 5 | Threading | `thread_init()`, `sched_init()`. Thread pool (256), MLFQ scheduler (128 levels). |
-| 6 | Timer | `timer_init(100)`. ARM Generic Timer at 100 Hz. Enables IRQs. |
+| 6 | Timer | `timer_init(100)`. ARM Generic Timer at 100 Hz. IRQs remain **masked** — the timer hardware is programmed but interrupts stay pending until each thread unmasks them on its own PMM stack (prevents boot stack corruption). |
 | 7 | SMP | `smp_init()`. Wakes secondary cores via PSCI `smc #0`. |
 | 8 | Block device | `blkdev_init()`. VirtIO-blk (QEMU) or eMMC (RPi). |
 | 9 | Buffer cache | `buf_init()`. LRU cache, 256 × 4 KB blocks. |
@@ -124,26 +124,35 @@ Seventeen-phase boot, executed sequentially on core 0:
 | 11 | Ext4 | `ext4_fs_init()`. Registers Ext4 filesystem type with VFS. |
 | 12 | Root mount | `vfs_mount("ext4", "/", 0, 0)`. Mounts root filesystem. |
 | 12b | Device FS | `devfs_init()`, `vfs_mount("devfs", "/dev", 0, 0)`. Creates `/dev/console`, `/dev/null`, `/dev/zero`, `/dev/urandom`. |
-| 13 | Mach IPC | `ipc_init()`. Port namespace, kernel IPC space. |
+| 13 | Mach IPC | `ipc_init()`. Port pool (512), IPC space pool (64), kernel IPC space, bootstrap service registry. |
 | 14 | CommPage | `commpage_init()`. Shared kernel-user page at `0xFFFFFFFFFFFFC000`. |
 | 15 | Processes | `proc_init()`. Process table (256 slots), PID 0 (kernel). |
 | 16 | Networking | `net_init()`. TCP/IP stack, socket table (64), VirtIO-net driver, IP/gateway configuration. |
-| 17 | PID 1 | `kernel_init_process()`. Loads `/sbin/init` (or `/bin/bash` fallback) as Mach-O. Never returns. |
+| 17 | Bootstrap | Creates `kernel_bootstrap_thread` on a PMM-allocated stack, calls `load_context()` to abandon the boot stack forever. The bootstrap thread calls `kernel_init_process()` which loads `/sbin/init` (or `/bin/bash` fallback) as Mach-O and enqueues PID 1 on the run queue for the scheduler to dispatch. The bootstrap thread then calls `thread_exit()`. |
 
 ### 4.3. Secondary Core Boot
 
 Each secondary core, once woken by PSCI:
 1. Drops from EL2 to EL1 (if needed).
-2. Sets per-core stack: `SP = __stack_top - (core_id × 16 KB)`.
-3. Calls `secondary_main(core_id)`: GIC per-CPU init, scheduler per-CPU init, timer per-CPU init, enables interrupts, enters idle loop (`WFI`).
+2. Sets per-core stack: `SP = __stack_top - (core_id × KERNEL_STACK_SIZE)` (32 KB per core).
+3. Calls `secondary_main(core_id)`: enables MMU/caches (`vmm_init_percpu()`), GIC per-CPU init, scheduler per-CPU init, timer per-CPU init.
+4. Calls `load_context()` to jump into the idle thread (which has its own PMM-allocated stack), abandoning the boot stack. `thread_trampoline` unmasks IRQs and enters the idle loop (`WFI`).
 
 ### 4.4. Userland Boot Chain
 
 ```
-/sbin/init → /sbin/getty (per TTY) → /bin/login → /bin/bash
+/sbin/init (launchd) → launch daemons → /sbin/getty (per TTY) → /bin/login → /bin/bash
 ```
 
-- **init**: PID 1. Mounts root, spawns getty for each configured terminal.
+- **init (launchd)**: PID 1. A proper launchd-style init that:
+  1. Scans `/System/Library/LaunchDaemons/` and `/Library/LaunchDaemons/` for `.plist` files.
+  2. Parses each XML plist (~200-line parser handling `<dict>`, `<key>`, `<string>`, `<array>`, `<true/>`, `<false/>`, `<?xml?>`, `<!DOCTYPE>`).
+  3. Extracts `Label`, `Program`, `ProgramArguments`, `MachServices`, `KeepAlive`.
+  4. **Pre-creates Mach receive ports** for every declared `MachService` and registers them via `bootstrap_register()`. This eliminates race conditions: clients can look up services before daemons start.
+  5. Forks and execs each daemon.
+  6. Supports `KeepAlive` — auto-relaunches daemons that exit.
+  7. Spawns getty for terminal login.
+- **mDNSResponder**: DNS resolution daemon. Claims its service port via `bootstrap_check_in()`, receives DNS requests via Mach IPC, performs UDP DNS queries to upstream servers.
 - **getty**: Opens `/dev/console`, sets controlling terminal (`TIOCSCTTY`), prints login prompt, execs login.
 - **login**: Reads username/password, authenticates against `/etc/passwd` + `/etc/shadow`, sets UID/GID/groups, execs user's shell.
 - **bash**: Interactive shell with job control, pipelines, redirections.
@@ -277,15 +286,61 @@ User code executes `svc #0x80` with the syscall number in register `x16`:
 
 | Trap # | Name | Function |
 |---|---|---|
-| −26 | `mach_reply_port` | Allocate a reply port |
+| −26 | `mach_reply_port` | Allocate a reply port (receive + send-once rights) |
 | −27 | `thread_self_trap` | Return current thread's port |
 | −28 | `task_self_trap` | Return current task's port |
 | −31 | `mach_msg_trap` | IPC core: send/receive messages on ports |
 | −32 | `mach_msg_overwrite_trap` | IPC with overwrite semantics |
 | −36 | `mach_port_allocate` | Allocate a new port right |
 | −37 | `mach_port_deallocate` | Deallocate a port right |
+| −40 | `bootstrap_register` | Register a named service port |
+| −41 | `bootstrap_look_up` | Look up a service port by name (returns send right) |
+| −42 | `bootstrap_check_in` | Daemon claims a pre-registered service port (returns receive right) |
 
-### 6.4. ABI Details
+### 6.4. Mach IPC Subsystem
+
+Kiseki implements XNU-compatible Mach IPC with per-task port name spaces and full port right translation across task boundaries.
+
+**Port objects:** 512 kernel port objects in a static pool. Each port has a single receive right holder, a reference count, and a ring buffer message queue (16 messages, 4096 bytes max per message).
+
+**Per-task IPC spaces:** Every task gets its own `struct ipc_space` (allocated from a pool of 64) with a 256-entry port name table mapping `mach_port_name_t` to kernel port objects + rights held. Allocated in `kernel_init_process()` (PID 1) and `sys_fork_impl()` (forked children), cleaned up in `proc_exit()`. This matches XNU's `ipc_space_create()`/`ipc_space_destroy()` in `osfmk/ipc/ipc_space.c`.
+
+**Port rights:** Send, receive, send-once, dead name. Port type bits follow XNU conventions:
+- `MACH_PORT_TYPE_SEND` = `(1u << 16)`
+- `MACH_PORT_TYPE_RECEIVE` = `(1u << 17)`
+- `MACH_PORT_TYPE_SEND_ONCE` = `(1u << 18)`
+
+**Message header port right translation (copyin/copyout):**
+
+On XNU, `ipc_kmsg_copyin_header()` and `ipc_kmsg_copyout_header()` translate port names between task IPC spaces when messages are sent and received. Kiseki implements the same semantics:
+
+**Send phase (copyin):**
+1. Extract port names and dispositions from `msgh_bits` (remote = destination, local = reply).
+2. Look up `msgh_remote_port` (destination) in sender's IPC space. Validate the sender holds the appropriate right for the disposition (e.g., `COPY_SEND` requires send right, `MAKE_SEND_ONCE` requires receive right).
+3. Look up `msgh_local_port` (reply port) in sender's IPC space. Take a reference on the kernel port object.
+4. Convert dispositions to post-copyin types via `ipc_object_copyin_type()` (e.g., `COPY_SEND` → `PORT_SEND`, `MAKE_SEND_ONCE` → `PORT_SEND_ONCE`).
+5. Enqueue message data plus kernel port pointers and post-copyin types on the destination port.
+
+**Receive phase (copyout):**
+1. Dequeue message bytes plus translated kernel port pointers from the port.
+2. Insert the reply port into the receiver's IPC space with the appropriate right (typically `SEND_ONCE`), allocating a new name.
+3. Resolve the destination port to the receiver's existing name (they hold the receive right).
+4. **Swap remote/local** per XNU convention: `msgh_remote_port` = reply port name, `msgh_local_port` = destination port name. Update `msgh_bits` with swapped types.
+5. Append a minimal trailer (`MACH_MSG_TRAILER_FORMAT_0`).
+
+This ensures that when process A sends a message to process B with a reply port, process B receives a valid send-once right to the reply port in its own IPC space and can send a reply back.
+
+**Bootstrap service registry:**
+
+On macOS, service name→port registration is handled by launchd via Mach messages. Kiseki implements this as kernel-managed traps (−40, −41, −42) with the same userland API semantics:
+
+- `bootstrap_register(name, port)` — Registers a kernel port object under a name. Used by init/launchd to pre-create service ports.
+- `bootstrap_look_up(name, &port)` — Returns a send right to the named service in the caller's IPC space. Used by clients.
+- `bootstrap_check_in(name, &port)` — Daemon claims the pre-created port, receiving receive + send rights. Transfers ownership from init to the daemon.
+
+**Userland headers:** 8 headers in `userland/libsystem/include/mach/` matching XNU structure (`kern_return.h`, `port.h`, `message.h`, `mach_types.h`, `mach_port.h`, `mach_traps.h`, `boolean.h`, `bootstrap.h`, `mach.h`) plus `servers/bootstrap.h`.
+
+### 6.5. ABI Details
 
 - **Struct stat**: 144 bytes (matches macOS ARM64 SDK).
 - **Struct dirent**: 1,048 bytes (matches macOS ARM64 SDK).
@@ -587,7 +642,29 @@ Full RFC 793 state machine (~780 lines):
 
 ### 11.6. UDP
 
-Connectionless datagram service (~140 lines). Input demultiplexing by port, output via IP layer.
+Connectionless datagram service (~140 lines). Input demultiplexing by port, output via IP layer. Auto-binding of ephemeral ports (49152+) on first `sendto()` for unbound sockets (matching BSD behaviour).
+
+### 11.6b. DNS Resolution
+
+DNS name resolution follows the macOS architecture:
+
+```
+Application (getaddrinfo)
+    ↕ Mach IPC (bootstrap_look_up → mach_msg)
+mDNSResponder daemon
+    ↕ UDP socket (sendto/recvfrom)
+Upstream DNS server (8.8.8.8)
+```
+
+**`/etc/resolv.conf`**: Standard Unix DNS configuration file. Parsed by mDNSResponder on each query. Falls back to DHCP-provided DNS server via `sysctl(CTL_NET, NET_KISEKI_IFDNS)` if no resolv.conf nameserver found.
+
+**mDNSResponder** (`/sbin/mDNSResponder`): System daemon modelled after Apple's mDNSResponder. Launched by init via launchd plist at `/System/Library/LaunchDaemons/uk.co.avltree9798.mDNSResponder.plist`. Claims its service port via `bootstrap_check_in()`. Implements DNS wire protocol (RFC 1035) with query building and response parsing (A records).
+
+**IPC protocol** (libSystem ↔ mDNSResponder):
+- Request: `mach_msg_header_t` + `uint32_t msg_id` + `char hostname[256]`, `msgh_id = 1000`
+- Reply: `mach_msg_header_t` + `int32_t error` + `uint32_t addr_count` + `uint32_t addrs[8]`, `msgh_id = 1001`
+
+**`getaddrinfo()`** in libSystem: Looks up mDNSResponder via `bootstrap_look_up()`, allocates a reply port via `mach_reply_port()`, sends a resolve request, blocks on the reply port, returns resolved addresses.
 
 ### 11.7. ICMP
 
@@ -749,7 +826,7 @@ This ensures environment variables inherited from the parent process are accessi
 
 ### 13.2. libSystem.B.dylib
 
-Freestanding C library (~4,800 lines) providing:
+Freestanding C library (~7,500 lines) providing:
 - **Standard I/O**: `printf`, `fprintf`, `sprintf`, `snprintf`, `vprintf`, `scanf`, `sscanf`, `fscanf`, `puts`, `putchar`, `getchar`, `fopen`, `fclose`, `fread`, `fwrite`, `fgets`, `fputs`, `fgetc`, `fputc`, `ungetc`, `fflush`, `feof`, `ferror`, `clearerr`, `fileno`, `fdopen`, `freopen`, `tmpfile`, `tmpnam`, `remove`, `fseek`, `ftell`, `rewind`, `fgetpos`, `fsetpos`, `setbuf`, `setvbuf`, `getline`, `getdelim`, `popen`, `pclose`.
 - **String/memory**: `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strstr`, `strchr`, `strrchr`, `strdup`, `strtok`, `strtok_r`, `memcpy`, `memmove`, `memset`, `memcmp`, `bzero`.
 - **Conversion**: `atoi`, `atol`, `strtol`, `strtoul`, `strtoll`, `strtoull`, `strtod`.
@@ -764,17 +841,18 @@ Freestanding C library (~4,800 lines) providing:
 - **Directory**: `opendir`, `readdir`, `closedir`.
 - **Environment**: `getenv`, `setenv`, `unsetenv` (modifies `environ` global).
 - **System**: `sysctl`, `getentropy`, `sysconf`, `popen`, `pclose`, `system`.
-- **Mach**: Inline `__syscall()` wrapper for `svc #0x80`.
+- **Mach IPC**: `mach_task_self`, `mach_reply_port`, `mach_thread_self`, `mach_msg`, `mach_port_allocate`, `mach_port_deallocate`, `bootstrap_register`, `bootstrap_look_up`, `bootstrap_check_in`. Separate `__mach_trap()` for negative trap numbers (no carry flag check).
+- **DNS**: `getaddrinfo` via Mach IPC to mDNSResponder daemon.
 
 **TCC compatibility:** libSystem includes alternate variadic function implementations (`_printf_tcc`, `_fprintf_tcc`, etc.) for TCC-compiled code. TCC uses a different calling convention for variadic functions on ARM64 (registers vs stack), and `stdio.h` automatically redirects to these variants when compiled with TCC.
 
-### 13.3. Userland Binaries (76 Mach-O executables)
+### 13.3. Userland Binaries (79 Mach-O executables)
 
 **Shell:** bash (full implementation with lexer, parser, executor, job control, builtins, readline, `time` keyword)
 
 **Compiler:** TCC (Tiny C Compiler) - native C compiler that produces working Mach-O ARM64 binaries
 
-**System daemons:** init, getty, login, halt, reboot, shutdown, sshd
+**System daemons:** init (launchd), getty, login, halt, reboot, shutdown, sshd, mDNSResponder
 
 **User management:** useradd, usermod, passwd, su, sudo, whoami, id
 
@@ -857,7 +935,7 @@ kiseki/
 │   ├── arch/arm64/                 # ARM64-specific (boot, vectors, context switch, SMP)
 │   ├── kern/                       # Core kernel (scheduler, processes, VMM, PMM, TTY, PTY, sync)
 │   ├── bsd/                        # BSD personality (syscalls, security)
-│   ├── mach/                       # Mach microkernel (IPC, ports)
+│   ├── mach/                       # Mach microkernel (IPC, ports, bootstrap)
 │   ├── fs/                         # Filesystems (VFS, Ext4, devfs, buffer cache)
 │   ├── net/                        # Networking (sockets, TCP, UDP, IP, ICMP, Ethernet, ARP)
 │   ├── drivers/                    # Device drivers (UART, GIC, timer, VirtIO, eMMC)
@@ -868,7 +946,9 @@ kiseki/
 │   ├── libsystem/                  # libSystem.B.dylib (~4,800 lines)
 │   ├── bin/                        # 60 coreutils + bash + TCC
 │   │   └── tests/                  # libSystem unit tests (test_libc)
-│   └── sbin/                       # System binaries (init, getty, login, halt)
+│   └── sbin/                       # System binaries (init, getty, login, halt, sshd, mDNSResponder)
+├── config/
+│   └── LaunchDaemons/              # Plist files for system daemons
 └── tests/                          # Unit test framework
 ```
 
@@ -899,9 +979,12 @@ libSystem.B.dylib is compiled as a Mach-O shared library (`MH_DYLIB`).
 
 `scripts/mkdisk.sh` creates a 64 MB ext4 image with:
 - Standard Unix hierarchy (`/bin`, `/sbin`, `/usr`, `/etc`, `/dev`, `/tmp`, `/var`, `/home`)
-- All 76 Mach-O binaries
+- All 79 Mach-O binaries
 - `/usr/lib/dyld` and `/usr/lib/libSystem.B.dylib`
-- `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/profile`
+- `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/profile`, `/etc/resolv.conf`
+- `/System/Library/LaunchDaemons/*.plist` — launchd configuration for system daemons
+- `/Library/LaunchDaemons/` — directory for third-party daemon plists
+- `/usr/include/mach/*.h`, `/usr/include/servers/bootstrap.h` — Mach headers for TCC
 
 ### 16.4. Testing
 

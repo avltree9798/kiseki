@@ -63,7 +63,10 @@ Every working syscall is a small miracle. Every binary that loads and runs is an
 - Mach-O binary loader with LC_SEGMENT_64, LC_MAIN, LC_LOAD_DYLINKER support
 - Custom dyld (dynamic linker) resolving libSystem symbols at load time
 - 100+ BSD syscalls (fork, exec, pipe, dup2, select, mmap, signals, sockets...)
-- Mach traps (task_self, mach_msg, semaphore operations, thread_self)
+- Mach traps (task_self, mach_msg, semaphore operations, thread_self, port_allocate/deallocate)
+- Mach IPC with per-task port name spaces and full port right translation (copyin/copyout)
+- Bootstrap service registry (register, look_up, check_in) for launchd-style daemon management
+- DNS resolution via Mach IPC to mDNSResponder daemon (getaddrinfo)
 - CommPage at `0xFFFFFFFFFFFFC000` with optimised gettimeofday
 - Full termios/TTY subsystem with canonical and raw modes
 - Pseudo-terminal (PTY) subsystem for remote shell sessions
@@ -85,20 +88,23 @@ Every working syscall is a small miracle. Every binary that loads and runs is an
 - Ethernet framing with ARP cache and neighbour resolution
 - IPv4 routing with configurable gateway and netmask
 - TCP: full state machine, three-way handshake, active and passive open, FIN/RST, retransmission
-- UDP: connectionless datagram support
+- UDP: connectionless datagram support with auto-binding of ephemeral ports
 - ICMP: echo request/reply (ping)
+- DNS resolution via mDNSResponder daemon (getaddrinfo → Mach IPC → UDP DNS)
+- `/etc/resolv.conf` support with fallback to DHCP-provided DNS
 - BSD socket API: socket, bind, listen, accept, connect, send, recv, shutdown, close
 
 ### Userland
-- **76 Mach-O binaries** on the root filesystem
+- **81 Mach-O binaries** on the root filesystem
 - **TCC (Tiny C Compiler)**: Native C compiler that runs on Kiseki and produces working Mach-O binaries
 - Full bash shell with job control, pipelines, redirections, `time` keyword
-- 60 coreutils: ls, cat, grep, awk, sed, sort, find, wc, cut, head, tail, tr, xargs, and more
-- System daemons: init, getty, login (with /etc/passwd authentication)
+- 60+ coreutils: ls, cat, grep, awk, sed, sort, find, wc, cut, head, tail, tr, xargs, and more
+- System daemons: init (launchd), getty, login, mDNSResponder, sshd
+- mDNSResponder: DNS resolution daemon launched via launchd plist, Mach IPC service
 - Network tools: curl, nc, ping, ifconfig, ntpdate
 - User management: useradd, usermod, passwd, su, sudo, whoami, id
 - Power management: halt, reboot, shutdown
-- libSystem.B.dylib: complete freestanding C library (~4,800 lines)
+- libSystem.B.dylib: complete freestanding C library (~7,400 lines)
 - **Unit test suite**: Comprehensive libSystem tests (string.h, stdlib.h, stdio.h, unistd.h, etc.)
 
 ### Security
@@ -144,7 +150,7 @@ brew install qemu
 # Build kernel only
 make -j4
 
-# Build all userland (dyld + libSystem + 76 binaries)
+# Build all userland (dyld + libSystem + 81 binaries)
 make -C userland all
 
 # Create root filesystem disk image
@@ -176,9 +182,13 @@ Power On
   → boot.S: Set up EL1, MMU, stack, wake secondary cores via PSCI
   → main.c: Initialize subsystems in order:
       GIC → UART → PMM → VMM → Timer → Scheduler → SMP →
-      TTY → PTY → Ext4 → devfs → VFS mount → Network →
+      TTY → PTY → Ext4 → devfs → VFS mount → Mach IPC →
+      CommPage → Processes → Network →
       Load /sbin/init from Mach-O
-  → init: Mount root, spawn getty per TTY
+  → init (launchd): Parse /System/Library/LaunchDaemons/*.plist,
+      pre-create Mach service ports, fork/exec daemons, spawn getty
+  → mDNSResponder: Claims service port via bootstrap_check_in(),
+      handles DNS queries via Mach IPC + UDP
   → getty: Open /dev/console, print login prompt
   → login: Authenticate user, set UID/GID, exec shell
   → bash: Interactive shell session
@@ -192,10 +202,13 @@ kiseki/
 ├── README.md
 ├── docs/
 │   ├── spec.md                     # Full architecture specification
+│   ├── development-guide.md        # Development guide and conventions
 │   ├── implementing-syscalls.md    # Guide to adding new syscalls
 │   └── porting-software.md         # Guide to porting software to Kiseki
 ├── scripts/
 │   └── mkdisk.sh                   # Root filesystem image builder
+├── config/
+│   └── LaunchDaemons/              # Launchd plist files for system daemons
 ├── kernel/
 │   ├── arch/arm64/
 │   │   ├── boot.S                  # Entry point, EL2→EL1, MMU setup
@@ -219,7 +232,7 @@ kiseki/
 │   │   ├── syscalls.c              # BSD syscall dispatch (~4700 lines)
 │   │   └── security.c             # Credential checks, SUID
 │   ├── mach/
-│   │   └── ipc.c                   # Mach IPC, port management
+│   │   └── ipc.c                   # Mach IPC, ports, bootstrap (~1280 lines)
 │   ├── fs/
 │   │   ├── vfs.c                   # Virtual filesystem layer
 │   │   ├── ext4/ext4.c             # Ext4 read/write driver
@@ -246,9 +259,9 @@ kiseki/
 │   ├── Makefile                    # Userland master build
 │   ├── dyld/                       # Dynamic linker (Mach-O)
 │   ├── libsystem/
-│   │   ├── libSystem.c             # Freestanding C library (~3100 lines)
-│   │   └── include/                # Userland syscall headers
-│   ├── bin/                        # 59 coreutils + bash
+│   │   ├── libSystem.c             # Freestanding C library (~7400 lines)
+│   │   └── include/                # Userland headers (mach/, servers/)
+│   ├── bin/                        # 60+ coreutils + bash + TCC
 │   │   ├── bash/                   # Full bash implementation
 │   │   ├── awk/                    # AWK interpreter
 │   │   ├── sed/                    # Stream editor
@@ -256,7 +269,9 @@ kiseki/
 │   │   ├── curl/                   # HTTP client
 │   │   └── ...                     # ls, cat, cp, mv, rm, etc.
 │   └── sbin/
-│       ├── init.c                  # PID 1 process
+│       ├── init.c                  # PID 1 / launchd (~530 lines)
+│       ├── mDNSResponder.c         # DNS resolution daemon (~560 lines)
+│       ├── sshd.c                  # SSH server (in progress)
 │       ├── getty.c                 # Terminal login prompt
 │       ├── login.c                 # User authentication
 │       └── halt.c                  # System shutdown/reboot
@@ -267,10 +282,10 @@ kiseki/
 
 | Component | Files | Lines |
 |-----------|-------|-------|
-| Kernel (C + ASM) | 37 | ~22,000 |
-| Kernel headers | 26 | ~4,900 |
-| Userland | 76+ | ~45,000 |
-| **Total** | **139+** | **~72,000** |
+| Kernel (C + ASM) | 41 | ~25,500 |
+| Kernel headers | 26 | ~5,700 |
+| Userland (C + H) | 81+ | ~92,000 |
+| **Total** | **148+** | **~123,000** |
 
 ## Roadmap
 
@@ -284,7 +299,10 @@ kiseki/
 - [x] TCP/IP networking stack
 - [x] PTY subsystem
 - [x] Native C compiler (TCC)
-- [ ] SSH server (in progress)
+- [x] Mach IPC with per-task port spaces and port right translation
+- [x] Launchd-style init with plist parsing and service port pre-creation
+- [x] DNS resolution (getaddrinfo → mDNSResponder → UDP DNS)
+- [ ] SSH server (in progress — transport working, crypto stubs remain)
 - [ ] vim text editor
 - [ ] Lua interpreter
 - [ ] Python interpreter

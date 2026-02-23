@@ -78,6 +78,21 @@ typedef int32_t     mach_msg_timeout_t;
 #define MACH_MSG_TYPE_PORT_SEND         MACH_MSG_TYPE_MOVE_SEND
 
 /*
+ * Post-copyin port type names.
+ *
+ * On XNU, after ipc_kmsg_copyin_header(), the msgh_bits fields are
+ * converted from "action" dispositions (COPY_SEND, MAKE_SEND_ONCE, etc.)
+ * to "state" types using ipc_object_copyin_type(). These describe what
+ * kind of right the kernel is holding in the in-flight message.
+ *
+ * See osfmk/ipc/ipc_object.c:ipc_object_copyin_type()
+ */
+#define MACH_MSG_TYPE_PORT_RECEIVE      MACH_MSG_TYPE_MOVE_RECEIVE      /* 16 */
+#define MACH_MSG_TYPE_PORT_SEND_ONCE    MACH_MSG_TYPE_MOVE_SEND_ONCE    /* 18 */
+/* MACH_MSG_TYPE_PORT_SEND is same as MACH_MSG_TYPE_MOVE_SEND = 17 */
+#define MACH_MSG_TYPE_PORT_NONE         0
+
+/*
  * mach_msg_header_t - Fixed header at the start of every Mach message
  */
 typedef struct {
@@ -150,9 +165,32 @@ typedef struct {
 /* Maximum ports per task name space */
 #define TASK_PORT_TABLE_SIZE        256
 
-/* Queued message: header + inline body stored contiguously */
+/*
+ * ipc_msg - Queued message in a port's ring buffer
+ *
+ * On XNU, ipc_kmsg stores the message inline and port header fields
+ * (msgh_remote_port, msgh_local_port) are overwritten with kernel
+ * ipc_port pointers after copyin. We store the raw user message bytes
+ * separately and carry the translated kernel port pointers alongside.
+ *
+ * reply_port:  Kernel port object for the sender's reply port.
+ *              During copyin, the sender's msgh_local_port name is
+ *              translated to this kernel object. During copyout, it
+ *              is inserted into the receiver's IPC space with a
+ *              send-once right, becoming the receiver's msgh_remote_port.
+ *
+ * reply_type:  Post-copyin type for the reply port (e.g. PORT_SEND_ONCE).
+ *              Corresponds to XNU's MACH_MSGH_BITS_LOCAL after copyin.
+ *
+ * dest_type:   Post-copyin type for the destination port (e.g. PORT_SEND).
+ *              Used during copyout to determine how to handle the
+ *              destination right for the receiver.
+ */
 struct ipc_msg {
-    uint32_t            size;       /* Total message size including header */
+    uint32_t            size;           /* Total message size including header */
+    struct ipc_port     *reply_port;    /* Translated reply port (kernel obj) */
+    mach_msg_type_name_t reply_type;    /* Post-copyin type: PORT_SEND_ONCE etc */
+    mach_msg_type_name_t dest_type;     /* Post-copyin type: PORT_SEND etc */
     uint8_t             data[MACH_MSG_SIZE_MAX];
 };
 
@@ -219,8 +257,26 @@ struct ipc_port *ipc_port_alloc(void);
 /* Deallocate a kernel port object */
 void ipc_port_dealloc(struct ipc_port *port);
 
-/* Initialize a task's IPC space */
+/* Initialize a task's IPC space (used internally by ipc_space_create) */
 void ipc_space_init(struct ipc_space *space);
+
+/*
+ * ipc_space_create - Allocate a new per-task IPC space from pool
+ *
+ * On XNU, called from task_create_internal() to give each task its own
+ * port name table. Every task must have its own ipc_space.
+ *
+ * Returns pointer to initialized ipc_space, or NULL on pool exhaustion.
+ */
+struct ipc_space *ipc_space_create(void);
+
+/*
+ * ipc_space_destroy - Release an IPC space and all port rights it holds
+ *
+ * On XNU, called from task_deallocate(). Releases all port rights held
+ * in the space's name table and returns the space to the pool.
+ */
+void ipc_space_destroy(struct ipc_space *space);
 
 /*
  * ipc_port_allocate_name - Insert a port into a task's name space
@@ -325,5 +381,64 @@ mach_port_t mach_reply_port_trap(void);
  * Returns mach_port_t in x0.
  */
 mach_port_t thread_self_trap(void);
+
+/* ============================================================================
+ * Bootstrap Service Registry
+ *
+ * On XNU, service lookup (bootstrap_register / bootstrap_look_up) is
+ * handled by launchd via Mach messages to the bootstrap port. Kiseki
+ * implements this as kernel-managed traps for simplicity while maintaining
+ * the same userland API semantics.
+ *
+ * Services register a name→port mapping. Clients look up a service by
+ * name and receive a send right to the service port in their own IPC space.
+ * ============================================================================ */
+
+#define BOOTSTRAP_MAX_NAME_LEN      128
+#define BOOTSTRAP_MAX_SERVICES      64
+
+/* Trap numbers for bootstrap (Kiseki extensions in Mach trap space) */
+#define MACH_TRAP_bootstrap_register    (-40)
+#define MACH_TRAP_bootstrap_look_up     (-41)
+#define MACH_TRAP_bootstrap_check_in    (-42)
+
+/*
+ * bootstrap_register_trap - Register a service port under a name
+ *
+ * x0 = bootstrap port (ignored, uses kernel registry)
+ * x1 = pointer to service name string (user)
+ * x2 = service port name (in caller's IPC space)
+ *
+ * Returns kern_return_t.
+ */
+kern_return_t bootstrap_register_trap(struct trap_frame *tf);
+
+/*
+ * bootstrap_look_up_trap - Look up a service port by name
+ *
+ * x0 = bootstrap port (ignored, uses kernel registry)
+ * x1 = pointer to service name string (user)
+ * x2 = pointer to mach_port_t (out, receives send right in caller's space)
+ *
+ * Returns kern_return_t.
+ */
+kern_return_t bootstrap_look_up_trap(struct trap_frame *tf);
+
+/*
+ * bootstrap_check_in_trap - Daemon checks in to claim a pre-registered service
+ *
+ * On macOS, launchd pre-creates the service port and registers it before
+ * the daemon starts. The daemon calls bootstrap_check_in() to receive the
+ * receive right for its service port. This eliminates race conditions:
+ * clients can bootstrap_look_up() immediately because the port exists
+ * before the daemon is even running.
+ *
+ * x0 = bootstrap port (ignored)
+ * x1 = pointer to service name string (user)
+ * x2 = pointer to mach_port_t (out, receives port name with receive+send right)
+ *
+ * Returns kern_return_t.
+ */
+kern_return_t bootstrap_check_in_trap(struct trap_frame *tf);
 
 #endif /* _MACH_IPC_H */

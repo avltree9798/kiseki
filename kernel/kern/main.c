@@ -37,6 +37,9 @@ extern uint64_t __bss_end;
 extern uint64_t __kernel_end;
 extern uint64_t __heap_start;
 
+/* Forward declaration */
+static void kernel_bootstrap_thread_func(void *arg);
+
 /*
  * kmain - Primary kernel entry point (called from boot.S on core 0)
  *
@@ -100,9 +103,17 @@ void kmain(uint64_t dtb_addr)
     kprintf("[boot] Initializing timer...\n");
     timer_init(SCHED_HZ);
 
-    /* Enable interrupts */
-    kprintf("[boot] Enabling interrupts...\n");
-    __asm__ volatile("msr daifclr, #0x2");  /* Clear IRQ mask (DAIF.I) */
+    /*
+     * NOTE: IRQs are NOT enabled here. They remain masked until
+     * load_context() jumps to thread_trampoline, which does
+     * "msr daifclr, #0x2" to unmask IRQs on the bootstrap thread's
+     * own PMM stack. This prevents timer IRQs from triggering
+     * sched_switch() while still on the boot stack, which would
+     * corrupt the idle thread's context.sp with boot stack values.
+     *
+     * The timer hardware is programmed but interrupts are pending
+     * until unmasked — this is safe.
+     */
 
     /* ================================================================
      * Phase 7: SMP — Bring up secondary cores via PSCI
@@ -201,26 +212,104 @@ void kmain(uint64_t dtb_addr)
     net_init();
 
     /* ================================================================
-     * Phase 17: Launch PID 1 — /bin/bash
+     * Phase 17: Create bootstrap thread and abandon boot stack
      * ================================================================ */
     kprintf("\n");
     kprintf("[boot] *** All subsystems initialized ***\n");
-    kprintf("[boot] Launching /bin/bash as PID 1...\n");
+    kprintf("[boot] Creating bootstrap thread...\n");
     kprintf("\n");
 
     /*
-     * kernel_init_process() creates the first user process (PID 1).
-     * It loads /bin/bash (or falls back to /bin/sh, /sbin/init) from
-     * the mounted root filesystem via the Mach-O loader, sets up the
-     * user address space with Darwin ABI (argc/argv/envp on stack),
-     * maps the CommPage, and drops to EL0 via eret.
+     * XNU-style boot flow:
      *
-     * This function never returns.
+     * 1. Create a kernel_bootstrap_thread with its own PMM-allocated stack.
+     * 2. Set the idle thread as current_thread (it keeps its own PMM stack).
+     * 3. Call load_context() to jump into the bootstrap thread, abandoning
+     *    the boot stack forever.
+     *
+     * kernel_bootstrap_thread will:
+     *   - Call kernel_init_process() which creates PID 1 and enqueues it
+     *     on the run queue (no manual eret — scheduler dispatches it)
+     *   - Call thread_exit() to terminate itself
+     *
+     * This eliminates the root cause of boot stack corruption: the boot
+     * stack is abandoned entirely, idle threads use PMM stacks, and PID 1
+     * is launched by the scheduler rather than by a manual eret.
+     *
+     * Reference: XNU osfmk/kern/startup.c kernel_bootstrap()
      */
+    struct thread *bootstrap_thread = thread_create(
+        "kernel_bootstrap", kernel_bootstrap_thread_func, NULL, PRI_MAX);
+    if (bootstrap_thread == NULL)
+        panic("Cannot create kernel bootstrap thread");
+
+    kprintf("[boot] Bootstrap thread created (tid=%lu)\n",
+            bootstrap_thread->tid);
+    kprintf("[boot] Abandoning boot stack, jumping to bootstrap thread...\n");
+
+    /*
+     * Set bootstrap_thread as current_thread before load_context().
+     *
+     * thread_trampoline (the LR target of load_context) reads
+     * cd->current_thread to get the entry function pointer, so we
+     * must install bootstrap_thread as current before jumping.
+     *
+     * Mask IRQs to prevent preemption between setting current_thread
+     * and load_context. thread_trampoline will re-enable IRQs.
+     */
+    __asm__ volatile("msr daifset, #0x2" ::: "memory");
+    {
+        struct cpu_data *cd;
+        __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
+        cd->current_thread = bootstrap_thread;
+        bootstrap_thread->cpu = 0;
+    }
+
+    /*
+     * load_context() is a one-way jump: it restores the bootstrap
+     * thread's saved context (callee-saved regs + SP) and rets into
+     * thread_trampoline, which calls kernel_bootstrap_thread_func().
+     *
+     * The boot stack (set up by boot.S) is NEVER used again.
+     */
+    load_context(&bootstrap_thread->context);
+
+    /* NOTREACHED — load_context never returns */
+    __builtin_unreachable();
+}
+
+/*
+ * kernel_bootstrap_thread_func - Runs on its own PMM-allocated stack
+ *
+ * This is the XNU equivalent of kernel_bootstrap_thread().
+ * It finishes the boot sequence by launching PID 1 via the scheduler,
+ * then terminates itself.
+ *
+ * At this point, the boot stack has been abandoned forever.
+ */
+static void kernel_bootstrap_thread_func(void *arg __unused)
+{
+    kprintf("[bootstrap] Running on PMM-allocated stack\n");
+
+    /*
+     * Launch PID 1.
+     * kernel_init_process() creates the init process, loads the Mach-O
+     * binary, sets up the user stack, and enqueues init's thread on
+     * the run queue. It returns normally — the scheduler will pick up
+     * init_thread and dispatch it to init_thread_return → eret → EL0.
+     */
+    kprintf("[bootstrap] Launching PID 1...\n");
     kernel_init_process();
 
-    /* NOTREACHED */
-    panic("kernel_init_process() returned");
+    kprintf("[bootstrap] PID 1 enqueued. Bootstrap thread exiting.\n");
+
+    /*
+     * Terminate this thread. The scheduler will pick it up and the
+     * thread slot will be recycled. We are done with bootstrapping.
+     *
+     * thread_exit() calls sched_switch() which never returns.
+     */
+    thread_exit();
 }
 
 /*
@@ -232,18 +321,39 @@ void kmain(uint64_t dtb_addr)
  */
 void secondary_main(uint64_t core_id)
 {
+    /*
+     * CRITICAL: Enable MMU + caches before touching any shared data.
+     * Secondary cores start with MMU off (PSCI reset value). Without
+     * caches, LDAXR/STXR exclusive monitors may not work correctly
+     * across cores, and stores from the boot CPU may be invisible.
+     */
+    vmm_init_percpu();
+
     gic_init_percpu();
     sched_init_percpu();
     timer_init_percpu();
     kprintf("[smp] Core %lu online (scheduler + timer ready)\n", core_id);
 
-    /* Enable interrupts on this core */
-    __asm__ volatile("msr daifclr, #0x2");
+    /*
+     * XNU-style: abandon this CPU's boot stack by jumping into the
+     * idle thread via load_context(). The idle thread has its own
+     * PMM-allocated stack. thread_trampoline will enable IRQs and
+     * call idle_thread_func(), which does the WFI loop.
+     *
+     * This mirrors how CPU0 abandons its boot stack in kmain().
+     */
+    {
+        struct cpu_data *cd;
+        __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
 
-    /* Enter idle loop - scheduler will assign work via IPI */
-    for (;;) {
-        __asm__ volatile("wfi");
+        kprintf("[smp] Core %lu: abandoning boot stack, jumping to idle thread\n",
+                core_id);
+
+        load_context(&cd->idle_thread->context);
     }
+
+    /* NOTREACHED — load_context never returns */
+    __builtin_unreachable();
 }
 
 /*

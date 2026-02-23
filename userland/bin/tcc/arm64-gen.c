@@ -661,7 +661,25 @@ static int arm64_hfa(CType *type, int *fsize)
     return 0;
 }
 
-static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a)
+/*
+ * arm64_pcs_aux - Assign arguments to registers or stack slots.
+ *
+ * n:              number of arguments
+ * type:           array of argument types
+ * a:              output: register/stack assignment for each arg
+ * first_variadic: index of the first variadic argument (args at indices
+ *                 >= first_variadic are past the '...' in the prototype).
+ *                 Set to n (or greater) for non-variadic functions.
+ *
+ * On Darwin/Mach-O, the Apple ARM64 calling convention requires that ALL
+ * variadic arguments are passed on the stack, never in registers.  Named
+ * parameters follow the standard AAPCS register assignment rules.
+ * Reference: Apple ARM64 Function Calling Conventions
+ *            (Procedure Call Standard for the Arm 64-bit Architecture,
+ *             Apple variant)
+ */
+static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a,
+                                   int first_variadic)
 {
     int nx = 0; // next integer register
     int nv = 0; // next vector register
@@ -677,6 +695,33 @@ static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a)
             size = align = 8;
         else
             size = type_size(type[i], &align);
+
+#ifdef TCC_TARGET_MACHO
+        /*
+         * Darwin ARM64 variadic calling convention:
+         * All arguments past the last named parameter go on the stack,
+         * each naturally aligned to at least 8 bytes.  They never go
+         * in registers, even if x0-x7 / v0-v7 have free slots.
+         */
+        if (i >= first_variadic) {
+            /* Structs > 16 bytes: pass by pointer on stack */
+            if (!hfa && size > 16) {
+                ns = (ns + 7) & ~7;
+                a[i] = ns | 1;
+                ns += 8;
+                continue;
+            }
+            /* Everything else: 8-byte aligned on stack */
+            if ((type[i]->t & VT_BTYPE) == VT_STRUCT)
+                size = (size + 7) & ~7;
+            else if (size < 8)
+                size = 8;
+            ns = (ns + 7) & ~7;
+            a[i] = ns;
+            ns += size;
+            continue;
+        }
+#endif
 
         if (hfa)
             // B.2
@@ -782,7 +827,8 @@ static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a)
     return ns - 32;
 }
 
-static unsigned long arm64_pcs(int n, CType **type, unsigned long *a)
+static unsigned long arm64_pcs(int n, CType **type, unsigned long *a,
+                               int named_args)
 {
     unsigned long stack;
 
@@ -790,12 +836,14 @@ static unsigned long arm64_pcs(int n, CType **type, unsigned long *a)
     if ((type[0]->t & VT_BTYPE) == VT_VOID)
         a[0] = -1;
     else {
-        arm64_pcs_aux(1, type, a);
+        arm64_pcs_aux(1, type, a, 1);
         assert(a[0] == 0 || a[0] == 1 || a[0] == 16);
     }
 
     // Argument types:
-    stack = arm64_pcs_aux(n, type + 1, a + 1);
+    // named_args = count of named params in prototype.
+    // For non-variadic functions, named_args >= n so nothing is forced to stack.
+    stack = arm64_pcs_aux(n, type + 1, a + 1, named_args);
 
     if (0) {
         int i;
@@ -828,8 +876,27 @@ ST_FUNC void gfunc_call(int nb_args)
     unsigned long *a, *a1;
     unsigned long stack;
     int i;
+    int named_args;
 
     return_type = &vtop[-nb_args].type.ref->type;
+
+    /*
+     * Determine the number of named (non-variadic) parameters.
+     * For Darwin ARM64, variadic args (past the '...') go on the stack.
+     * For non-variadic or old-style functions, all args are "named".
+     */
+    {
+        Sym *func_sym = vtop[-nb_args].type.ref;
+        if (func_sym->f.func_type == FUNC_ELLIPSIS) {
+            Sym *param;
+            named_args = 0;
+            for (param = func_sym->next; param; param = param->next)
+                named_args++;
+        } else {
+            named_args = nb_args + 1; /* all named — no variadic boundary */
+        }
+    }
+
     if ((return_type->t & VT_BTYPE) == VT_STRUCT)
         --nb_args;
 
@@ -841,7 +908,7 @@ ST_FUNC void gfunc_call(int nb_args)
     for (i = 0; i < nb_args; i++)
         t[nb_args - i] = &vtop[-i].type;
 
-    stack = arm64_pcs(nb_args, t, a);
+    stack = arm64_pcs(nb_args, t, a, named_args);
 
     // Allocate space for structs replaced by pointer:
     for (i = nb_args; i; i--)
@@ -1015,7 +1082,7 @@ ST_FUNC void gfunc_prolog(CType *func_type)
     for (sym = func_type->ref; sym; sym = sym->next)
         t[i++] = &sym->type;
 
-    arm64_func_va_list_stack = arm64_pcs(n - 1, t, a);
+    arm64_func_va_list_stack = arm64_pcs(n - 1, t, a, n);
 
     o(0xa9b27bfd); // stp x29,x30,[sp,#-224]!
     o(0xad0087e0); // stp q0,q1,[sp,#16]
@@ -1242,7 +1309,7 @@ ST_FUNC void gfunc_return(CType *func_type)
     CType *t = func_type;
     unsigned long a;
 
-    arm64_pcs(0, &t, &a);
+    arm64_pcs(0, &t, &a, 1);
     switch (a) {
     case -1:
         break;

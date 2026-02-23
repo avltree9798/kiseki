@@ -1490,12 +1490,9 @@ int sys_dup2(struct trap_frame *tf)
     if (oldfd < 0 || oldfd >= VFS_MAX_FD || newfd < 0 || newfd >= VFS_MAX_FD)
         return EBADF;
 
-    /* Verify oldfd is valid */
-    if (!vfs_fd_has_vnode(oldfd) && vfs_get_fd_flags(oldfd) < 0) {
-        /* Check if it's a console sentinel (refcount > 0 but no vnode) */
-        /* vfs_get_fd_flags returns -EBADF for truly invalid fds */
-        /* For console fds (0,1,2), fd_flags exists, so this works */
-    }
+    /* Verify oldfd is valid — must have an entry in the fd table */
+    if (vfs_get_fd_flags(oldfd) < 0)
+        return EBADF;
 
     /* If oldfd == newfd, just return it (POSIX) */
     if (oldfd == newfd) {

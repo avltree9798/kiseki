@@ -61,18 +61,20 @@ extern FILE *stderr;
 
 /* Formatted output */
 #ifdef __TINYC__
-/* TCC passes variadic args in registers, not on stack like Darwin ABI.
-   Redirect to TCC-compatible versions that take explicit args. */
-int     _printf_tcc(const char *fmt, void*, void*, void*, void*, void*, void*, void*);
-int     _fprintf_tcc(FILE *stream, const char *fmt, void*, void*, void*, void*, void*, void*);
-#define printf(fmt, ...)  _printf_tcc(fmt, ##__VA_ARGS__, 0, 0, 0, 0, 0, 0, 0)
-#define fprintf(f, fmt, ...) _fprintf_tcc(f, fmt, ##__VA_ARGS__, 0, 0, 0, 0, 0, 0)
+/* TCC's ARM64 code generator has been patched to use the Darwin variadic
+   calling convention (variadic args on stack, not in registers), so we
+   can use normal variadic declarations.  TCC does not support
+   __attribute__((format(...))), so we omit it. */
+int     printf(const char *fmt, ...);
+int     fprintf(FILE *stream, const char *fmt, ...);
+int     sprintf(char *str, const char *fmt, ...);
+int     snprintf(char *str, size_t size, const char *fmt, ...);
 #else
 int     printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 int     fprintf(FILE *stream, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-#endif
 int     sprintf(char *str, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 int     snprintf(char *str, size_t size, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+#endif
 int     vprintf(const char *fmt, va_list ap);
 int     vfprintf(FILE *stream, const char *fmt, va_list ap);
 int     vsprintf(char *str, const char *fmt, va_list ap);

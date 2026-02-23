@@ -1097,12 +1097,37 @@ vfs_close(int fd)
     if (fp == NULL)
         return -EBADF;
 
+    /*
+     * Detach fd from the table and decrement the file description refcount.
+     * Only release the vnode when no more fds reference this file description.
+     *
+     * This matches the POSIX/XNU model: dup()'d fds share a struct file.
+     * close() on one fd must not destroy the vnode that other fds still use.
+     */
     struct vnode *vp = fp->f_vnode;
-    fp->f_vnode = NULL;
-    fd_free(fd);
 
-    if (vp != NULL)
-        vnode_release(vp);
+    /* Remove the fd table entry and drop fd_flags */
+    spin_lock(&fd_lock);
+    fd_table[fd] = NULL;
+    fd_flags[fd] = 0;
+    spin_unlock(&fd_lock);
+
+    /* Decrement refcount; release resources only when it hits zero */
+    spin_lock(&fp->f_lock);
+    if (fp->f_refcount > 0)
+        fp->f_refcount--;
+    if (fp->f_refcount == 0) {
+        fp->f_vnode = NULL;
+        fp->f_pipe = NULL;
+        fp->f_pty = NULL;
+        fp->f_sockidx = -1;
+        spin_unlock(&fp->f_lock);
+
+        if (vp != NULL)
+            vnode_release(vp);
+    } else {
+        spin_unlock(&fp->f_lock);
+    }
 
     return 0;
 }

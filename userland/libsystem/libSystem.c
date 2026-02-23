@@ -1782,25 +1782,6 @@ EXPORT int fprintf(FILE *stream, const char *fmt, ...)
     return ret;
 }
 
-/* TCC-compatible fprintf */
-EXPORT int _fprintf_tcc(FILE *stream, const char *fmt, void *a1, void *a2, void *a3,
-                        void *a4, void *a5, void *a6)
-{
-    void *args[8] __attribute__((aligned(8)));
-    args[0] = a1;
-    args[1] = a2;
-    args[2] = a3;
-    args[3] = a4;
-    args[4] = a5;
-    args[5] = a6;
-    args[6] = NULL;
-    args[7] = NULL;
-    
-    va_list ap;
-    *(void **)&ap = (void *)args;
-    
-    return vfprintf(stream, fmt, ap);
-}
 
 EXPORT int vprintf(const char *fmt, va_list ap)
 {
@@ -1821,8 +1802,7 @@ EXPORT int vprintf(const char *fmt, va_list ap)
 }
 
 /*
- * Standard printf using va_list (for clang-compiled code).
- * Darwin ARM64 ABI passes variadic args on the stack.
+ * Standard printf — Darwin ARM64 ABI passes variadic args on the stack.
  */
 EXPORT int printf(const char *fmt, ...)
 {
@@ -1833,29 +1813,6 @@ EXPORT int printf(const char *fmt, ...)
     return ret;
 }
 
-/*
- * TCC-compatible printf: accepts explicit arguments in registers.
- * TCC passes variadic args in registers x1-x7, not on stack.
- * TCC's headers should #define printf _printf_tcc to use this.
- */
-EXPORT int _printf_tcc(const char *fmt, void *a1, void *a2, void *a3, void *a4,
-                       void *a5, void *a6, void *a7)
-{
-    void *args[8] __attribute__((aligned(8)));
-    args[0] = a1;
-    args[1] = a2;
-    args[2] = a3;
-    args[3] = a4;
-    args[4] = a5;
-    args[5] = a6;
-    args[6] = a7;
-    args[7] = NULL;
-    
-    va_list ap;
-    *(void **)&ap = (void *)args;
-    
-    return vfprintf(stdout, fmt, ap);
-}
 
 /* --- String output callback --- */
 struct _str_ctx { char *buf; size_t size; size_t pos; };
@@ -1900,6 +1857,7 @@ EXPORT int sprintf(char *str, const char *fmt, ...)
     va_end(ap);
     return ret;
 }
+
 
 /* ============================================================================
  * strerror / perror

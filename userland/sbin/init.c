@@ -1,7 +1,7 @@
 /*
  * Kiseki OS - /sbin/init (PID 1) — launchd-style process manager
  *
- * Modeled after macOS launchd: reads daemon configurations from XML
+ * Modelled after macOS launchd: reads daemon configurations from XML
  * plist files, pre-creates Mach service ports before launching daemons,
  * and manages the getty/login/shell chain on the console.
  *

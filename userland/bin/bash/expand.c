@@ -901,7 +901,7 @@ char *expand_command_subst(const char *cmd, shell_state_t *state)
     if (state && WIFEXITED(status))
         state->last_exit_status = WEXITSTATUS(status);
 
-    /* Remove trailing newlines (bash behavior) */
+    /* Remove trailing newlines (bash behaviour) */
     while (sb.len > 0 && sb.data[sb.len - 1] == '\n') {
         sb.data[--sb.len] = '\0';
     }

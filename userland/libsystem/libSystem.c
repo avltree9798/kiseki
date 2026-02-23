@@ -6179,7 +6179,7 @@ EXPORT int pthread_mutex_lock(void *mutex_ptr)
             _spin_unlock(&mutex->spinlock);
             return EDEADLK;
         }
-        /* PTHREAD_MUTEX_NORMAL: undefined behavior, will deadlock */
+        /* PTHREAD_MUTEX_NORMAL: undefined behaviour, will deadlock */
     }
     
     /* Wait for lock (spin in single-threaded mode) */

@@ -8,7 +8,7 @@ This document covers the development philosophy, conventions, and practical work
 
 ### 1.1. Accuracy to XNU/macOS Over Everything
 
-Kiseki's primary goal is to run unmodified macOS Mach-O binaries. Every design decision must prioritize **accuracy to how XNU/macOS actually works** over simplicity, performance, or cleverness.
+Kiseki's primary goal is to run unmodified macOS Mach-O binaries. Every design decision must prioritise **accuracy to how XNU/macOS actually works** over simplicity, performance, or cleverness.
 
 When faced with two choices:
 1. A quick shortcut that "works but isn't how macOS does it"

@@ -183,7 +183,7 @@ int vmm_copy_on_write(struct vm_space *space, uint64_t va);
  * the destination at the same VA with the same PTE flags.
  *
  * This is a full copy, not COW. COW would mark pages read-only and bump
- * refcounts — that optimization comes later.
+ * refcounts — that optimisation comes later.
  *
  * @dst: Destination address space (freshly created by vmm_create_space)
  * @src: Source address space (parent process)

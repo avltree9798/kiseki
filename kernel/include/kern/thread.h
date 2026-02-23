@@ -89,7 +89,7 @@ struct thread {
     /* Mutex wait queue linkage */
     struct thread       *wait_next;         /* Next in wait queue */
 
-    /* Continuation (Mach stackless switch optimization) */
+    /* Continuation (Mach stackless switch optimisation) */
     uint64_t            continuation;       /* Function pointer */
 
     /* Timed sleep support */

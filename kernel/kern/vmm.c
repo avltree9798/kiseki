@@ -75,7 +75,7 @@ static pte_t *walk_pgd(pte_t *pgd, uint64_t va, bool alloc)
          * though the software sees the correct value (cached).
          *
          * Use DSB ISH (not just ISHST) to ensure all observers see the write,
-         * then ISB to synchronize the instruction stream.
+         * then ISB to synchronise the instruction stream.
          */
         __asm__ volatile("dsb ish" ::: "memory");
 #if DEBUG

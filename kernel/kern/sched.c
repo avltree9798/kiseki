@@ -631,7 +631,7 @@ void sched_enqueue(struct thread *th)
     /*
      * SMP Load Balancing:
      * - If thread has never run (cpu == -1), place on least-loaded CPU
-     * - If thread has a CPU affinity, honor it
+     * - If thread has a CPU affinity, honour it
      * - Otherwise, keep on same CPU (cache affinity)
      */
     if (th->cpu == -1) {

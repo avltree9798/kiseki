@@ -1,7 +1,7 @@
 /*
  * Kiseki OS - Buffer Cache Implementation
  *
- * Fixed pool of 256 buffers (each 4096 bytes), organized as:
+ * Fixed pool of 256 buffers (each 4096 bytes), organised as:
  *   - Hash table for O(1) lookup by (dev, block_no)
  *   - LRU doubly-linked list for eviction (tail = least recently used)
  *

@@ -245,7 +245,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    (void)opt_kilo; /* -k is the default behavior */
+    (void)opt_kilo; /* -k is the default behaviour */
 
     print_header();
 

@@ -224,7 +224,7 @@ tcc -o myprogram myprogram.c
 
 TCC limitations:
 - No C++ support
-- Limited optimization
+- Limited optimisation
 - Some C99/C11 features may not work
 - No inline assembly
 
@@ -296,7 +296,7 @@ myprogram arg1 arg2
 - The syscall isn't implemented
 - Check `kernel/bsd/syscalls.c` for the list
 
-**Wrong behavior:**
+**Wrong behaviour:**
 - Syscall might be stubbed or partially implemented
 - Check the implementation in syscalls.c
 

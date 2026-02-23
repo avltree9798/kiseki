@@ -73,10 +73,10 @@ BIN_PROGS="bash cat cp mv rm ln ls mkdir rmdir chmod echo head tail
            grep sed awk cut tr wc sort uniq tee touch sleep kill time timeout
            date hostname uname test true false printf expr basename dirname
            login su passwd ps clear sync vi
-           ifconfig ping nc curl ntpdate test_tcc test_puts writetest"
+           ifconfig ping nc curl ntpdate objdump"
 
 # Test binaries (only included if INCLUDE_TESTS=1)
-TEST_PROGS="test_libc"
+TEST_PROGS="test_libc test_tcc test_puts writetest"
 if [ "${INCLUDE_TESTS:-0}" = "1" ]; then
     BIN_PROGS="${BIN_PROGS} ${TEST_PROGS}"
     echo "  Including test binaries: ${TEST_PROGS}"

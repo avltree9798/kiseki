@@ -11,7 +11,7 @@
  *   - Page size
  *   - CPU capabilities / feature flags
  *
- * On real macOS/Darwin, the CommPage also contains optimized routines
+ * On real macOS/Darwin, the CommPage also contains optimised routines
  * (memcpy, bzero, pthread_self) that libSystem calls into. We provide
  * stubs and basic data fields.
  *

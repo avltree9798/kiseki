@@ -239,7 +239,7 @@ next_arg:;
         }
     }
 
-    (void)opt_kilo; /* -k is the default behavior */
+    (void)opt_kilo; /* -k is the default behaviour */
 
     /* Default: current directory */
     const char *default_args[] = {"."};

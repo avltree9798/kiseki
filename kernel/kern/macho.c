@@ -635,7 +635,7 @@ parse_machfile(int fd, struct mach_header_64 *hdr,
 
                 if (dyld_ret == LOAD_SUCCESS) {
                     /*
-                     * XNU behavior: dyld's entry point overwrites the
+                     * XNU behaviour: dyld's entry point overwrites the
                      * main binary's entry point. The kernel jumps to dyld,
                      * and dyld finds main() via LC_MAIN in the binary's
                      * own Mach-O header (which we pass on the stack).

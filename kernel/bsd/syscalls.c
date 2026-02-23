@@ -3755,7 +3755,7 @@ bool signal_check(struct thread *th, struct trap_frame *tf)
     /* Clear carry flag so handler starts clean */
     tf->spsr &= ~SPSR_CARRY_BIT;
 
-    /* Reset handler to SIG_DFL if SA_RESETHAND would be set (default BSD behavior
+    /* Reset handler to SIG_DFL if SA_RESETHAND would be set (default BSD behaviour
      * for non-SA_RESTART signals). For simplicity, don't reset. */
 
     return true;
@@ -4824,7 +4824,7 @@ static int sys_openpty_sc(struct trap_frame *tf)
 }
 
 /*
- * sys_fsync - Synchronize a file's in-core state with storage device
+ * sys_fsync - Synchronise a file's in-core state with storage device
  *
  * x0 = fd
  *

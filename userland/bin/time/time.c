@@ -6,7 +6,7 @@
  *
  * Usage: time command [args...]
  *
- * Output (to stderr, matching traditional behavior):
+ * Output (to stderr, matching traditional behaviour):
  *   real    0m1.234s
  *   user    0m0.456s
  *   sys     0m0.012s

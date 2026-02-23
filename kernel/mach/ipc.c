@@ -1,7 +1,7 @@
 /*
  * Kiseki OS - Mach IPC Implementation
  *
- * Port-based message passing modeled after XNU's Mach IPC.
+ * Port-based message passing modelled after XNU's Mach IPC.
  *
  * Key concepts:
  *   - A port is a kernel-managed message queue with a single receiver

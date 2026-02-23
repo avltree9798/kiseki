@@ -1,7 +1,7 @@
 /*
  * Kiseki OS - mDNSResponder
  *
- * DNS resolution daemon modeled after Apple's mDNSResponder.
+ * DNS resolution daemon modelled after Apple's mDNSResponder.
  * Receives DNS lookup requests via Mach IPC from libSystem's getaddrinfo(),
  * performs UDP DNS queries to the upstream DNS server (from DHCP), and
  * returns resolved addresses via Mach IPC reply.
@@ -353,7 +353,7 @@ static uint32_t parse_resolv_conf(void)
 /* ============================================================================
  * Get DNS Server — resolv.conf first, sysctl (DHCP) fallback
  *
- * Priority order (matching macOS resolver behavior):
+ * Priority order (matching macOS resolver behaviour):
  *   1. /etc/resolv.conf nameserver entry (user-configured)
  *   2. sysctl NET_KISEKI_IFDNS (DHCP-provided DNS server)
  *   3. 0 (no DNS server available)

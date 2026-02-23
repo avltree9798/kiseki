@@ -630,7 +630,7 @@ void fork_trapframe_panic_c(uint64_t elr, uint64_t sp)
 /* ============================================================================
  * sys_fork_impl - Fork the current process
  *
- * Full-copy fork (not COW — simpler for now, COW optimization later):
+ * Full-copy fork (not COW — simpler for now, COW optimisation later):
  *   1. Create a new proc (child) with fresh VM space
  *   2. Deep-copy all user pages from parent to child (vmm_copy_space)
  *   3. Copy the file descriptor table (refcount shared files)

@@ -38,6 +38,12 @@ typedef unsigned long       uintptr_t;
 typedef signed long         intptr_t;
 typedef signed long         off_t;
 typedef signed long         time_t;
+typedef signed long         clock_t;
+typedef unsigned int        uid_t;
+typedef unsigned int        gid_t;
+typedef int                 pid_t;
+
+#define CLOCKS_PER_SEC  1000000
 
 #define INT_MAX     0x7fffffff
 #define INT_MIN     (-INT_MAX - 1)
@@ -2250,11 +2256,31 @@ EXPORT void *bsearch(const void *key, const void *base, size_t nmemb,
 
 /* Random number generator (simple LCG) */
 static unsigned int _rand_state = 1;
+
 EXPORT int rand(void) {
     _rand_state = _rand_state * 1103515245 + 12345;
     return (int)((_rand_state >> 16) & 0x7fffffff);
 }
+
 EXPORT void srand(unsigned int seed) { _rand_state = seed; }
+
+EXPORT int rand_r(unsigned int *seedp) {
+    *seedp = *seedp * 1103515245 + 12345;
+    return (int)((*seedp >> 16) & 0x7fffffff);
+}
+
+/* BSD random() - better RNG with larger state */
+static unsigned long _random_state = 1;
+
+EXPORT long random(void) {
+    /* Simple LCG for now - could be improved */
+    _random_state = _random_state * 6364136223846793005UL + 1442695040888963407UL;
+    return (long)((_random_state >> 33) & 0x7fffffff);
+}
+
+EXPORT void srandom(unsigned int seed) {
+    _random_state = seed;
+}
 
 /* strtok */
 static char *_strtok_last = NULL;
@@ -4654,6 +4680,265 @@ EXPORT void *localtime(const time_t *timep)
     return localtime_r(timep, &_tm_buf);
 }
 
+/* clock - returns processor time used by the program */
+EXPORT clock_t clock(void)
+{
+    /* 
+     * Returns approximate processor time.
+     * We use gettimeofday as an approximation since we don't track CPU time.
+     * Real implementation would use getrusage or similar.
+     */
+    struct _timeval tv = { 0, 0 };
+    if (syscall2(116 /* SYS_gettimeofday */, &tv, NULL) < 0)
+        return (clock_t)-1;
+    /* Convert to CLOCKS_PER_SEC (1000000) */
+    return (clock_t)(tv.tv_sec * 1000000 + tv.tv_usec);
+}
+
+/* difftime - compute difference between two times */
+EXPORT double difftime(time_t time1, time_t time0)
+{
+    return (double)(time1 - time0);
+}
+
+/* Helper: days in month (uses existing _is_leap_year) */
+static int _days_in_month(int mon, int year)
+{
+    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (mon == 1 && _is_leap_year(year))
+        return 29;
+    return days[mon];
+}
+
+/* mktime - convert struct tm to time_t */
+EXPORT time_t mktime(void *tm_ptr)
+{
+    struct {
+        int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year;
+        int tm_wday, tm_yday, tm_isdst;
+    } *tm = tm_ptr;
+    
+    /* Normalize values */
+    int year = tm->tm_year + 1900;
+    int mon = tm->tm_mon;
+    int day = tm->tm_mday;
+    int hour = tm->tm_hour;
+    int min = tm->tm_min;
+    int sec = tm->tm_sec;
+    
+    /* Normalize seconds -> minutes */
+    while (sec < 0) { sec += 60; min--; }
+    while (sec >= 60) { sec -= 60; min++; }
+    
+    /* Normalize minutes -> hours */
+    while (min < 0) { min += 60; hour--; }
+    while (min >= 60) { min -= 60; hour++; }
+    
+    /* Normalize hours -> days */
+    while (hour < 0) { hour += 24; day--; }
+    while (hour >= 24) { hour -= 24; day++; }
+    
+    /* Normalize months -> years */
+    while (mon < 0) { mon += 12; year--; }
+    while (mon >= 12) { mon -= 12; year++; }
+    
+    /* Normalize days */
+    while (day < 1) {
+        mon--;
+        if (mon < 0) { mon = 11; year--; }
+        day += _days_in_month(mon, year);
+    }
+    while (day > _days_in_month(mon, year)) {
+        day -= _days_in_month(mon, year);
+        mon++;
+        if (mon > 11) { mon = 0; year++; }
+    }
+    
+    /* Calculate days since epoch (1970-01-01) */
+    long days = 0;
+    
+    /* Years */
+    for (int y = 1970; y < year; y++) {
+        days += _is_leap_year(y) ? 366 : 365;
+    }
+    for (int y = year; y < 1970; y++) {
+        days -= _is_leap_year(y) ? 366 : 365;
+    }
+    
+    /* Months */
+    for (int m = 0; m < mon; m++) {
+        days += _days_in_month(m, year);
+    }
+    
+    /* Days */
+    days += day - 1;
+    
+    /* Calculate time_t */
+    time_t t = days * 86400 + hour * 3600 + min * 60 + sec;
+    
+    /* Update tm structure with normalized values */
+    tm->tm_sec = sec;
+    tm->tm_min = min;
+    tm->tm_hour = hour;
+    tm->tm_mday = day;
+    tm->tm_mon = mon;
+    tm->tm_year = year - 1900;
+    
+    /* Calculate day of week: 1970-01-01 was Thursday (4) */
+    int total_days = (int)(t / 86400);
+    tm->tm_wday = (total_days + 4) % 7;
+    if (tm->tm_wday < 0) tm->tm_wday += 7;
+    
+    /* Calculate day of year */
+    tm->tm_yday = 0;
+    for (int m = 0; m < mon; m++) {
+        tm->tm_yday += _days_in_month(m, year);
+    }
+    tm->tm_yday += day - 1;
+    
+    tm->tm_isdst = 0;  /* No DST support yet */
+    
+    return t;
+}
+
+/* asctime_r - convert struct tm to string (reentrant) */
+EXPORT char *asctime_r(const void *tm_ptr, char *buf)
+{
+    const struct {
+        int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year;
+        int tm_wday, tm_yday, tm_isdst;
+    } *tm = tm_ptr;
+    
+    static const char *wday[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char *mon[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    
+    /* Format: "Day Mon DD HH:MM:SS YYYY\n" */
+    snprintf(buf, 26, "%s %s %2d %02d:%02d:%02d %04d\n",
+             wday[tm->tm_wday % 7],
+             mon[tm->tm_mon % 12],
+             tm->tm_mday,
+             tm->tm_hour,
+             tm->tm_min,
+             tm->tm_sec,
+             tm->tm_year + 1900);
+    
+    return buf;
+}
+
+/* Static buffer for asctime */
+static char _asctime_buf[26];
+
+/* asctime - convert struct tm to string */
+EXPORT char *asctime(const void *tm)
+{
+    return asctime_r(tm, _asctime_buf);
+}
+
+/* ctime_r - convert time_t to string (reentrant) */
+EXPORT char *ctime_r(const time_t *timep, char *buf)
+{
+    struct {
+        int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year;
+        int tm_wday, tm_yday, tm_isdst;
+    } tm_storage;
+    
+    localtime_r(timep, &tm_storage);
+    return asctime_r(&tm_storage, buf);
+}
+
+/* ctime - convert time_t to string */
+EXPORT char *ctime(const time_t *timep)
+{
+    return ctime_r(timep, _asctime_buf);
+}
+
+/* clock_gettime - get time from specified clock */
+EXPORT int clock_gettime(int clk_id, void *tp_ptr)
+{
+    struct { time_t tv_sec; long tv_nsec; } *tp = tp_ptr;
+    struct _timeval tv = { 0, 0 };
+    
+    switch (clk_id) {
+    case 0:  /* CLOCK_REALTIME */
+    case 1:  /* CLOCK_MONOTONIC - use realtime as approximation */
+        if (syscall2(116 /* SYS_gettimeofday */, &tv, NULL) < 0) {
+            errno = EIO;
+            return -1;
+        }
+        tp->tv_sec = tv.tv_sec;
+        tp->tv_nsec = tv.tv_usec * 1000;
+        return 0;
+        
+    case 2:  /* CLOCK_PROCESS_CPUTIME_ID */
+    case 3:  /* CLOCK_THREAD_CPUTIME_ID */
+        /* Approximate with wall clock time for now */
+        if (syscall2(116 /* SYS_gettimeofday */, &tv, NULL) < 0) {
+            errno = EIO;
+            return -1;
+        }
+        tp->tv_sec = tv.tv_sec;
+        tp->tv_nsec = tv.tv_usec * 1000;
+        return 0;
+        
+    default:
+        errno = EINVAL;
+        return -1;
+    }
+}
+
+/* clock_settime - set time for specified clock */
+EXPORT int clock_settime(int clk_id, const void *tp_ptr)
+{
+    const struct { time_t tv_sec; long tv_nsec; } *tp = tp_ptr;
+    
+    if (clk_id != 0) {  /* Only CLOCK_REALTIME can be set */
+        errno = EINVAL;
+        return -1;
+    }
+    
+    struct _timeval tv;
+    tv.tv_sec = tp->tv_sec;
+    tv.tv_usec = tp->tv_nsec / 1000;
+    
+    return (int)_check(syscall2(122 /* SYS_settimeofday */, &tv, NULL));
+}
+
+/* clock_getres - get resolution of specified clock */
+EXPORT int clock_getres(int clk_id, void *res_ptr)
+{
+    struct { time_t tv_sec; long tv_nsec; } *res = res_ptr;
+    
+    switch (clk_id) {
+    case 0:  /* CLOCK_REALTIME */
+    case 1:  /* CLOCK_MONOTONIC */
+    case 2:  /* CLOCK_PROCESS_CPUTIME_ID */
+    case 3:  /* CLOCK_THREAD_CPUTIME_ID */
+        if (res) {
+            res->tv_sec = 0;
+            res->tv_nsec = 1000;  /* 1 microsecond resolution */
+        }
+        return 0;
+        
+    default:
+        errno = EINVAL;
+        return -1;
+    }
+}
+
+/* timespec_get - C11 time function */
+EXPORT int timespec_get(void *ts_ptr, int base)
+{
+    if (base != 1) {  /* TIME_UTC = 1 */
+        return 0;  /* Failure */
+    }
+    
+    if (clock_gettime(0 /* CLOCK_REALTIME */, ts_ptr) < 0)
+        return 0;
+    
+    return base;  /* Success returns base */
+}
+
 /* strftime - format time as string */
 EXPORT size_t strftime(char *s, size_t max, const char *fmt, const void *tm_ptr)
 {
@@ -4710,6 +4995,596 @@ EXPORT size_t strftime(char *s, size_t max, const char *fmt, const void *tm_ptr)
     
     *p = '\0';
     return p - s;
+}
+
+/* ============================================================================
+ * Timer functions (stubs for compatibility)
+ * ============================================================================ */
+
+/* timer_create - create a POSIX timer (stub) */
+EXPORT int timer_create(int clockid, void *sevp, void **timerid)
+{
+    (void)clockid; (void)sevp; (void)timerid;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* timer_delete - delete a POSIX timer (stub) */
+EXPORT int timer_delete(void *timerid)
+{
+    (void)timerid;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* timer_settime - arm/disarm a POSIX timer (stub) */
+EXPORT int timer_settime(void *timerid, int flags, const void *new_value, void *old_value)
+{
+    (void)timerid; (void)flags; (void)new_value; (void)old_value;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* timer_gettime - get time remaining on a POSIX timer (stub) */
+EXPORT int timer_gettime(void *timerid, void *curr_value)
+{
+    (void)timerid; (void)curr_value;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* getitimer - get value of interval timer */
+EXPORT int getitimer(int which, void *curr_value)
+{
+    (void)which; (void)curr_value;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* setitimer - set value of interval timer */
+EXPORT int setitimer(int which, const void *new_value, void *old_value)
+{
+    (void)which; (void)new_value; (void)old_value;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* ============================================================================
+ * Additional unistd.h functions
+ * ============================================================================ */
+
+/* ftruncate - truncate a file to a specified length */
+EXPORT int ftruncate(int fd, off_t length)
+{
+    return (int)_check(syscall2(201 /* SYS_ftruncate */, fd, length));
+}
+
+/* truncate - truncate a file to a specified length */
+EXPORT int truncate(const char *path, off_t length)
+{
+    return (int)_check(syscall2(200 /* SYS_truncate */, path, length));
+}
+
+/* sethostname - set name of current host */
+EXPORT int sethostname(const char *name, size_t len)
+{
+    int mib[2] = { 1 /* CTL_KERN */, 10 /* KERN_HOSTNAME */ };
+    return sysctl(mib, 2, NULL, NULL, (void *)name, len);
+}
+
+/* getdomainname - get NIS domain name (stub) */
+EXPORT int getdomainname(char *name, size_t len)
+{
+    if (len > 0) name[0] = '\0';
+    return 0;
+}
+
+/* setdomainname - set NIS domain name (stub) */
+EXPORT int setdomainname(const char *name, size_t len)
+{
+    (void)name; (void)len;
+    return 0;
+}
+
+/* getpagesize - get system page size */
+EXPORT int getpagesize(void)
+{
+    return 4096;  /* ARM64 4KB pages */
+}
+
+/* getdtablesize - get file descriptor table size */
+EXPORT int getdtablesize(void)
+{
+    return 256;  /* VFS_MAX_FD */
+}
+
+/* Note: sync() is already defined earlier in the file */
+
+/* fsync - sync a single file */
+EXPORT int fsync(int fd)
+{
+    return (int)_check(syscall1(95 /* SYS_fsync */, fd));
+}
+
+/* fdatasync - sync file data (same as fsync for us) */
+EXPORT int fdatasync(int fd)
+{
+    return fsync(fd);
+}
+
+/* chroot - change root directory */
+EXPORT int chroot(const char *path)
+{
+    return (int)_check(syscall1(61 /* SYS_chroot */, path));
+}
+
+/* fchdir - change working directory via fd */
+EXPORT int fchdir(int fd)
+{
+    return (int)_check(syscall1(13 /* SYS_fchdir */, fd));
+}
+
+/* seteuid/setegid/setreuid/setregid (setuid/setgid already defined) */
+EXPORT int seteuid(uid_t euid)
+{
+    return (int)_check(syscall1(183 /* SYS_seteuid */, euid));
+}
+
+EXPORT int setegid(gid_t egid)
+{
+    return (int)_check(syscall1(182 /* SYS_setegid */, egid));
+}
+
+EXPORT int setreuid(uid_t ruid, uid_t euid)
+{
+    return (int)_check(syscall2(126 /* SYS_setreuid */, ruid, euid));
+}
+
+EXPORT int setregid(gid_t rgid, gid_t egid)
+{
+    return (int)_check(syscall2(127 /* SYS_setregid */, rgid, egid));
+}
+
+/* getgroups - get supplementary group IDs */
+EXPORT int getgroups(int size, gid_t *list)
+{
+    return (int)_check(syscall2(79 /* SYS_getgroups */, size, list));
+}
+
+/* setgroups - set supplementary group IDs */
+EXPORT int setgroups(int size, const gid_t *list)
+{
+    return (int)_check(syscall2(80 /* SYS_setgroups */, size, list));
+}
+
+/* nice - change process priority */
+EXPORT int nice(int inc)
+{
+    /* Not really implemented in kernel, stub that succeeds */
+    (void)inc;
+    return 0;
+}
+
+/* alarm - set alarm clock (stub) */
+EXPORT unsigned int alarm(unsigned int seconds)
+{
+    /* Not implemented - would need kernel support */
+    (void)seconds;
+    return 0;
+}
+
+/* pause - wait for a signal (stub) */
+EXPORT int pause(void)
+{
+    /* Block forever - would need proper signal support */
+    while (1) {
+        struct _timespec ts = { 3600, 0 };
+        nanosleep(&ts, NULL);
+    }
+    return -1;
+}
+
+/* fpathconf - get configuration values for file */
+EXPORT long fpathconf(int fd, int name)
+{
+    (void)fd;
+    switch (name) {
+    case 1:  /* _PC_LINK_MAX */
+        return 32767;
+    case 2:  /* _PC_MAX_CANON */
+        return 255;
+    case 3:  /* _PC_MAX_INPUT */
+        return 255;
+    case 4:  /* _PC_NAME_MAX */
+        return 255;
+    case 5:  /* _PC_PATH_MAX */
+        return 1024;
+    case 6:  /* _PC_PIPE_BUF */
+        return 4096;
+    default:
+        errno = EINVAL;
+        return -1;
+    }
+}
+
+/* pathconf - get configuration values for path */
+EXPORT long pathconf(const char *path, int name)
+{
+    (void)path;
+    return fpathconf(-1, name);
+}
+
+/* confstr - get configuration strings */
+EXPORT size_t confstr(int name, char *buf, size_t len)
+{
+    const char *val = NULL;
+    
+    switch (name) {
+    case 1:  /* _CS_PATH */
+        val = "/bin:/usr/bin";
+        break;
+    default:
+        errno = EINVAL;
+        return 0;
+    }
+    
+    size_t vlen = strlen(val) + 1;
+    if (buf && len > 0) {
+        size_t copy = len < vlen ? len : vlen;
+        memcpy(buf, val, copy);
+        if (len < vlen) buf[len - 1] = '\0';
+    }
+    return vlen;
+}
+
+/* ============================================================================
+ * Additional stdlib.h functions
+ * ============================================================================ */
+
+/* div/ldiv/lldiv - compute quotient and remainder */
+typedef struct { int quot; int rem; } div_t;
+typedef struct { long quot; long rem; } ldiv_t;
+typedef struct { long long quot; long long rem; } lldiv_t;
+
+EXPORT div_t div(int numer, int denom)
+{
+    div_t result;
+    result.quot = numer / denom;
+    result.rem = numer % denom;
+    return result;
+}
+
+EXPORT ldiv_t ldiv(long numer, long denom)
+{
+    ldiv_t result;
+    result.quot = numer / denom;
+    result.rem = numer % denom;
+    return result;
+}
+
+EXPORT lldiv_t lldiv(long long numer, long long denom)
+{
+    lldiv_t result;
+    result.quot = numer / denom;
+    result.rem = numer % denom;
+    return result;
+}
+
+/* llabs - absolute value of long long */
+EXPORT long long llabs(long long n)
+{
+    return n < 0 ? -n : n;
+}
+
+/* imaxabs - absolute value of intmax_t */
+EXPORT long long imaxabs(long long n)
+{
+    return llabs(n);
+}
+
+/* realpath - resolve pathname */
+EXPORT char *realpath(const char *path, char *resolved_path)
+{
+    static char _realpath_buf[1024];
+    char *buf = resolved_path ? resolved_path : _realpath_buf;
+    
+    /* Handle absolute paths */
+    if (path[0] == '/') {
+        /* Start with root */
+        buf[0] = '\0';
+    } else {
+        /* Start with cwd */
+        if (getcwd(buf, 1024) == NULL)
+            return NULL;
+    }
+    
+    const char *p = path;
+    while (*p) {
+        /* Skip leading slashes */
+        while (*p == '/') p++;
+        if (*p == '\0') break;
+        
+        /* Find end of component */
+        const char *end = p;
+        while (*end && *end != '/') end++;
+        size_t len = end - p;
+        
+        if (len == 1 && p[0] == '.') {
+            /* "." - stay in current dir */
+        } else if (len == 2 && p[0] == '.' && p[1] == '.') {
+            /* ".." - go up one level */
+            char *slash = strrchr(buf, '/');
+            if (slash && slash != buf)
+                *slash = '\0';
+            else if (slash == buf)
+                buf[1] = '\0';
+        } else {
+            /* Regular component */
+            size_t buflen = strlen(buf);
+            if (buflen == 0 || buf[buflen - 1] != '/') {
+                if (buflen + 1 < 1024) {
+                    buf[buflen++] = '/';
+                    buf[buflen] = '\0';
+                }
+            }
+            if (buflen + len < 1024) {
+                memcpy(buf + buflen, p, len);
+                buf[buflen + len] = '\0';
+            }
+        }
+        p = end;
+    }
+    
+    /* Ensure we have at least "/" */
+    if (buf[0] == '\0') {
+        buf[0] = '/';
+        buf[1] = '\0';
+    }
+    
+    /* Verify path exists */
+    struct { uint32_t st_dev; uint16_t st_mode; char _pad[136]; } st;
+    if (stat(buf, &st) < 0)
+        return NULL;
+    
+    return buf;
+}
+
+/* mkstemp - create temporary file */
+EXPORT int mkstemp(char *template)
+{
+    size_t len = strlen(template);
+    if (len < 6) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    /* Check for XXXXXX suffix */
+    char *p = template + len - 6;
+    for (int i = 0; i < 6; i++) {
+        if (p[i] != 'X') {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    
+    /* Generate random suffix */
+    static const char chars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    unsigned char randbuf[6];
+    getentropy(randbuf, 6);
+    
+    for (int attempt = 0; attempt < 100; attempt++) {
+        for (int i = 0; i < 6; i++) {
+            p[i] = chars[(randbuf[i] + attempt * i) % 62];
+        }
+        
+        int fd = open(template, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0)
+            return fd;
+        
+        if (errno != EEXIST)
+            return -1;
+    }
+    
+    errno = EEXIST;
+    return -1;
+}
+
+/* mkostemp - create temporary file with flags */
+EXPORT int mkostemp(char *template, int flags)
+{
+    size_t len = strlen(template);
+    if (len < 6) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    char *p = template + len - 6;
+    for (int i = 0; i < 6; i++) {
+        if (p[i] != 'X') {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    
+    static const char chars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    unsigned char randbuf[6];
+    getentropy(randbuf, 6);
+    
+    for (int attempt = 0; attempt < 100; attempt++) {
+        for (int i = 0; i < 6; i++) {
+            p[i] = chars[(randbuf[i] + attempt * i) % 62];
+        }
+        
+        int fd = open(template, O_RDWR | O_CREAT | O_EXCL | flags, 0600);
+        if (fd >= 0)
+            return fd;
+        
+        if (errno != EEXIST)
+            return -1;
+    }
+    
+    errno = EEXIST;
+    return -1;
+}
+
+/* mkdtemp - create temporary directory */
+EXPORT char *mkdtemp(char *template)
+{
+    size_t len = strlen(template);
+    if (len < 6) {
+        errno = EINVAL;
+        return NULL;
+    }
+    
+    char *p = template + len - 6;
+    for (int i = 0; i < 6; i++) {
+        if (p[i] != 'X') {
+            errno = EINVAL;
+            return NULL;
+        }
+    }
+    
+    static const char chars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    unsigned char randbuf[6];
+    getentropy(randbuf, 6);
+    
+    for (int attempt = 0; attempt < 100; attempt++) {
+        for (int i = 0; i < 6; i++) {
+            p[i] = chars[(randbuf[i] + attempt * i) % 62];
+        }
+        
+        if (mkdir(template, 0700) == 0)
+            return template;
+        
+        if (errno != EEXIST)
+            return NULL;
+    }
+    
+    errno = EEXIST;
+    return NULL;
+}
+
+/* getloadavg - get system load averages (stub) */
+EXPORT int getloadavg(double *loadavg, int nelem)
+{
+    for (int i = 0; i < nelem && i < 3; i++)
+        loadavg[i] = 0.0;
+    return nelem < 3 ? nelem : 3;
+}
+
+/* posix_memalign - allocate aligned memory */
+EXPORT int posix_memalign(void **memptr, size_t alignment, size_t size)
+{
+    if (alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0) {
+        return EINVAL;
+    }
+    
+    /* Allocate extra space for alignment and store original pointer */
+    void *mem = malloc(size + alignment + sizeof(void *));
+    if (mem == NULL)
+        return ENOMEM;
+    
+    /* Align the pointer */
+    uintptr_t addr = (uintptr_t)mem + sizeof(void *);
+    uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
+    
+    /* Store original pointer just before aligned address */
+    ((void **)aligned)[-1] = mem;
+    
+    *memptr = (void *)aligned;
+    return 0;
+}
+
+/* aligned_alloc - allocate aligned memory (C11) */
+EXPORT void *aligned_alloc(size_t alignment, size_t size)
+{
+    void *ptr;
+    if (posix_memalign(&ptr, alignment, size) != 0)
+        return NULL;
+    return ptr;
+}
+
+/* ============================================================================
+ * Resource limits (stubs)
+ * ============================================================================ */
+
+struct rlimit {
+    unsigned long rlim_cur;  /* Soft limit */
+    unsigned long rlim_max;  /* Hard limit */
+};
+
+#define RLIMIT_CPU      0
+#define RLIMIT_FSIZE    1
+#define RLIMIT_DATA     2
+#define RLIMIT_STACK    3
+#define RLIMIT_CORE     4
+#define RLIMIT_RSS      5
+#define RLIMIT_MEMLOCK  6
+#define RLIMIT_NPROC    7
+#define RLIMIT_NOFILE   8
+
+#define RLIM_INFINITY   ((unsigned long)-1)
+
+EXPORT int getrlimit(int resource, struct rlimit *rlim)
+{
+    if (!rlim) {
+        errno = EFAULT;
+        return -1;
+    }
+    
+    switch (resource) {
+    case RLIMIT_NOFILE:
+        rlim->rlim_cur = 256;
+        rlim->rlim_max = 256;
+        break;
+    case RLIMIT_STACK:
+        rlim->rlim_cur = 8 * 1024 * 1024;  /* 8MB */
+        rlim->rlim_max = 64 * 1024 * 1024; /* 64MB */
+        break;
+    default:
+        rlim->rlim_cur = RLIM_INFINITY;
+        rlim->rlim_max = RLIM_INFINITY;
+        break;
+    }
+    return 0;
+}
+
+EXPORT int setrlimit(int resource, const struct rlimit *rlim)
+{
+    (void)resource; (void)rlim;
+    /* Silently succeed - we don't actually enforce limits */
+    return 0;
+}
+
+/* getrusage - get resource usage (stub) */
+struct rusage {
+    struct _timeval ru_utime;
+    struct _timeval ru_stime;
+    long ru_maxrss;
+    long ru_ixrss;
+    long ru_idrss;
+    long ru_isrss;
+    long ru_minflt;
+    long ru_majflt;
+    long ru_nswap;
+    long ru_inblock;
+    long ru_oublock;
+    long ru_msgsnd;
+    long ru_msgrcv;
+    long ru_nsignals;
+    long ru_nvcsw;
+    long ru_nivcsw;
+};
+
+EXPORT int getrusage(int who, struct rusage *usage)
+{
+    (void)who;
+    if (!usage) {
+        errno = EFAULT;
+        return -1;
+    }
+    memset(usage, 0, sizeof(*usage));
+    return 0;
 }
 
 /* ============================================================================

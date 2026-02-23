@@ -327,6 +327,17 @@ fd_free(int fd)
 }
 
 /*
+ * vfs_get_file - Get the file structure for a file descriptor.
+ *
+ * Public API wrapper around fd_get.
+ */
+struct file *
+vfs_get_file(int fd)
+{
+    return fd_get(fd);
+}
+
+/*
  * vfs_fd_has_vnode - Check if a file descriptor has a backing vnode.
  *
  * Returns true if the fd is open and has a non-NULL f_vnode.

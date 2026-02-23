@@ -32,6 +32,9 @@
 /* devfs query — check if a vnode is a console/tty character device */
 extern bool devfs_is_console(struct vnode *vp);
 
+/* Buffer cache sync */
+extern void buf_sync(void);
+
 /* ============================================================================
  * SPSR Carry Flag (PSTATE.C)
  *
@@ -298,6 +301,9 @@ static int sys_fchmod(struct trap_frame *tf);
 static int sys_gettimeofday(struct trap_frame *tf);
 static int sys_settimeofday(struct trap_frame *tf);
 static int sys_openpty_sc(struct trap_frame *tf);
+static int sys_fsync(struct trap_frame *tf);
+static int sys_ftruncate(struct trap_frame *tf);
+static int sys_truncate(struct trap_frame *tf);
 
 /* External: poll for received network packets */
 void virtio_net_recv(void);
@@ -648,6 +654,18 @@ void syscall_handler(struct trap_frame *tf)
 
     case SYS_openpty:
         error = sys_openpty_sc(tf);
+        break;
+
+    case SYS_fsync:
+        error = sys_fsync(tf);
+        break;
+
+    case SYS_ftruncate:
+        error = sys_ftruncate(tf);
+        break;
+
+    case SYS_truncate:
+        error = sys_truncate(tf);
         break;
 
     default:
@@ -4747,4 +4765,117 @@ static int sys_openpty_sc(struct trap_frame *tf)
 
     syscall_return(tf, 0);
     return 0;
+}
+
+/*
+ * sys_fsync - Synchronize a file's in-core state with storage device
+ *
+ * x0 = fd
+ *
+ * Returns 0 on success, or positive errno on error.
+ */
+static int sys_fsync(struct trap_frame *tf)
+{
+    int fd = (int)tf->regs[0];
+    
+    /* Validate fd */
+    struct file *fp = vfs_get_file(fd);
+    if (fp == NULL)
+        return EBADF;
+    
+    /* For now, just sync all buffers (we don't have per-file tracking) */
+    buf_sync();
+    
+    syscall_return(tf, 0);
+    return 0;
+}
+
+/*
+ * sys_ftruncate - Truncate a file to a specified length
+ *
+ * x0 = fd
+ * x1 = length
+ *
+ * Returns 0 on success, or positive errno on error.
+ */
+static int sys_ftruncate(struct trap_frame *tf)
+{
+    int fd = (int)tf->regs[0];
+    off_t length = (off_t)tf->regs[1];
+    
+    struct file *fp = vfs_get_file(fd);
+    if (fp == NULL)
+        return EBADF;
+    
+    struct vnode *vp = fp->f_vnode;
+    if (vp == NULL)
+        return EINVAL;
+    
+    /* Check if file is open for writing */
+    if ((fp->f_flags & O_ACCMODE) == O_RDONLY)
+        return EINVAL;
+    
+    /* Can only truncate regular files */
+    if (vp->v_type != VREG)
+        return EINVAL;
+    
+    /* Use setattr to set the new size */
+    if (vp->v_ops && vp->v_ops->setattr) {
+        struct stat st;
+        /* Fill with sentinels: -1 means "don't change" */
+        uint8_t *p = (uint8_t *)&st;
+        for (uint64_t i = 0; i < sizeof(struct stat); i++)
+            p[i] = 0xFF;
+        
+        /* Set the new size */
+        st.st_size = length;
+        
+        int err = vp->v_ops->setattr(vp, &st);
+        if (err != 0)
+            return err;
+    } else {
+        return ENOSYS;
+    }
+    
+    syscall_return(tf, 0);
+    return 0;
+}
+
+/*
+ * sys_truncate - Truncate a file to a specified length (by path)
+ *
+ * x0 = path
+ * x1 = length
+ *
+ * Returns 0 on success, or positive errno on error.
+ */
+static int sys_truncate(struct trap_frame *tf)
+{
+    const char *path = (const char *)tf->regs[0];
+    off_t length = (off_t)tf->regs[1];
+    
+    if (path == NULL)
+        return EFAULT;
+    
+    /* Resolve path */
+    char abs_path[PATH_MAX_KERN];
+    int err = resolve_user_path(path, abs_path, sizeof(abs_path));
+    if (err != 0)
+        return err;
+    
+    /* Open for writing */
+    int fd = vfs_open(abs_path, O_WRONLY, 0);
+    if (fd < 0)
+        return -fd;
+    
+    /* Reuse ftruncate logic */
+    tf->regs[0] = fd;
+    tf->regs[1] = (uint64_t)length;
+    err = sys_ftruncate(tf);
+    
+    vfs_close(fd);
+    
+    if (err == 0)
+        syscall_return(tf, 0);
+    return err;
 }

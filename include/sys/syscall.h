@@ -97,6 +97,12 @@
 #define SYS_sysctl          202
 #define SYS_nanosleep       240
 #define SYS_pthread_kill    286
+
+/* File operations */
+#define SYS_fsync           95
+#define SYS_truncate        200
+#define SYS_ftruncate       201
+#define SYS_chroot          61
 #define SYS_getcwd          304
 #define SYS_issetugid       327
 #define SYS_proc_info       336

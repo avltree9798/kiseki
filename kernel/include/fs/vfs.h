@@ -665,6 +665,15 @@ int vfs_get_fd_flags(int fd);
 int vfs_set_fd_flags(int fd, uint8_t flags);
 
 /*
+ * vfs_get_file - Get the file structure for a file descriptor.
+ *
+ * @fd: File descriptor
+ *
+ * Returns pointer to struct file, or NULL if fd is invalid.
+ */
+struct file *vfs_get_file(int fd);
+
+/*
  * vfs_get_file_flags - Get file status flags (O_APPEND, O_NONBLOCK, etc.).
  *
  * @fd: File descriptor

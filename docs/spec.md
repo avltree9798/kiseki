@@ -39,8 +39,9 @@ Kiseki is a Unix-like operating system that runs native macOS ARM64 CLI binaries
 
 The system comprises:
 - A **hybrid kernel** (~22,000 lines of C and ARM64 assembly) implementing the Mach microkernel, BSD personality, Ext4 filesystem, TCP/IP networking, and device drivers
-- A **dynamic linker** (dyld) and **C library** (libSystem.B.dylib, ~3,200 lines) providing the Darwin userland ABI
-- **75 Mach-O userland binaries** including bash, awk, sed, grep, curl, TCC compiler, and a full set of coreutils
+- A **dynamic linker** (dyld) and **C library** (libSystem.B.dylib, ~4,800 lines) providing the Darwin userland ABI
+- **76 Mach-O userland binaries** including bash, awk, sed, grep, curl, TCC compiler, and a full set of coreutils
+- A **comprehensive unit test suite** for libSystem validation
 - A **native C compiler** (TCC) that runs on Kiseki and produces working Mach-O ARM64 binaries
 - A **4-core SMP** scheduler with pre-emptive multitasking
 - A complete **TCP/IP stack** with BSD socket API
@@ -367,7 +368,7 @@ The Virtual Filesystem provides a unified interface across filesystem types:
 - **Vnode** abstraction with reference counting.
 - **Mount table** supporting multiple simultaneous mounts.
 - **Path resolution** with `.` and `..` traversal, symlink following.
-- **File descriptor table**: 256 per process, with `dup`/`dup2`/`fork` sharing.
+- **File descriptor table**: 256 per process, with proper `dup`/`dup2`/`fork` offset sharing via pointer-based file description pool.
 - **Operations**: lookup, read, write, readdir, create, mkdir, unlink, getattr, setattr, readlink.
 - **Permission checking**: Integrated Unix DAC at VFS layer (see Section 12.2).
 
@@ -387,6 +388,30 @@ struct vnode {
     struct mount *v_mount;      // Mount point
     spinlock_t  v_lock;         // Per-vnode lock
 };
+```
+
+**File descriptor architecture:**
+
+The VFS uses a two-level indirection for POSIX-compliant file descriptor semantics:
+
+```c
+/* File description pool - shared by dup'd fds */
+static struct file file_pool[512];
+
+/* Per-process fd table - pointers into file_pool */
+static struct file *fd_table[256];
+```
+
+- `file_pool[]`: Pool of 512 "open file descriptions" (`struct file`), each containing the vnode pointer, current offset, and flags.
+- `fd_table[]`: Array of 256 pointers per process. Multiple FDs can point to the same file description.
+- `dup()`/`dup2()`: New FD points to the same `struct file`, sharing the offset. Both FDs see writes from the other.
+- `fork()`: Child's fd_table is copied; both parent and child FDs point to the same file descriptions.
+- Reference counting: `f_refcount` tracks how many FDs reference each file description.
+
+This matches POSIX semantics where `dup()`'d file descriptors share the file offset, enabling patterns like:
+```c
+write(fd, "hello", 5);
+write(dup_fd, " world", 6);  // Appends at offset 5
 ```
 
 **Path resolution (`resolve_path`):**
@@ -724,24 +749,26 @@ This ensures environment variables inherited from the parent process are accessi
 
 ### 13.2. libSystem.B.dylib
 
-Freestanding C library (~3,200 lines) providing:
-- **Standard I/O**: `printf`, `fprintf`, `sprintf`, `snprintf`, `vprintf`, `puts`, `putchar`, `fopen`, `fclose`, `fread`, `fwrite`, `fgets`, `fputs`, `fflush`, `feof`, `ferror`.
+Freestanding C library (~4,800 lines) providing:
+- **Standard I/O**: `printf`, `fprintf`, `sprintf`, `snprintf`, `vprintf`, `scanf`, `sscanf`, `fscanf`, `puts`, `putchar`, `getchar`, `fopen`, `fclose`, `fread`, `fwrite`, `fgets`, `fputs`, `fgetc`, `fputc`, `ungetc`, `fflush`, `feof`, `ferror`, `clearerr`, `fileno`, `fdopen`, `freopen`, `tmpfile`, `tmpnam`, `remove`, `fseek`, `ftell`, `rewind`, `fgetpos`, `fsetpos`, `setbuf`, `setvbuf`, `getline`, `getdelim`, `popen`, `pclose`.
 - **String/memory**: `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strstr`, `strchr`, `strrchr`, `strdup`, `strtok`, `strtok_r`, `memcpy`, `memmove`, `memset`, `memcmp`, `bzero`.
 - **Conversion**: `atoi`, `atol`, `strtol`, `strtoul`, `strtoll`, `strtoull`, `strtod`.
 - **Memory allocation**: `malloc`, `free`, `calloc`, `realloc` (simple bump allocator with free list).
-- **Process**: `fork`, `execve`, `execv`, `execvp`, `exit`, `_exit`, `wait`, `waitpid`, `getpid`, `getppid`, `kill`, `sleep`, `usleep`, `nanosleep`.
+- **Process**: `fork`, `execve`, `execv`, `execvp`, `exit`, `_exit`, `wait`, `waitpid`, `getpid`, `getppid`, `kill`, `raise`, `sleep`, `usleep`, `nanosleep`.
 - **File I/O**: `open`, `close`, `read`, `write`, `lseek`, `stat`, `fstat`, `lstat`, `access`, `unlink`, `rename`, `mkdir`, `rmdir`, `getcwd`, `chdir`, `dup`, `dup2`, `pipe`, `fcntl`, `ioctl`, `sync`.
 - **Ownership**: `chown`, `fchown`, `lchown`, `chmod`, `fchmod`.
-- **Signals**: `signal`, `sigaction`, `sigprocmask`, `sigemptyset`, `sigfillset`, `sigaddset`.
+- **Signals**: `signal`, `sigaction`, `sigprocmask`, `sigemptyset`, `sigfillset`, `sigaddset`, `raise`.
 - **Networking**: `socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`, `getsockopt`, `htons`, `htonl`, `ntohs`, `ntohl`, `inet_addr`, `inet_ntoa`.
 - **Terminal**: `tcgetattr`, `tcsetattr`, `openpty`, `isatty`, `ttyname`.
-- **Time**: `time`, `gettimeofday`, `settimeofday`.
+- **Time**: `time`, `gettimeofday`, `settimeofday`, `localtime`, `gmtime`, `mktime`, `strftime`.
 - **Directory**: `opendir`, `readdir`, `closedir`.
 - **Environment**: `getenv`, `setenv`, `unsetenv` (modifies `environ` global).
 - **System**: `sysctl`, `getentropy`, `sysconf`, `popen`, `pclose`, `system`.
 - **Mach**: Inline `__syscall()` wrapper for `svc #0x80`.
 
-### 13.3. Userland Binaries (75 Mach-O executables)
+**TCC compatibility:** libSystem includes alternate variadic function implementations (`_printf_tcc`, `_fprintf_tcc`, etc.) for TCC-compiled code. TCC uses a different calling convention for variadic functions on ARM64 (registers vs stack), and `stdio.h` automatically redirects to these variants when compiled with TCC.
+
+### 13.3. Userland Binaries (76 Mach-O executables)
 
 **Shell:** bash (full implementation with lexer, parser, executor, job control, builtins, readline, `time` keyword)
 
@@ -835,11 +862,12 @@ kiseki/
 │   ├── net/                        # Networking (sockets, TCP, UDP, IP, ICMP, Ethernet, ARP)
 │   ├── drivers/                    # Device drivers (UART, GIC, timer, VirtIO, eMMC)
 │   └── include/                    # 26 kernel headers
-├── userland/                       # ~40,000 lines
+├── userland/                       # ~45,000 lines
 │   ├── Makefile                    # Master userland build
 │   ├── dyld/                       # Dynamic linker
-│   ├── libsystem/                  # libSystem.B.dylib (~3,100 lines)
-│   ├── bin/                        # 59 coreutils + bash
+│   ├── libsystem/                  # libSystem.B.dylib (~4,800 lines)
+│   ├── bin/                        # 60 coreutils + bash + TCC
+│   │   └── tests/                  # libSystem unit tests (test_libc)
 │   └── sbin/                       # System binaries (init, getty, login, halt)
 └── tests/                          # Unit test framework
 ```
@@ -871,9 +899,36 @@ libSystem.B.dylib is compiled as a Mach-O shared library (`MH_DYLIB`).
 
 `scripts/mkdisk.sh` creates a 64 MB ext4 image with:
 - Standard Unix hierarchy (`/bin`, `/sbin`, `/usr`, `/etc`, `/dev`, `/tmp`, `/var`, `/home`)
-- All 68 Mach-O binaries
+- All 76 Mach-O binaries
 - `/usr/lib/dyld` and `/usr/lib/libSystem.B.dylib`
 - `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/profile`
+
+### 16.4. Testing
+
+**Unit test suite (`make test-kiseki`):**
+
+Automated testing of libSystem functions via `/bin/test_libc`:
+
+```bash
+make test-kiseki   # Build with tests, boot QEMU, run tests, check results
+```
+
+The test suite covers:
+- **string.h**: strlen, strcmp, strncmp, strcpy, strncpy, strcat, strncat, strchr, strrchr, strstr, memset, memcpy, memmove, memcmp, strdup, strtok (16 tests)
+- **stdlib.h**: atoi, atol, strtol, strtoul, malloc/free, calloc, realloc, abs/labs, getenv/setenv, qsort, bsearch (11 tests)
+- **stdio.h**: sprintf/snprintf, sscanf, fopen/fclose, fread/fwrite, fseek/ftell, fgets/fputs, fgetc/fputc, ungetc, feof/ferror/clearerr, tmpfile, remove/rename (11 tests)
+- **unistd.h**: read/write, lseek, dup/dup2, getcwd/chdir, access, getpid/getppid, fork/wait, pipe, sleep/usleep (9 tests)
+- **fcntl.h**: open/close (1 test)
+- **dirent.h**: opendir/readdir/closedir, mkdir/rmdir (2 tests)
+- **time.h**: time, gettimeofday, localtime/gmtime, strftime (4 tests)
+- **signal.h**: signal/raise (1 test)
+
+Test harness:
+- Boots Kiseki with user-mode networking (no sudo required)
+- Auto-logs in as root
+- Runs `/bin/test_libc` and captures output
+- Checks for "All tests PASSED" in output
+- Returns exit code 0 on success, 1 on failure
 
 ---
 

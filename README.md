@@ -90,7 +90,7 @@ Every working syscall is a small miracle. Every binary that loads and runs is an
 - BSD socket API: socket, bind, listen, accept, connect, send, recv, shutdown, close
 
 ### Userland
-- **75 Mach-O binaries** on the root filesystem
+- **76 Mach-O binaries** on the root filesystem
 - **TCC (Tiny C Compiler)**: Native C compiler that runs on Kiseki and produces working Mach-O binaries
 - Full bash shell with job control, pipelines, redirections, `time` keyword
 - 60 coreutils: ls, cat, grep, awk, sed, sort, find, wc, cut, head, tail, tr, xargs, and more
@@ -98,7 +98,8 @@ Every working syscall is a small miracle. Every binary that loads and runs is an
 - Network tools: curl, nc, ping, ifconfig, ntpdate
 - User management: useradd, usermod, passwd, su, sudo, whoami, id
 - Power management: halt, reboot, shutdown
-- libSystem.B.dylib: complete freestanding C library (~3,200 lines)
+- libSystem.B.dylib: complete freestanding C library (~4,800 lines)
+- **Unit test suite**: Comprehensive libSystem tests (string.h, stdlib.h, stdio.h, unistd.h, etc.)
 
 ### Security
 - Multi-user with UID/GID enforcement (Unix discretionary access control)
@@ -143,7 +144,7 @@ brew install qemu
 # Build kernel only
 make -j4
 
-# Build all userland (dyld + libSystem + 68 binaries)
+# Build all userland (dyld + libSystem + 76 binaries)
 make -C userland all
 
 # Create root filesystem disk image
@@ -154,6 +155,9 @@ make run
 
 # Build everything at once
 make world
+
+# Run automated libSystem unit tests
+make test-kiseki
 ```
 
 ### QEMU Configuration

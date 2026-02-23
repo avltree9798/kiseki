@@ -49,10 +49,14 @@ typedef signed long         time_t;
 #define EOF         (-1)
 #define BUFSIZ      1024
 #define FOPEN_MAX   64
+#define L_tmpnam    32
 
 #define SEEK_SET    0
 #define SEEK_CUR    1
 #define SEEK_END    2
+
+/* File position type */
+typedef long fpos_t;
 
 /* ============================================================================
  * Syscall numbers (BSD positive)
@@ -1714,6 +1718,7 @@ EXPORT int vfprintf(FILE *stream, const char *fmt, va_list ap)
     return ret;
 }
 
+/* Standard fprintf using va_list (for clang-compiled code) */
 EXPORT int fprintf(FILE *stream, const char *fmt, ...)
 {
     va_list ap;
@@ -1721,6 +1726,26 @@ EXPORT int fprintf(FILE *stream, const char *fmt, ...)
     int ret = vfprintf(stream, fmt, ap);
     va_end(ap);
     return ret;
+}
+
+/* TCC-compatible fprintf */
+EXPORT int _fprintf_tcc(FILE *stream, const char *fmt, void *a1, void *a2, void *a3,
+                        void *a4, void *a5, void *a6)
+{
+    void *args[8] __attribute__((aligned(8)));
+    args[0] = a1;
+    args[1] = a2;
+    args[2] = a3;
+    args[3] = a4;
+    args[4] = a5;
+    args[5] = a6;
+    args[6] = NULL;
+    args[7] = NULL;
+    
+    va_list ap;
+    *(void **)&ap = (void *)args;
+    
+    return vfprintf(stream, fmt, ap);
 }
 
 EXPORT int vprintf(const char *fmt, va_list ap)
@@ -1741,21 +1766,41 @@ EXPORT int vprintf(const char *fmt, va_list ap)
     return vfprintf(stdout, fmt, ap);
 }
 
+/*
+ * Standard printf using va_list (for clang-compiled code).
+ * Darwin ARM64 ABI passes variadic args on the stack.
+ */
 EXPORT int printf(const char *fmt, ...)
 {
-#ifdef DEBUG
-    static int _printf_debug_count = 0;
-    if (_printf_debug_count < 3) {
-        _printf_debug_count++;
-        const char *msg = "libSystem: printf called\n";
-        syscall3(SYS_write, 2, (long)msg, 25);
-    }
-#endif
     va_list ap;
     va_start(ap, fmt);
-    int ret = vprintf(fmt, ap);
+    int ret = vfprintf(stdout, fmt, ap);
     va_end(ap);
     return ret;
+}
+
+/*
+ * TCC-compatible printf: accepts explicit arguments in registers.
+ * TCC passes variadic args in registers x1-x7, not on stack.
+ * TCC's headers should #define printf _printf_tcc to use this.
+ */
+EXPORT int _printf_tcc(const char *fmt, void *a1, void *a2, void *a3, void *a4,
+                       void *a5, void *a6, void *a7)
+{
+    void *args[8] __attribute__((aligned(8)));
+    args[0] = a1;
+    args[1] = a2;
+    args[2] = a3;
+    args[3] = a4;
+    args[4] = a5;
+    args[5] = a6;
+    args[6] = a7;
+    args[7] = NULL;
+    
+    va_list ap;
+    *(void **)&ap = (void *)args;
+    
+    return vfprintf(stdout, fmt, ap);
 }
 
 /* --- String output callback --- */
@@ -2337,6 +2382,11 @@ EXPORT sighandler_t signal(int signum, sighandler_t handler)
     return SIG_DFL;
 }
 
+EXPORT int raise(int sig)
+{
+    return kill(getpid(), sig);
+}
+
 /* ============================================================================
  * Exported aliases and additional symbols
  *
@@ -2572,6 +2622,154 @@ done:
 }
 
 /* ============================================================================
+ * scanf / fscanf - read formatted input from stdin/file
+ *
+ * Darwin ARM64 variadic calling convention passes variadic arguments on the
+ * stack, not in registers. TCC currently passes them in registers. Until TCC
+ * is fixed, we use explicit pointer arguments since ARM64 passes up to 8
+ * arguments in registers x0-x7.
+ * ============================================================================ */
+
+/* Core implementation */
+static int _scanf_core(const char *buf, const char *fmt, void **args, int nargs)
+{
+    int idx = 0, count = 0;
+    const char *s = buf;
+
+    while (*fmt && *s && idx < nargs) {
+        if (*fmt == '%') {
+            fmt++;
+            while (*fmt >= '0' && *fmt <= '9') fmt++;
+
+            switch (*fmt) {
+            case 'd': case 'i': {
+                int *p = (int *)args[idx++];
+                if (p) { *p = (int)strtol(s, (char **)&s, 10); count++; }
+                break;
+            }
+            case 'u': {
+                unsigned *p = (unsigned *)args[idx++];
+                if (p) { *p = (unsigned)strtoul(s, (char **)&s, 10); count++; }
+                break;
+            }
+            case 'x': case 'X': {
+                unsigned *p = (unsigned *)args[idx++];
+                if (p) { *p = (unsigned)strtoul(s, (char **)&s, 16); count++; }
+                break;
+            }
+            case 'l':
+                fmt++;
+                if (*fmt == 'd') {
+                    long *p = (long *)args[idx++];
+                    if (p) { *p = strtol(s, (char **)&s, 10); count++; }
+                } else if (*fmt == 'u' || *fmt == 'x') {
+                    unsigned long *p = (unsigned long *)args[idx++];
+                    if (p) { *p = strtoul(s, (char **)&s, *fmt == 'x' ? 16 : 10); count++; }
+                }
+                break;
+            case 's': {
+                char *p = (char *)args[idx++];
+                if (p) {
+                    while (*s && _isspace(*s)) s++;
+                    while (*s && !_isspace(*s)) *p++ = *s++;
+                    *p = '\0';
+                    count++;
+                }
+                break;
+            }
+            case 'c': {
+                char *p = (char *)args[idx++];
+                if (p) { *p = *s++; count++; }
+                break;
+            }
+            case '%':
+                if (*s == '%') s++;
+                else return count;
+                break;
+            default:
+                return count;
+            }
+            fmt++;
+        } else if (_isspace(*fmt)) {
+            while (_isspace(*fmt)) fmt++;
+            while (_isspace(*s)) s++;
+        } else {
+            if (*s != *fmt) break;
+            s++; fmt++;
+        }
+    }
+    return count;
+}
+
+/* scanf: x0=fmt, x1-x7 = up to 7 pointer args */
+EXPORT int scanf(const char *fmt, void *a1, void *a2, void *a3, void *a4,
+                 void *a5, void *a6, void *a7)
+{
+    char buf[1024];
+    if (fgets(buf, sizeof(buf), stdin) == NULL)
+        return EOF;
+    
+    /* Strip trailing newline */
+    size_t len = 0;
+    while (buf[len]) len++;
+    if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+
+    void *args[7] = { a1, a2, a3, a4, a5, a6, a7 };
+    return _scanf_core(buf, fmt, args, 7);
+}
+
+/* fscanf: x0=stream, x1=fmt, x2-x7 = up to 6 pointer args */
+EXPORT int fscanf(FILE *stream, const char *fmt, void *a1, void *a2, void *a3,
+                  void *a4, void *a5, void *a6)
+{
+    char buf[1024];
+    if (fgets(buf, sizeof(buf), stream) == NULL)
+        return EOF;
+    
+    size_t len = 0;
+    while (buf[len]) len++;
+    if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+
+    void *args[6] = { a1, a2, a3, a4, a5, a6 };
+    return _scanf_core(buf, fmt, args, 6);
+}
+
+/*
+ * vscanf / vfscanf / vsscanf - va_list versions for clang-compiled code.
+ * These use the standard va_list calling convention (Darwin: stack-based).
+ * TCC-compiled code should use scanf/fscanf/sscanf with explicit args.
+ */
+EXPORT int vsscanf(const char *str, const char *fmt, va_list ap)
+{
+    /* Build args array from va_list */
+    void *args[16];
+    for (int i = 0; i < 16; i++)
+        args[i] = va_arg(ap, void *);
+    return _scanf_core(str, fmt, args, 16);
+}
+
+EXPORT int vfscanf(FILE *stream, const char *fmt, va_list ap)
+{
+    char buf[1024];
+    if (fgets(buf, sizeof(buf), stream) == NULL)
+        return EOF;
+    
+    size_t len = 0;
+    while (buf[len]) len++;
+    if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+    
+    void *args[16];
+    for (int i = 0; i < 16; i++)
+        args[i] = va_arg(ap, void *);
+    return _scanf_core(buf, fmt, args, 16);
+}
+
+EXPORT int vscanf(const char *fmt, va_list ap)
+{
+    return vfscanf(stdin, fmt, ap);
+}
+
+/* ============================================================================
  * rewind / remove / rename (stdio)
  * ============================================================================ */
 
@@ -2607,6 +2805,196 @@ EXPORT int rename(const char *oldpath, const char *newpath)
 EXPORT void sync(void)
 {
     syscall0(36 /* SYS_sync */);
+}
+
+/* Forward declarations for functions used below but defined later */
+FILE *fdopen(int fd, const char *mode);
+int dup2(int oldfd, int newfd);
+
+/* ============================================================================
+ * freopen - reopen a stream with a different file
+ * ============================================================================ */
+
+EXPORT FILE *freopen(const char *pathname, const char *mode, FILE *stream)
+{
+    if (stream == NULL)
+        return NULL;
+    
+    /* Close the existing stream (but don't free the FILE struct) */
+    fflush(stream);
+    if (stream->fd >= 0) {
+        syscall1(SYS_close, stream->fd);
+    }
+    if ((stream->flags & _F_MYBUF) && stream->buf) {
+        free(stream->buf);
+    }
+    
+    /* Parse mode */
+    int flags = 0;
+    int fflags = 0;
+    
+    if (mode[0] == 'r') {
+        flags |= _F_READ;
+        fflags = O_RDONLY;
+        if (mode[1] == '+' || (mode[1] && mode[2] == '+')) {
+            flags |= _F_WRITE;
+            fflags = O_RDWR;
+        }
+    } else if (mode[0] == 'w') {
+        flags |= _F_WRITE;
+        fflags = O_WRONLY | O_CREAT | O_TRUNC;
+        if (mode[1] == '+' || (mode[1] && mode[2] == '+')) {
+            flags |= _F_READ;
+            fflags = O_RDWR | O_CREAT | O_TRUNC;
+        }
+    } else if (mode[0] == 'a') {
+        flags |= _F_WRITE | _F_APPEND;
+        fflags = O_WRONLY | O_CREAT | O_APPEND;
+        if (mode[1] == '+' || (mode[1] && mode[2] == '+')) {
+            flags |= _F_READ;
+            fflags = O_RDWR | O_CREAT | O_APPEND;
+        }
+    } else {
+        return NULL;
+    }
+    
+    /* Open the new file */
+    long fd = syscall3(SYS_open, pathname, fflags, 0666);
+    if (fd < 0) {
+        errno = (int)(-fd);
+        return NULL;
+    }
+    
+    /* Reinitialize the stream */
+    stream->fd = (int)fd;
+    stream->flags = flags;
+    stream->buf = (char *)malloc(BUFSIZ);
+    stream->bufsiz = stream->buf ? BUFSIZ : 0;
+    stream->buf_pos = 0;
+    stream->buf_len = 0;
+    stream->ungetc_buf = EOF;
+    if (stream->buf)
+        stream->flags |= _F_MYBUF;
+    
+    return stream;
+}
+
+/* ============================================================================
+ * fgetpos / fsetpos - file position
+ * ============================================================================ */
+
+EXPORT int fgetpos(FILE *stream, fpos_t *pos)
+{
+    if (stream == NULL || pos == NULL)
+        return -1;
+    
+    long p = ftell(stream);
+    if (p < 0)
+        return -1;
+    
+    *pos = (fpos_t)p;
+    return 0;
+}
+
+EXPORT int fsetpos(FILE *stream, const fpos_t *pos)
+{
+    if (stream == NULL || pos == NULL)
+        return -1;
+    
+    return fseek(stream, (long)*pos, SEEK_SET);
+}
+
+/* ============================================================================
+ * tmpfile / tmpnam - temporary files
+ * ============================================================================ */
+
+static int _tmpfile_counter = 0;
+
+EXPORT FILE *tmpfile(void)
+{
+    char name[32];
+    int n = _tmpfile_counter++;
+    
+    /* Generate unique name */
+    snprintf(name, sizeof(name), "/tmp/tmp.%d.%d", getpid(), n);
+    
+    /* Open with O_CREAT | O_EXCL | O_RDWR */
+    long fd = syscall3(SYS_open, name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) {
+        errno = (int)(-fd);
+        return NULL;
+    }
+    
+    /* Unlink immediately so it's deleted when closed */
+    syscall1(10 /* SYS_unlink */, name);
+    
+    /* Create FILE wrapper */
+    return fdopen((int)fd, "w+");
+}
+
+EXPORT char *tmpnam(char *s)
+{
+    static char static_buf[L_tmpnam];
+    char *buf = s ? s : static_buf;
+    int n = _tmpfile_counter++;
+    
+    snprintf(buf, L_tmpnam, "/tmp/tmp.%d.%d", getpid(), n);
+    return buf;
+}
+
+/* ============================================================================
+ * getline / getdelim - read line with dynamic allocation (POSIX)
+ * ============================================================================ */
+
+EXPORT ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream)
+{
+    if (lineptr == NULL || n == NULL || stream == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    /* Allocate initial buffer if needed */
+    if (*lineptr == NULL || *n == 0) {
+        *n = 128;
+        *lineptr = (char *)malloc(*n);
+        if (*lineptr == NULL) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    
+    size_t pos = 0;
+    int c;
+    
+    while ((c = fgetc(stream)) != EOF) {
+        /* Grow buffer if needed */
+        if (pos + 2 > *n) {
+            size_t new_size = *n * 2;
+            char *new_buf = (char *)realloc(*lineptr, new_size);
+            if (new_buf == NULL) {
+                errno = ENOMEM;
+                return -1;
+            }
+            *lineptr = new_buf;
+            *n = new_size;
+        }
+        
+        (*lineptr)[pos++] = (char)c;
+        
+        if (c == delim)
+            break;
+    }
+    
+    if (pos == 0 && c == EOF)
+        return -1;
+    
+    (*lineptr)[pos] = '\0';
+    return (ssize_t)pos;
+}
+
+EXPORT ssize_t getline(char **lineptr, size_t *n, FILE *stream)
+{
+    return getdelim(lineptr, n, '\n', stream);
 }
 
 /* ============================================================================
@@ -4264,6 +4652,64 @@ EXPORT void *localtime_r(const time_t *timep, void *result)
 EXPORT void *localtime(const time_t *timep)
 {
     return localtime_r(timep, &_tm_buf);
+}
+
+/* strftime - format time as string */
+EXPORT size_t strftime(char *s, size_t max, const char *fmt, const void *tm_ptr)
+{
+    const struct {
+        int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year;
+        int tm_wday, tm_yday, tm_isdst;
+    } *tm = tm_ptr;
+    
+    static const char *day_abbr[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char *day_full[] = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
+    static const char *mon_abbr[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+    static const char *mon_full[] = {"January","February","March","April","May","June","July","August","September","October","November","December"};
+    
+    char *p = s;
+    char *end = s + max - 1;
+    
+    while (*fmt && p < end) {
+        if (*fmt != '%') {
+            *p++ = *fmt++;
+            continue;
+        }
+        fmt++;
+        
+        char buf[32];
+        const char *src = buf;
+        
+        switch (*fmt) {
+        case 'Y': snprintf(buf, sizeof(buf), "%04d", tm->tm_year + 1900); break;
+        case 'y': snprintf(buf, sizeof(buf), "%02d", tm->tm_year % 100); break;
+        case 'm': snprintf(buf, sizeof(buf), "%02d", tm->tm_mon + 1); break;
+        case 'd': snprintf(buf, sizeof(buf), "%02d", tm->tm_mday); break;
+        case 'H': snprintf(buf, sizeof(buf), "%02d", tm->tm_hour); break;
+        case 'M': snprintf(buf, sizeof(buf), "%02d", tm->tm_min); break;
+        case 'S': snprintf(buf, sizeof(buf), "%02d", tm->tm_sec); break;
+        case 'j': snprintf(buf, sizeof(buf), "%03d", tm->tm_yday + 1); break;
+        case 'w': snprintf(buf, sizeof(buf), "%d", tm->tm_wday); break;
+        case 'a': src = day_abbr[tm->tm_wday % 7]; break;
+        case 'A': src = day_full[tm->tm_wday % 7]; break;
+        case 'b': case 'h': src = mon_abbr[tm->tm_mon % 12]; break;
+        case 'B': src = mon_full[tm->tm_mon % 12]; break;
+        case 'e': snprintf(buf, sizeof(buf), "%2d", tm->tm_mday); break;
+        case 'I': snprintf(buf, sizeof(buf), "%02d", tm->tm_hour % 12 ? tm->tm_hour % 12 : 12); break;
+        case 'p': src = tm->tm_hour < 12 ? "AM" : "PM"; break;
+        case 'n': src = "\n"; break;
+        case 't': src = "\t"; break;
+        case '%': src = "%"; break;
+        default: buf[0] = '%'; buf[1] = *fmt; buf[2] = '\0'; break;
+        }
+        fmt++;
+        
+        while (*src && p < end)
+            *p++ = *src++;
+    }
+    
+    *p = '\0';
+    return p - s;
 }
 
 /* ============================================================================

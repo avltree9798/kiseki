@@ -28,9 +28,13 @@ COREUTILS := cat cp mv rm ln touch mkdir rmdir \
 # Networking tools
 NETTOOLS := ifconfig ping nc curl ntpdate
 
-.PHONY: all dyld libsystem bash coreutils nettools sbin clean $(COREUTILS) $(NETTOOLS)
+.PHONY: all dyld libsystem bash coreutils nettools sbin tcc tests clean $(COREUTILS) $(NETTOOLS)
 
-all: dyld libsystem sbin bash coreutils nettools
+all: dyld libsystem sbin bash coreutils nettools tcc tests
+
+tcc:
+	@echo "=== Building TCC ==="
+	@$(MAKE) -C bin/tcc kiseki
 
 dyld:
 	@echo "=== Building dyld ==="
@@ -58,15 +62,21 @@ nettools: $(NETTOOLS)
 $(NETTOOLS):
 	@$(MAKE) -C bin/$@
 
+tests:
+	@echo "=== Building unit tests ==="
+	@$(MAKE) -C bin/tests
+
 clean:
 	@$(MAKE) -C dyld clean
 	@$(MAKE) -C libSystem clean
 	@$(MAKE) -C sbin clean
 	@$(MAKE) -C bin/bash clean
+	@$(MAKE) -C bin/tcc clean
 	@for prog in $(COREUTILS); do \
 		if [ -d bin/$$prog ]; then $(MAKE) -C bin/$$prog clean; fi; \
 	done
 	@for prog in $(NETTOOLS); do \
 		if [ -d bin/$$prog ]; then $(MAKE) -C bin/$$prog clean; fi; \
 	done
+	@$(MAKE) -C bin/tests clean
 	@echo "=== Clean complete ==="

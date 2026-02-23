@@ -1080,6 +1080,23 @@ ST_FUNC void gen_va_start(void)
     gaddrof();
     r = intr(gv(RC_INT));
 
+#ifdef TCC_TARGET_MACHO
+    /*
+     * Darwin ARM64 va_list is just a char* pointer.
+     * va_start sets it to point to the first variadic argument on stack.
+     * In our prologue, register args x0-x7 are saved at [fp+160..224].
+     * Variadic args start after the last named arg.
+     * For simplicity, point to [fp+224] (after all saved regs).
+     */
+    if (arm64_func_va_list_stack) {
+        arm64_movimm(30, arm64_func_va_list_stack + 224);
+        o(0x8b1e03be); // add x30,x29,x30
+    }
+    else
+        o(0x910383be); // add x30,x29,#224
+    o(0xf900001e | r << 5); // str x30,[x(r)]
+#else
+    /* AAPCS va_list structure */
     if (arm64_func_va_list_stack) {
         //xx could use add (immediate) here
         arm64_movimm(30, arm64_func_va_list_stack + 224);
@@ -1105,6 +1122,7 @@ ST_FUNC void gen_va_start(void)
 
     arm64_movimm(30, arm64_func_va_list_vr_offs);
     o(0xb9001c1e | r << 5); // str w30,[x(r),#28]
+#endif
 
     --vtop;
 }
@@ -1112,8 +1130,34 @@ ST_FUNC void gen_va_start(void)
 ST_FUNC void gen_va_arg(CType *t)
 {
     int align, size = type_size(t, &align);
-    int fsize, hfa = arm64_hfa(t, &fsize);
     uint32_t r0, r1;
+
+#ifdef TCC_TARGET_MACHO
+    /*
+     * Darwin ARM64 va_list is just a char* pointer.
+     * va_arg loads the value and advances the pointer by 8 (or size rounded up).
+     *
+     * Generated code:
+     *   ldr x(r1), [x(r0)]       // load current va_list value (pointer to arg)
+     *   add x30, x(r1), #n       // compute next position
+     *   str x30, [x(r0)]         // update va_list
+     *   // r1 now points to the argument
+     */
+    uint32_t n = (size + 7) & -8;  // round up to 8 bytes
+    
+    gaddrof();
+    r0 = intr(gv(RC_INT));
+    r1 = get_reg(RC_INT);
+    vtop[0].r = r1 | lvalue_type(t->t);
+    r1 = intr(r1);
+
+    o(0xf9400000 | r1 | r0 << 5);          // ldr x(r1),[x(r0)]
+    o(0x9100001e | r1 << 5 | n << 10);     // add x30,x(r1),#n
+    o(0xf900001e | r0 << 5);               // str x30,[x(r0)]
+    
+#else
+    /* AAPCS va_list structure */
+    int fsize, hfa = arm64_hfa(t, &fsize);
 
     if (is_float(t->t)) {
         hfa = 1;
@@ -1184,6 +1228,7 @@ ST_FUNC void gen_va_arg(CType *t)
         // lab2:
         write32le(cur_text_section->data + b2, 0x14000000 | (ind - b2) >> 2);
     }
+#endif
 }
 
 ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret,

@@ -24,8 +24,14 @@ static uint32_t         mount_count;
 static struct fs_type   fs_types[VFS_MAX_FSTYPES];
 static spinlock_t       fs_type_lock = SPINLOCK_INIT;
 
+/* File pool - backing storage for open file descriptions */
+#define VFS_MAX_FILES   512     /* Max open file descriptions */
+static struct file      file_pool[VFS_MAX_FILES];
+static spinlock_t       file_pool_lock = SPINLOCK_INIT;
+
 /* Global file descriptor table (kernel-level, not per-process yet) */
-static struct file      fd_table[VFS_MAX_FD];
+/* Each entry points to a file in file_pool, or NULL if unused */
+static struct file     *fd_table[VFS_MAX_FD];
 static uint8_t          fd_flags[VFS_MAX_FD];   /* Per-FD flags (FD_CLOEXEC etc.) */
 static spinlock_t       fd_lock = SPINLOCK_INIT;
 
@@ -204,54 +210,120 @@ vnode_release(struct vnode *vp)
 
 /* ============================================================================
  * File Descriptor Management
+ *
+ * Architecture:
+ * - file_pool[]: Pool of struct file (open file descriptions)
+ * - fd_table[]: Array of pointers into file_pool (file descriptors)
+ *
+ * Multiple FDs can point to the same file (via dup/fork), sharing offset.
+ * f_refcount tracks how many FDs reference each file description.
  * ============================================================================ */
 
+/*
+ * file_alloc - Allocate a new file description from the pool
+ */
+static struct file *
+file_alloc(void)
+{
+    spin_lock(&file_pool_lock);
+    for (int i = 0; i < VFS_MAX_FILES; i++) {
+        if (file_pool[i].f_refcount == 0) {
+            file_pool[i].f_refcount = 1;
+            file_pool[i].f_offset = 0;
+            file_pool[i].f_flags = 0;
+            file_pool[i].f_vnode = NULL;
+            file_pool[i].f_pipe = NULL;
+            file_pool[i].f_pipe_dir = 0;
+            file_pool[i].f_pty = NULL;
+            file_pool[i].f_pty_side = 0;
+            file_pool[i].f_sockidx = -1;
+            spin_init(&file_pool[i].f_lock);
+            spin_unlock(&file_pool_lock);
+            return &file_pool[i];
+        }
+    }
+    spin_unlock(&file_pool_lock);
+    return NULL;
+}
+
+/*
+ * file_ref - Increment reference count on a file description
+ */
+static void
+file_ref(struct file *fp)
+{
+    if (fp == NULL)
+        return;
+    spin_lock(&fp->f_lock);
+    fp->f_refcount++;
+    spin_unlock(&fp->f_lock);
+}
+
+/*
+ * file_unref - Decrement reference count, free if zero
+ */
+static void
+file_unref(struct file *fp)
+{
+    if (fp == NULL)
+        return;
+    spin_lock(&fp->f_lock);
+    if (fp->f_refcount > 0)
+        fp->f_refcount--;
+    spin_unlock(&fp->f_lock);
+    /* Note: f_refcount==0 marks it as free in file_alloc */
+}
+
+/*
+ * vfs_fd_alloc - Allocate a file descriptor and associated file description
+ */
 static int
 vfs_fd_alloc(void)
 {
+    struct file *fp = file_alloc();
+    if (fp == NULL)
+        return -ENFILE;  /* File table full */
+
     spin_lock(&fd_lock);
     for (int i = 0; i < VFS_MAX_FD; i++) {
-        if (fd_table[i].f_refcount == 0) {
-            fd_table[i].f_refcount = 1;
-            fd_table[i].f_offset = 0;
-            fd_table[i].f_flags = 0;
-            fd_table[i].f_vnode = NULL;
-            fd_table[i].f_pipe = NULL;
-            fd_table[i].f_pipe_dir = 0;
-            fd_table[i].f_pty = NULL;
-            fd_table[i].f_pty_side = 0;
-            fd_table[i].f_sockidx = -1;
+        if (fd_table[i] == NULL) {
+            fd_table[i] = fp;
             fd_flags[i] = 0;
-            spin_init(&fd_table[i].f_lock);
             spin_unlock(&fd_lock);
             return i;
         }
     }
     spin_unlock(&fd_lock);
-    return -EMFILE;
+    file_unref(fp);  /* Release the file we allocated */
+    return -EMFILE;  /* FD table full */
 }
 
+/*
+ * fd_get - Get file description for a file descriptor
+ */
 static struct file *
 fd_get(int fd)
 {
     if (fd < 0 || fd >= VFS_MAX_FD)
         return NULL;
-    if (fd_table[fd].f_refcount == 0)
-        return NULL;
-    return &fd_table[fd];
+    return fd_table[fd];  /* May be NULL if fd not open */
 }
 
+/*
+ * fd_free - Release a file descriptor (decrements file refcount)
+ */
 static void
 fd_free(int fd)
 {
     if (fd < 0 || fd >= VFS_MAX_FD)
         return;
     spin_lock(&fd_lock);
-    fd_table[fd].f_refcount = 0;
-    fd_table[fd].f_vnode = NULL;
-    fd_table[fd].f_pty = NULL;
-    fd_table[fd].f_pty_side = 0;
+    struct file *fp = fd_table[fd];
+    fd_table[fd] = NULL;
+    fd_flags[fd] = 0;
     spin_unlock(&fd_lock);
+    if (fp)
+        file_unref(fp);
 }
 
 /*
@@ -333,6 +405,9 @@ vfs_set_file_flags(int fd, uint32_t flags)
 
 /*
  * vfs_dup_fd - Duplicate a file descriptor to the lowest available fd >= minfd.
+ *
+ * The new FD points to the same file description as oldfd, sharing
+ * the file offset, flags, and underlying vnode. This is POSIX dup() semantics.
  */
 int
 vfs_dup_fd(int oldfd, int minfd)
@@ -343,16 +418,13 @@ vfs_dup_fd(int oldfd, int minfd)
 
     spin_lock(&fd_lock);
     for (int i = minfd; i < VFS_MAX_FD; i++) {
-        if (fd_table[i].f_refcount == 0) {
-            /* Share the same file structure by copying fields */
-            fd_table[i] = fd_table[oldfd];
-            fd_table[i].f_refcount = 1;
+        if (fd_table[i] == NULL) {
+            /* Point new FD to the same file description */
+            fd_table[i] = fp;
             fd_flags[i] = 0;  /* New FD does not inherit FD_CLOEXEC */
-            spin_init(&fd_table[i].f_lock);
 
-            /* If backing a vnode, increment its refcount */
-            if (fd_table[i].f_vnode)
-                vnode_ref(fd_table[i].f_vnode);
+            /* Increment file description refcount */
+            file_ref(fp);
 
             spin_unlock(&fd_lock);
             return i;
@@ -373,8 +445,9 @@ vfs_alloc_sockfd(int sockidx)
     if (fd < 0)
         return fd;
 
-    fd_table[fd].f_vnode = NULL;
-    fd_table[fd].f_sockidx = sockidx;
+    struct file *fp = fd_table[fd];
+    fp->f_vnode = NULL;
+    fp->f_sockidx = sockidx;
     fd_flags[fd] = FD_SOCKET;
 
     return fd;
@@ -385,11 +458,12 @@ vfs_get_sockidx(int fd)
 {
     if (fd < 0 || fd >= VFS_MAX_FD)
         return -1;
-    if (fd_table[fd].f_refcount == 0)
+    struct file *fp = fd_table[fd];
+    if (fp == NULL)
         return -1;
     if (!(fd_flags[fd] & FD_SOCKET))
         return -1;
-    return fd_table[fd].f_sockidx;
+    return fp->f_sockidx;
 }
 
 void
@@ -411,9 +485,10 @@ vfs_alloc_pipefd(void *pipe_data, int dir)
     if (fd < 0)
         return fd;
 
-    fd_table[fd].f_vnode = NULL;
-    fd_table[fd].f_pipe = pipe_data;
-    fd_table[fd].f_pipe_dir = (uint32_t)dir;
+    struct file *fp = fd_table[fd];
+    fp->f_vnode = NULL;
+    fp->f_pipe = pipe_data;
+    fp->f_pipe_dir = (uint32_t)dir;
     fd_flags[fd] |= FD_PIPE;
 
     return fd;
@@ -424,13 +499,14 @@ vfs_get_pipe(int fd, int *dir)
 {
     if (fd < 0 || fd >= VFS_MAX_FD)
         return NULL;
-    if (fd_table[fd].f_refcount == 0)
+    struct file *fp = fd_table[fd];
+    if (fp == NULL)
         return NULL;
-    if (fd_table[fd].f_pipe == NULL)
+    if (fp->f_pipe == NULL)
         return NULL;
     if (dir)
-        *dir = (int)fd_table[fd].f_pipe_dir;
-    return fd_table[fd].f_pipe;
+        *dir = (int)fp->f_pipe_dir;
+    return fp->f_pipe;
 }
 
 void *
@@ -438,13 +514,14 @@ vfs_get_pty(int fd, int *side)
 {
     if (fd < 0 || fd >= VFS_MAX_FD)
         return NULL;
-    if (fd_table[fd].f_refcount == 0)
+    struct file *fp = fd_table[fd];
+    if (fp == NULL)
         return NULL;
-    if (fd_table[fd].f_pty == NULL)
+    if (fp->f_pty == NULL)
         return NULL;
     if (side)
-        *side = (int)fd_table[fd].f_pty_side;
-    return fd_table[fd].f_pty;
+        *side = (int)fp->f_pty_side;
+    return fp->f_pty;
 }
 
 int
@@ -453,9 +530,10 @@ vfs_alloc_pty_fd(void *pty_ptr, int side)
     int fd = vfs_fd_alloc();
     if (fd < 0)
         return fd;
-    fd_table[fd].f_pty = pty_ptr;
-    fd_table[fd].f_pty_side = (uint32_t)side;
-    fd_table[fd].f_flags = O_RDWR;
+    struct file *fp = fd_table[fd];
+    fp->f_pty = pty_ptr;
+    fp->f_pty_side = (uint32_t)side;
+    fp->f_flags = O_RDWR;
     return fd;
 }
 
@@ -647,6 +725,7 @@ vfs_init(void)
     spin_init(&fs_type_lock);
     spin_init(&fd_lock);
     spin_init(&vnode_pool_lock);
+    spin_init(&file_pool_lock);
 
     /* Zero out tables */
     for (uint32_t i = 0; i < VFS_MAX_MOUNTS; i++)
@@ -654,20 +733,22 @@ vfs_init(void)
     for (uint32_t i = 0; i < VFS_MAX_FSTYPES; i++)
         fs_types[i].active = false;
     for (int i = 0; i < VFS_MAX_FD; i++)
-        fd_table[i].f_refcount = 0;
+        fd_table[i] = NULL;
+    for (int i = 0; i < VFS_MAX_FILES; i++)
+        file_pool[i].f_refcount = 0;
 
     /*
      * Reserve fds 0, 1, 2 for console stdin/stdout/stderr.
      * These are handled by the console fast path in sys_read/sys_write,
-     * not by VFS vnodes. Marking them with refcount=1 and f_vnode=NULL
-     * prevents vfs_fd_alloc() from ever returning them for file opens.
+     * not by VFS vnodes. We allocate file descriptions for them so
+     * that fd_table[0/1/2] != NULL, preventing vfs_fd_alloc() from
+     * ever returning them for file opens.
      */
-    fd_table[0].f_refcount = 1;  /* stdin  - console */
-    fd_table[0].f_vnode = NULL;
-    fd_table[1].f_refcount = 1;  /* stdout - console */
-    fd_table[1].f_vnode = NULL;
-    fd_table[2].f_refcount = 1;  /* stderr - console */
-    fd_table[2].f_vnode = NULL;
+    for (int i = 0; i < 3; i++) {
+        struct file *fp = file_alloc();
+        fp->f_vnode = NULL;  /* Console - no vnode */
+        fd_table[i] = fp;
+    }
     for (uint32_t i = 0; i < VFS_MAX_VNODES; i++) {
         vnode_pool[i].v_refcount = 0;
         vnode_pool[i].v_type = VNON;
@@ -897,7 +978,7 @@ vfs_open(const char *path, uint32_t flags, mode_t mode)
         return fd;
     }
 
-    struct file *fp = &fd_table[fd];
+    struct file *fp = fd_table[fd];
     fp->f_vnode = vp;
     fp->f_flags = flags;
     fp->f_offset = 0;

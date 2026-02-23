@@ -73,6 +73,18 @@ static struct thread *alloc_thread(void)
     for (int i = 0; i < MAX_THREADS; i++) {
         if (thread_pool[i].state == TH_TERM || thread_pool[i].tid == 0) {
             struct thread *th = &thread_pool[i];
+
+            /*
+             * Free the old kernel stack if this is a terminated thread
+             * being reused. We couldn't free it in thread_exit() because
+             * the thread was still running on it.
+             */
+            if (th->state == TH_TERM && th->kernel_stack) {
+                pmm_free_pages((uint64_t)th->kernel_stack, 2);
+                th->kernel_stack = NULL;
+                th->kernel_stack_size = 0;
+            }
+
             th->tid = next_tid++;
             spin_unlock_irqrestore(&thread_lock, flags);
             return th;
@@ -183,12 +195,11 @@ void thread_exit(void)
     /* Mark as terminated */
     th->state = TH_TERM;
 
-    /* Free kernel stack */
-    if (th->kernel_stack) {
-        pmm_free_pages((uint64_t)th->kernel_stack, 2); /* order 2 = 4 pages */
-        th->kernel_stack = NULL;
-        th->kernel_stack_size = 0;
-    }
+    /*
+     * DO NOT free the kernel stack here - we are still running on it!
+     * The stack will be freed by the reaper thread or when the thread
+     * structure is recycled.
+     */
 
     /* Switch to next thread (never returns) */
     sched_switch();

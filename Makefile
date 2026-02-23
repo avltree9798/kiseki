@@ -246,6 +246,46 @@ test: $(TEST_BINS)
 	done
 	@echo "=== All Tests Passed ==="
 
+# Run libSystem tests on Kiseki (boots QEMU, runs test_libc, exits)
+# Uses user-mode networking (no sudo needed) for CI compatibility
+QEMU_TEST_FLAGS := -M virt -cpu cortex-a72 -smp 4 -m 1G \
+                   -nographic \
+                   -kernel $(KERNEL_ELF) \
+                   -serial mon:stdio \
+                   -drive id=hd0,file=$(DISK_IMG),format=raw,if=none \
+                   -device virtio-blk-device,drive=hd0 \
+                   -netdev user,id=net0 \
+                   -device virtio-net-device,netdev=net0
+
+# Build disk with tests included
+disk-test: userland
+	@echo ""
+	@echo "  MKDISK   $(DISK_IMG) (with tests)"
+	@INCLUDE_TESTS=1 $(SCRIPTDIR)/mkdisk.sh $(DISK_IMG)
+
+test-kiseki: all disk-test
+	@echo "=== Running Kiseki libSystem Tests ==="
+	@echo "Booting Kiseki and running /bin/test_libc..."
+	@{ \
+		sleep 4; \
+		echo "root"; \
+		sleep 1; \
+		echo "toor"; \
+		sleep 2; \
+		echo "/bin/test_libc"; \
+		sleep 15; \
+		echo "exit"; \
+	} | timeout 90 $(QEMU) $(QEMU_TEST_FLAGS) 2>&1 | tee $(BUILDDIR)/test_output.log; \
+	if grep -q "All tests PASSED" $(BUILDDIR)/test_output.log; then \
+		echo ""; \
+		echo "=== Kiseki libSystem Tests PASSED ==="; \
+	else \
+		echo ""; \
+		echo "=== Kiseki libSystem Tests FAILED ==="; \
+		grep -E "(FAIL|tests failed)" $(BUILDDIR)/test_output.log || true; \
+		exit 1; \
+	fi
+
 $(BUILDDIR)/tests/%: $(TESTDIR)/unit/%.c
 	@echo "  HOST_CC  $<"
 	@mkdir -p $(dir $@)

@@ -2,29 +2,37 @@
  * Kiseki OS - Variable Arguments
  *
  * Provides va_list and related macros.
- * Works with both GCC/Clang builtins and TCC.
+ *
+ * IMPORTANT: On Darwin ARM64, va_list is just a char* pointer, not the
+ * full AAPCS struct. Both TCC and clang must use the same layout for
+ * cross-compiled code to work correctly.
  */
 
 #ifndef _LIBSYSTEM_STDARG_H
 #define _LIBSYSTEM_STDARG_H
 
 #ifdef __TINYC__
-/* TCC uses its own va_list implementation */
+/*
+ * TCC on Darwin ARM64: Use simple pointer-based va_list like clang.
+ * Arguments are passed in x0-x7 and spill to stack. The callee saves
+ * register args to stack, and va_list points to them.
+ */
 #ifndef _VA_LIST_DEFINED
 #define _VA_LIST_DEFINED
-typedef struct {
-    void *__stack;
-    void *__gr_top;
-    void *__vr_top;
-    int   __gr_offs;
-    int   __vr_offs;
-} va_list[1];
+typedef char *va_list;
 #endif
 
-#define va_start(ap, last)  __va_start(ap, last)
-#define va_arg(ap, type)    __va_arg(ap, type)
+/* 
+ * TCC's __va_start and __va_arg are builtins that use AAPCS conventions.
+ * For Darwin compatibility, we override with pointer arithmetic.
+ * On ARM64, variadic args after register args go on stack, 8-byte aligned.
+ */
+#define va_start(ap, last) \
+    ((ap) = (char *)&(last) + ((sizeof(last) + 7) & ~7))
+#define va_arg(ap, type) \
+    (*(type *)((ap) += ((sizeof(type) + 7) & ~7), (ap) - ((sizeof(type) + 7) & ~7)))
 #define va_end(ap)          ((void)0)
-#define va_copy(dest, src)  ((dest)[0] = (src)[0])
+#define va_copy(dest, src)  ((dest) = (src))
 
 #else
 /* GCC/Clang builtins */

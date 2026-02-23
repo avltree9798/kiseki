@@ -16,6 +16,7 @@
 #include <kern/vmm.h>
 #include <kern/kprintf.h>
 #include <drivers/timer.h>
+#include <drivers/gic.h>
 
 /* Per-CPU data array */
 static struct cpu_data cpu_data_array[MAX_CPUS];
@@ -28,6 +29,11 @@ static spinlock_t thread_lock = SPINLOCK_INIT;
 /* Sleep queue - threads waiting for timed wakeup */
 static struct thread *sleep_queue = NULL;
 static spinlock_t sleep_lock = SPINLOCK_INIT;
+
+/* --- Forward declarations for SMP load balancing --- */
+static uint32_t sched_find_least_loaded_cpu(uint32_t affinity);
+static void sched_enqueue_cpu(struct thread *th, uint32_t cpu_id, bool send_ipi);
+static struct thread *sched_steal_work(uint32_t my_cpu);
 
 /* --- Per-CPU data access via TPIDR_EL1 --- */
 
@@ -55,9 +61,21 @@ static inline uint32_t get_cpu_id(void)
 static void idle_thread_func(void *arg __unused)
 {
     for (;;) {
-        __asm__ volatile("wfi");
-        /* On wakeup from WFI, check if we need to reschedule */
         struct cpu_data *cd = get_cpu_data();
+        
+        /* Try to steal work from busy CPUs before going idle */
+        struct thread *stolen = sched_steal_work(cd->cpu_id);
+        if (stolen) {
+            /* Enqueue stolen thread on our run queue and reschedule */
+            sched_enqueue_cpu(stolen, cd->cpu_id, false);
+            sched_yield();
+            continue;
+        }
+        
+        /* No work available, wait for interrupt */
+        __asm__ volatile("wfi");
+        
+        /* On wakeup from WFI, check if we need to reschedule */
         if (cd->need_resched)
             sched_yield();
     }
@@ -283,6 +301,8 @@ void sched_init(void)
     /* Initialize per-CPU data for boot CPU */
     struct cpu_data *cd = &cpu_data_array[0];
     cd->cpu_id = 0;
+    cd->online = false;  /* Not online until fully initialized */
+    spin_init(&cd->run_lock);
     cd->run_count = 0;
     cd->need_resched = false;
     cd->idle_ticks = 0;
@@ -297,12 +317,16 @@ void sched_init(void)
         panic("sched_init: cannot create idle thread");
     cd->idle_thread->state = TH_IDLE;
     cd->idle_thread->cpu = 0;
+    cd->idle_thread->cpu_affinity = 0;  /* Can run on any CPU */
 
     /* Boot thread becomes the "current" thread temporarily */
     cd->current_thread = cd->idle_thread;
 
     /* Store per-CPU data pointer in TPIDR_EL1 */
     set_cpu_data(cd);
+    
+    /* Mark CPU 0 as online now that initialization is complete */
+    cd->online = true;
 
     kprintf("[sched] Scheduler initialized on core 0\n");
 }
@@ -313,6 +337,8 @@ void sched_init_percpu(void)
     struct cpu_data *cd = &cpu_data_array[cpuid];
 
     cd->cpu_id = cpuid;
+    cd->online = false;  /* Not online until fully initialized */
+    spin_init(&cd->run_lock);
     cd->run_count = 0;
     cd->need_resched = false;
     cd->idle_ticks = 0;
@@ -331,19 +357,85 @@ void sched_init_percpu(void)
     if (cd->idle_thread) {
         cd->idle_thread->state = TH_IDLE;
         cd->idle_thread->cpu = cpuid;
+        cd->idle_thread->cpu_affinity = 0;
     }
 
     cd->current_thread = cd->idle_thread;
     set_cpu_data(cd);
+    
+    /* Mark this CPU as online now that initialization is complete */
+    cd->online = true;
 }
 
-void sched_enqueue(struct thread *th)
-{
-    struct cpu_data *cd = get_cpu_data();
-    int pri = th->effective_priority;
+/* ============================================================================
+ * SMP Load Balancing
+ *
+ * macOS-style work distribution:
+ *   1. New threads go to the least-loaded CPU (that matches affinity)
+ *   2. Idle CPUs steal work from busy CPUs (work-stealing)
+ *   3. IPIs wake up remote CPUs when work is enqueued
+ * ============================================================================ */
 
+/*
+ * sched_find_least_loaded_cpu - Find the CPU with the lowest run_count
+ *
+ * @affinity: CPU affinity mask (0 = any CPU, else bitmask of allowed CPUs)
+ * Returns: CPU ID with lowest load (that matches affinity)
+ */
+static uint32_t sched_find_least_loaded_cpu(uint32_t affinity)
+{
+    uint32_t best_cpu = get_cpu_id();  /* Default to current CPU */
+    uint32_t min_load = 0xFFFFFFFF;
+    
+    for (uint32_t cpu = 0; cpu < MAX_CPUS; cpu++) {
+        struct cpu_data *cd = &cpu_data_array[cpu];
+        
+        /* Skip CPUs that aren't online yet */
+        if (!cd->online)
+            continue;
+        
+        /* Check affinity - if affinity is 0, allow any CPU */
+        if (affinity != 0 && !(affinity & (1u << cpu)))
+            continue;
+        
+        uint32_t load = cd->run_count;
+        
+        /* Prefer CPUs that are idle (run_count == 0) */
+        if (load < min_load) {
+            min_load = load;
+            best_cpu = cpu;
+        }
+    }
+    
+    return best_cpu;
+}
+
+/*
+ * sched_enqueue_cpu - Enqueue a thread onto a specific CPU's run queue
+ *
+ * @th: Thread to enqueue
+ * @cpu_id: Target CPU
+ * @send_ipi: If true, send IPI_RESCHEDULE to wake the target CPU
+ */
+static void sched_enqueue_cpu(struct thread *th, uint32_t cpu_id, bool send_ipi)
+{
+    struct cpu_data *cd = &cpu_data_array[cpu_id];
+    int pri = th->effective_priority;
+    uint64_t flags;
+    
+    /*
+     * Memory barrier: ensure all writes to the thread structure (e.g., 
+     * context setup in fork) are visible before we take the lock and
+     * make the thread visible to other CPUs.
+     */
+    __asm__ volatile("dmb ish" ::: "memory");
+    
+    spin_lock_irqsave(&cd->run_lock, &flags);
+    
     /* Add to tail of priority queue */
     th->run_next = NULL;
+    th->cpu = cpu_id;
+    
     if (cd->run_queue[pri] == NULL) {
         cd->run_queue[pri] = th;
     } else {
@@ -353,16 +445,134 @@ void sched_enqueue(struct thread *th)
         tail->run_next = th;
     }
     cd->run_count++;
+    
+    /* Check if we need to preempt the target CPU's current thread */
+    bool need_ipi = false;
+    if (cd->current_thread) {
+        if (pri > cd->current_thread->effective_priority) {
+            cd->need_resched = true;
+            need_ipi = true;
+        } else if (cd->current_thread == cd->idle_thread) {
+            /* CPU is idle, wake it up */
+            cd->need_resched = true;
+            need_ipi = true;
+        }
+    }
+    
+    spin_unlock_irqrestore(&cd->run_lock, flags);
+    
+    /* Send IPI to wake the target CPU if it's different from current */
+    if (send_ipi && need_ipi && cpu_id != get_cpu_id()) {
+        gic_send_sgi(IPI_RESCHEDULE, 1u << cpu_id);
+    }
+}
 
-    /* Check if we need to preempt current thread */
-    if (cd->current_thread && pri > cd->current_thread->effective_priority)
-        cd->need_resched = true;
+/*
+ * sched_steal_work - Try to steal a thread from another CPU's run queue
+ *
+ * Called by idle CPUs to find work. Scans other CPUs for threads to steal.
+ * Steals the lowest-priority thread from the busiest CPU.
+ *
+ * @my_cpu: The CPU trying to steal work
+ * Returns: Stolen thread or NULL if nothing available
+ */
+static struct thread *sched_steal_work(uint32_t my_cpu)
+{
+    struct thread *victim = NULL;
+    uint32_t busiest_cpu = my_cpu;
+    uint32_t max_load = 0;
+    
+    /* Find the busiest CPU */
+    for (uint32_t cpu = 0; cpu < MAX_CPUS; cpu++) {
+        if (cpu == my_cpu)
+            continue;
+        struct cpu_data *cd = &cpu_data_array[cpu];
+        
+        /* Skip CPUs that aren't online yet */
+        if (!cd->online)
+            continue;
+        
+        if (cd->run_count > max_load) {
+            max_load = cd->run_count;
+            busiest_cpu = cpu;
+        }
+    }
+    
+    /* Only steal if the busiest CPU has at least 2 runnable threads */
+    if (busiest_cpu == my_cpu || max_load < 2)
+        return NULL;
+    
+    struct cpu_data *cd = &cpu_data_array[busiest_cpu];
+    uint64_t flags;
+    
+    spin_lock_irqsave(&cd->run_lock, &flags);
+    
+    /* Find the lowest-priority thread to steal (scan from pri 0 up) */
+    for (int pri = 0; pri < MLFQ_LEVELS; pri++) {
+        if (cd->run_queue[pri]) {
+            struct thread *th = cd->run_queue[pri];
+            
+            /* Check affinity - can we run this thread? */
+            if (th->cpu_affinity != 0 && !(th->cpu_affinity & (1u << my_cpu)))
+                continue;
+            
+            /* Remove from victim's run queue */
+            cd->run_queue[pri] = th->run_next;
+            th->run_next = NULL;
+            cd->run_count--;
+            victim = th;
+            break;
+        }
+    }
+    
+    spin_unlock_irqrestore(&cd->run_lock, flags);
+    
+    return victim;
+}
+
+void sched_enqueue(struct thread *th)
+{
+    uint32_t target_cpu;
+    uint32_t my_cpu = get_cpu_id();
+    
+    /*
+     * SMP Load Balancing:
+     * - If thread has never run (cpu == -1), place on least-loaded CPU
+     * - If thread has a CPU affinity, honor it
+     * - Otherwise, keep on same CPU (cache affinity)
+     */
+    if (th->cpu == -1) {
+        /* New thread: find least-loaded CPU */
+        target_cpu = sched_find_least_loaded_cpu(th->cpu_affinity);
+    } else if ((uint32_t)th->cpu >= MAX_CPUS) {
+        /* Invalid CPU, use current CPU */
+        target_cpu = my_cpu;
+    } else {
+        /* Existing thread: stay on same CPU (cache affinity) */
+        target_cpu = (uint32_t)th->cpu;
+        
+        /* But if affinity changed, re-evaluate */
+        if (th->cpu_affinity != 0 && !(th->cpu_affinity & (1u << th->cpu))) {
+            target_cpu = sched_find_least_loaded_cpu(th->cpu_affinity);
+        }
+    }
+    
+    /* Use the locked enqueue that handles cross-CPU placement */
+    sched_enqueue_cpu(th, target_cpu, true);
 }
 
 void sched_dequeue(struct thread *th)
 {
-    struct cpu_data *cd = get_cpu_data();
+    /* Find which CPU this thread is queued on */
+    uint32_t cpu_id = th->cpu;
+    if (cpu_id >= MAX_CPUS)
+        cpu_id = get_cpu_id();  /* Fallback to current CPU */
+    
+    struct cpu_data *cd = &cpu_data_array[cpu_id];
     int pri = th->effective_priority;
+    uint64_t flags;
+
+    spin_lock_irqsave(&cd->run_lock, &flags);
 
     struct thread **pp = &cd->run_queue[pri];
     while (*pp) {
@@ -370,29 +580,13 @@ void sched_dequeue(struct thread *th)
             *pp = th->run_next;
             th->run_next = NULL;
             cd->run_count--;
+            spin_unlock_irqrestore(&cd->run_lock, flags);
             return;
         }
         pp = &(*pp)->run_next;
     }
-}
 
-/*
- * sched_pick_next - Find highest-priority runnable thread
- *
- * Scans from highest priority down.
- */
-static struct thread *sched_pick_next(struct cpu_data *cd)
-{
-    for (int i = MLFQ_LEVELS - 1; i >= 0; i--) {
-        if (cd->run_queue[i]) {
-            struct thread *th = cd->run_queue[i];
-            cd->run_queue[i] = th->run_next;
-            th->run_next = NULL;
-            cd->run_count--;
-            return th;
-        }
-    }
-    return cd->idle_thread;
+    spin_unlock_irqrestore(&cd->run_lock, flags);
 }
 
 void sched_switch(void)
@@ -400,15 +594,44 @@ void sched_switch(void)
     struct cpu_data *cd = get_cpu_data();
     struct thread *old = cd->current_thread;
     struct thread *new_thread;
+    uint64_t flags;
 
     cd->need_resched = false;
 
-    /* Put old thread back on run queue if still runnable */
-    if (old && old->state == TH_RUN && old != cd->idle_thread)
-        sched_enqueue(old);
+    spin_lock_irqsave(&cd->run_lock, &flags);
 
-    /* Pick next thread */
-    new_thread = sched_pick_next(cd);
+    /* Put old thread back on run queue if still runnable */
+    if (old && old->state == TH_RUN && old != cd->idle_thread) {
+        /* Re-enqueue on local CPU (no IPI needed, we're local) */
+        int pri = old->effective_priority;
+        old->run_next = NULL;
+        if (cd->run_queue[pri] == NULL) {
+            cd->run_queue[pri] = old;
+        } else {
+            struct thread *tail = cd->run_queue[pri];
+            while (tail->run_next)
+                tail = tail->run_next;
+            tail->run_next = old;
+        }
+        cd->run_count++;
+    }
+
+    /* Pick next thread (inline to avoid nested lock) */
+    new_thread = NULL;
+    for (int i = MLFQ_LEVELS - 1; i >= 0; i--) {
+        if (cd->run_queue[i]) {
+            new_thread = cd->run_queue[i];
+            cd->run_queue[i] = new_thread->run_next;
+            new_thread->run_next = NULL;
+            cd->run_count--;
+            break;
+        }
+    }
+    if (!new_thread)
+        new_thread = cd->idle_thread;
+
+    spin_unlock_irqrestore(&cd->run_lock, flags);
+
     if (new_thread == old)
         return;  /* Same thread, no switch needed */
 
@@ -447,6 +670,7 @@ void sched_yield(void)
  * sched_wakeup_sleepers - Wake threads whose sleep time has expired
  *
  * Called from sched_tick() to check the sleep queue.
+ * Uses SMP-aware placement to distribute woken threads.
  */
 static void sched_wakeup_sleepers(void)
 {
@@ -465,7 +689,13 @@ static void sched_wakeup_sleepers(void)
         th->wait_reason = NULL;
 
         spin_unlock_irqrestore(&sleep_lock, flags);
+        
+        /*
+         * Use SMP-aware enqueue: if thread has never run, place on
+         * least-loaded CPU. Otherwise keep cache affinity.
+         */
         sched_enqueue(th);
+        
         spin_lock_irqsave(&sleep_lock, &flags);
     }
 
@@ -510,6 +740,9 @@ void sched_tick(void)
 
     /* Priority aging: every 100 ticks, boost starved threads */
     if ((cd->total_ticks % 100) == 0) {
+        uint64_t aging_flags;
+        spin_lock_irqsave(&cd->run_lock, &aging_flags);
+        
         for (int i = 0; i < MLFQ_LEVELS - 1; i++) {
             struct thread *t = cd->run_queue[i];
             while (t) {
@@ -522,6 +755,8 @@ void sched_tick(void)
                 t = next;
             }
         }
+        
+        spin_unlock_irqrestore(&cd->run_lock, aging_flags);
     }
 }
 

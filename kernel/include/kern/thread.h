@@ -70,6 +70,7 @@ struct thread {
     int                 sched_policy;       /* SCHED_OTHER/FIFO/RR */
     int                 quantum;            /* Remaining time quantum (ticks) */
     int                 cpu;                /* CPU core this thread is running on */
+    uint32_t            cpu_affinity;       /* 0 = run anywhere, else bitmask */
 
     struct cpu_context  context;            /* Saved registers for context switch */
     uint64_t            *kernel_stack;      /* Kernel stack base */
@@ -137,12 +138,14 @@ struct cpu_data {
     struct thread       *current_thread;
     struct thread       *idle_thread;
 
-    /* Per-CPU MLFQ run queues */
+    /* Per-CPU MLFQ run queues - protected by run_lock */
+    spinlock_t          run_lock;
     struct thread       *run_queue[MLFQ_LEVELS];
     uint32_t            run_count;
 
     /* Scheduling state */
     bool                need_resched;
+    bool                online;         /* True once CPU is fully initialized */
     uint64_t            idle_ticks;
     uint64_t            total_ticks;
 };

@@ -161,6 +161,27 @@ void trap_sync_el0(struct trap_frame *tf)
                     }
                 }
             }
+        } else if ((dfsc & 0x3C) == 0x0C && wnr) {
+            /*
+             * Permission fault on write — check for COW page.
+             * DFSC 0x0C-0x0F are permission faults at different levels:
+             *   0x0C = level 0, 0x0D = level 1, 0x0E = level 2, 0x0F = level 3
+             * Masking with 0x3C gives 0x0C for all permission fault levels.
+             * If the page has PTE_COW set, handle via copy-on-write.
+             */
+            struct proc *p = proc_current();
+            if (p && p->p_vmspace) {
+                uint64_t page_va = fault_va & ~(uint64_t)0xFFF;
+                
+                /* Check if page has COW bit set */
+                pte_t *pte = vmm_get_pte(p->p_vmspace->pgd, page_va);
+                if (pte && (*pte & PTE_VALID) && (*pte & PTE_COW)) {
+                    /* COW fault — make a private copy */
+                    if (vmm_copy_on_write(p->p_vmspace, page_va) == 0) {
+                        handled = true;
+                    }
+                }
+            }
         }
 
         if (handled)

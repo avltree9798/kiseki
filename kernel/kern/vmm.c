@@ -489,9 +489,10 @@ int vmm_copy_on_write(struct vm_space *space, uint64_t va)
      * permission on __TEXT pages.
      *
      * AP field is bits [7:6]. Clear them and set AP_RW_ALL (bit 6).
+     * Also clear the PTE_COW bit since the page is no longer shared.
      */
     uint64_t orig_flags = *pte & ~PTE_ADDR_MASK;
-    uint64_t new_flags = (orig_flags & ~(3UL << 6)) | PTE_AP_RW_ALL;
+    uint64_t new_flags = (orig_flags & ~(3UL << 6) & ~PTE_COW) | PTE_AP_RW_ALL;
 
     if (refcount <= 1) {
         /* Sole owner — make writable in-place */
@@ -558,6 +559,11 @@ int vmm_protect_page(pte_t *pgd, uint64_t va, uint64_t new_flags)
     return 0;
 }
 
+pte_t *vmm_get_pte(pte_t *pgd, uint64_t va)
+{
+    return walk_pgd(pgd, va, false);
+}
+
 /*
  * vmm_copy_space - Deep-copy user pages from src to dst address space
  *
@@ -566,13 +572,28 @@ int vmm_protect_page(pte_t *pgd, uint64_t va, uint64_t new_flags)
  * PTE, allocates a new physical page, copies 4KB, and maps it into dst
  * with the same flags.
  */
+/*
+ * vmm_copy_space - Copy-on-write fork of address space
+ *
+ * Instead of deep-copying all pages, we:
+ *   1. Share the same physical pages between parent and child
+ *   2. Mark writable pages as read-only with PTE_COW set
+ *   3. Increment the page's reference count
+ *   4. On write fault, vmm_copy_on_write() makes a private copy
+ *
+ * Read-only pages (like __TEXT) are shared directly without COW marking.
+ * This dramatically reduces fork() overhead for large processes.
+ */
 int vmm_copy_space(struct vm_space *dst, struct vm_space *src)
 {
     if (!dst || !src || !dst->pgd || !src->pgd)
         return -1;
 
     pte_t *src_l0 = src->pgd;
-    uint64_t pages_copied = 0;
+    uint64_t pages_shared = 0;
+    uint64_t irq_flags;
+
+    spin_lock_irqsave(&vmm_lock, &irq_flags);
 
     for (int i0 = 0; i0 < PT_ENTRIES; i0++) {
         if (!(src_l0[i0] & PTE_VALID))
@@ -620,36 +641,59 @@ int vmm_copy_space(struct vm_space *dst, struct vm_space *src)
                                   ((uint64_t)i2 << 21) |
                                   ((uint64_t)i3 << 12);
 
-                    uint64_t src_pa = PTE_TO_PHYS(pte);
+                    uint64_t pa = PTE_TO_PHYS(pte);
                     uint64_t flags = pte & ~PTE_ADDR_MASK;
 
-                    /* Allocate a new physical page for the copy */
-                    uint64_t new_pa = pmm_alloc_page();
-                    if (new_pa == 0) {
-                        kprintf("[vmm] vmm_copy_space: OOM after %lu pages\n",
-                                pages_copied);
-                        return -1;
+                    /*
+                     * COW logic:
+                     * - If page is writable (AP_RW_ALL), mark both parent and
+                     *   child as read-only with PTE_COW set
+                     * - If page is already read-only, share directly (no COW
+                     *   needed since neither can write to it)
+                     */
+                    bool is_writable = ((flags >> 6) & 3) == 1;  /* AP_RW_ALL = 1 */
+                    
+                    if (is_writable) {
+                        /*
+                         * Make page read-only in parent and mark COW.
+                         * AP bits [7:6]: 01 = RW_ALL, 11 = RO_ALL
+                         * Set to RO_ALL (set both bits 6 and 7) and add COW.
+                         */
+                        uint64_t cow_flags = (flags | (3UL << 6)) | PTE_COW;
+                        
+                        /* Update parent's PTE to be COW read-only */
+                        src_l3[i3] = (pa & PTE_ADDR_MASK) | cow_flags;
+                        
+                        /* Map into child with same COW read-only flags */
+                        spin_unlock_irqrestore(&vmm_lock, irq_flags);
+                        if (vmm_map_page(dst->pgd, va, pa, cow_flags) != 0) {
+                            kprintf("[vmm] vmm_copy_space: map failed at VA 0x%lx\n", va);
+                            return -1;
+                        }
+                        spin_lock_irqsave(&vmm_lock, &irq_flags);
+                    } else {
+                        /* Page is already read-only, share directly */
+                        spin_unlock_irqrestore(&vmm_lock, irq_flags);
+                        if (vmm_map_page(dst->pgd, va, pa, flags) != 0) {
+                            kprintf("[vmm] vmm_copy_space: map failed at VA 0x%lx\n", va);
+                            return -1;
+                        }
+                        spin_lock_irqsave(&vmm_lock, &irq_flags);
                     }
 
-                    /* Copy 4KB from source to destination (identity mapped) */
-                    uint64_t *s = (uint64_t *)src_pa;
-                    uint64_t *d = (uint64_t *)new_pa;
-                    for (int w = 0; w < 512; w++)
-                        d[w] = s[w];
-
-                    /* Map into destination page table with same flags */
-                    if (vmm_map_page(dst->pgd, va, new_pa, flags) != 0) {
-                        pmm_free_page(new_pa);
-                        kprintf("[vmm] vmm_copy_space: map failed at VA 0x%lx\n",
-                                va);
-                        return -1;
-                    }
-
-                    pages_copied++;
+                    /* Increment reference count on the shared page */
+                    pmm_page_ref(pa);
+                    pages_shared++;
                 }
             }
         }
     }
+
+    /* Flush TLB for parent since we changed its PTEs to read-only */
+    __asm__ volatile("tlbi vmalle1" ::: "memory");
+    __asm__ volatile("dsb sy; isb");
+
+    spin_unlock_irqrestore(&vmm_lock, irq_flags);
 
     return 0;
 }

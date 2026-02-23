@@ -81,6 +81,8 @@ typedef long fpos_t;
 #define SYS_geteuid     25
 #define SYS_kill        37
 #define SYS_getppid_nr  39
+#define SYS_sigaction   46
+#define SYS_sigprocmask 48
 #define SYS_getgid      47
 #define SYS_setgid      181
 #define SYS_dup         41
@@ -2414,12 +2416,38 @@ typedef void (*sighandler_t)(int);
 #define SIG_IGN ((sighandler_t)1)
 #define SIG_ERR ((sighandler_t)-1)
 
+/* Signal action structure - must match kernel's layout */
+struct __sigaction {
+    union {
+        sighandler_t sa_handler;
+        void (*sa_sigaction)(int, void *, void *);
+    };
+    uint32_t sa_mask;   /* sigset_t */
+    int      sa_flags;
+};
+
+#define SA_RESTART  0x0002
+
+/*
+ * signal - BSD-style signal handler registration
+ *
+ * Calls sigaction internally with SA_RESTART flag.
+ */
 EXPORT sighandler_t signal(int signum, sighandler_t handler)
 {
-    (void)signum;
-    (void)handler;
-    /* Stub: Kiseki signal handling is kernel-side */
-    return SIG_DFL;
+    struct __sigaction sa, old;
+    
+    sa.sa_handler = handler;
+    sa.sa_mask = 0;  /* Don't block any signals during handler */
+    sa.sa_flags = SA_RESTART;  /* Restart interrupted syscalls */
+    
+    long ret = syscall3(SYS_sigaction, signum, (long)&sa, (long)&old);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return SIG_ERR;
+    }
+    
+    return old.sa_handler;
 }
 
 EXPORT int raise(int sig)
@@ -3572,25 +3600,32 @@ EXPORT int tcsetpgrp(int fd, int pgrp)
 }
 
 /* ============================================================================
- * sigaction
+ * sigaction - register a signal handler (real implementation)
  * ============================================================================ */
 
-struct sigaction_s {
-    void     (*sa_handler)(int);
-    void     (*sa_sigaction)(int, void *, void *);
-    int      sa_mask;
-    int      sa_flags;
-};
-
-EXPORT int sigaction(int signum, const struct sigaction_s *act, struct sigaction_s *oldact)
+EXPORT int sigaction(int signum, const struct __sigaction *act,
+                     struct __sigaction *oldact)
 {
-    (void)signum;
-    if (oldact) {
-        memset(oldact, 0, sizeof(*oldact));
-        oldact->sa_handler = SIG_DFL;
+    long ret = syscall3(SYS_sigaction, signum, (long)act, (long)oldact);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
     }
-    (void)act;
-    return 0;  /* Stub */
+    return 0;
+}
+
+/* ============================================================================
+ * sigprocmask - change signal blocking mask
+ * ============================================================================ */
+
+EXPORT int sigprocmask(int how, const uint32_t *set, uint32_t *oldset)
+{
+    long ret = syscall3(SYS_sigprocmask, how, (long)set, (long)oldset);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return 0;
 }
 
 /* ============================================================================

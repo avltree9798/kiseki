@@ -3674,21 +3674,22 @@ bool signal_check(struct thread *th, struct trap_frame *tf)
     }
 
     /*
-     * Custom handler: push signal trampoline frame onto user stack.
+     * Custom handler: push signal context frame onto user stack.
      *
      * Stack layout after setup (growing down):
-     *   [saved trap_frame: 288 bytes]  <- sigcontext
-     *   [trampoline code: 8 bytes]     <- sigreturn trampoline
+     *   [saved trap_frame: 288 bytes]  <- sigcontext (at new SP)
      *   ...
      *   new SP (16-byte aligned)
      *
      * tf->elr = handler address
      * x0 = signal number
-     * x30 (LR) = address of trampoline code on user stack
+     * x30 (LR) = CommPage sigreturn trampoline (not on stack)
      *
-     * The trampoline is:
+     * The trampoline in CommPage at offset 0x280 is:
      *   mov x16, #184     ; SYS_sigreturn
      *   svc #0x80
+     *
+     * Using CommPage avoids executable stack pages.
      */
     if (tf == NULL)
         return false;
@@ -3697,9 +3698,9 @@ bool signal_check(struct thread *th, struct trap_frame *tf)
     if (!pp || !pp->p_vmspace)
         return false;
 
-    /* Reserve space on user stack for sigcontext + trampoline */
-    uint64_t frame_size = sizeof(struct trap_frame) + 16; /* +16 for trampoline + align */
-    frame_size = (frame_size + 15) & ~(uint64_t)15;       /* 16-byte align */
+    /* Reserve space on user stack for sigcontext only (no trampoline) */
+    uint64_t frame_size = sizeof(struct trap_frame);
+    frame_size = (frame_size + 15) & ~(uint64_t)15;  /* 16-byte align */
 
     uint64_t new_sp = tf->sp - frame_size;
 
@@ -3709,29 +3710,21 @@ bool signal_check(struct thread *th, struct trap_frame *tf)
     for (uint64_t i = 0; i < sizeof(struct trap_frame); i++) {
         uint64_t pa = vmm_translate(pp->p_vmspace->pgd, sc_addr + i);
         if (pa == 0)
-            return false;  /* Can't set up trampoline — discard signal */
+            return false;  /* Can't set up signal frame — discard signal */
         *(uint8_t *)pa = src[i];
     }
 
-    /* Write trampoline code after the sigcontext */
-    uint64_t tramp_addr = sc_addr + sizeof(struct trap_frame);
-    /* ARM64 instructions:
-     *   mov x16, #184      -> 0xD2800B10  (movz x16, #0xB8)
-     *   svc #0x80           -> 0xD4001001
-     */
-    uint32_t tramp_code[2] = { 0xD2801710, 0xD4001001 };
-    for (int ti = 0; ti < 8; ti++) {
-        uint64_t pa = vmm_translate(pp->p_vmspace->pgd, tramp_addr + ti);
-        if (pa == 0)
-            return false;
-        *(uint8_t *)pa = ((const uint8_t *)tramp_code)[ti];
-    }
+    /* CommPage sigreturn trampoline address:
+     * COMMPAGE_VA (0x0000000FFFFFC000) + COMMPAGE_STUB_SIGRETURN (0x280) */
+#define COMMPAGE_VA             0x0000000FFFFFC000UL
+#define COMMPAGE_STUB_SIGRETURN 0x280
+    uint64_t tramp_addr = COMMPAGE_VA + COMMPAGE_STUB_SIGRETURN;
 
     /* Modify trap frame to enter signal handler */
     tf->elr = (uint64_t)handler;        /* PC = signal handler */
     tf->regs[0] = (uint64_t)sig;        /* x0 = signal number */
-    tf->regs[30] = tramp_addr;          /* LR = trampoline (handler returns here) */
-    tf->sp = new_sp;                     /* SP = below our frame */
+    tf->regs[30] = tramp_addr;          /* LR = CommPage trampoline */
+    tf->sp = new_sp;                     /* SP = sigcontext address */
 
     /* Clear carry flag so handler starts clean */
     tf->spsr &= ~SPSR_CARRY_BIT;
@@ -3745,8 +3738,8 @@ bool signal_check(struct thread *th, struct trap_frame *tf)
 /*
  * sys_sigreturn - Restore trap frame after signal handler returns.
  *
- * Called from the trampoline code pushed on the user stack by signal_check.
- * The sigcontext (saved trap_frame) is at the current SP + 16 (trampoline size).
+ * Called from the CommPage sigreturn trampoline when a signal handler returns.
+ * The sigcontext (saved trap_frame) is at the current SP (pushed by signal_check).
  * We read it back and overwrite the current trap frame.
  */
 static int sys_sigreturn(struct trap_frame *tf)

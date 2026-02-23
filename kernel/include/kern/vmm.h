@@ -42,6 +42,12 @@
 #define PTE_PXN         (1UL << 53)     /* Privileged Execute Never */
 #define PTE_UXN         (1UL << 54)     /* User Execute Never */
 
+/*
+ * Software-defined PTE bits (available in bits [58:55], ignored by hardware)
+ * We use bit 55 for COW tracking since hardware ignores it.
+ */
+#define PTE_COW         (1UL << 55)     /* Copy-on-write: page is shared, copy on write fault */
+
 /* MAIR indices (set during MMU init) */
 #define MAIR_DEVICE_nGnRnE  0   /* Device memory (strongly ordered) */
 #define MAIR_NORMAL_NC       1   /* Normal non-cacheable */
@@ -186,6 +192,16 @@ int vmm_copy_space(struct vm_space *dst, struct vm_space *src);
  * vmm_get_kernel_pgd - Get the kernel's L0 page table
  */
 pte_t *vmm_get_kernel_pgd(void);
+
+/*
+ * vmm_get_pte - Walk page table and return pointer to L3 PTE
+ *
+ * @pgd: L0 page table
+ * @va:  Virtual address
+ *
+ * Returns pointer to the L3 PTE for va, or NULL if not mapped.
+ */
+pte_t *vmm_get_pte(pte_t *pgd, uint64_t va);
 
 /*
  * vmm_protect_page - Change PTE flags for a single mapped page

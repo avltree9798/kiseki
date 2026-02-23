@@ -66,6 +66,7 @@
 /* Stub routines (tiny ARM64 code sequences) */
 #define COMMPAGE_STUB_GETTIMEOFDAY      0x200   /* gettimeofday stub */
 #define COMMPAGE_STUB_NANOTIME          0x240   /* mach_absolute_time stub */
+#define COMMPAGE_STUB_SIGRETURN         0x280   /* signal return trampoline */
 
 /*
  * Boot epoch: Feb 19, 2026 00:00:00 UTC
@@ -206,6 +207,23 @@ static const uint32_t stub_gettimeofday[] = {
     0xD65F03C0,     /* ret */
 };
 
+/*
+ * ARM64 instructions for the sigreturn trampoline:
+ *
+ * When a signal handler returns, it jumps here to restore the
+ * original context via the sigreturn syscall.
+ *
+ *   mov x16, #184          -> 0xD2801710   (movz x16, #0xB8 = SYS_sigreturn)
+ *   svc #0x80              -> 0xD4001001   (syscall)
+ *
+ * The saved trap_frame (sigcontext) is at the current SP when this runs.
+ * sigreturn reads it from SP and restores all registers + PC.
+ */
+static const uint32_t stub_sigreturn[] = {
+    0xD2801710,     /* movz x16, #184 (SYS_sigreturn) */
+    0xD4001001,     /* svc #0x80 */
+};
+
 /* ============================================================================
  * CommPage Initialization
  * ============================================================================ */
@@ -275,9 +293,13 @@ void commpage_init(void)
                     stub_gettimeofday, sizeof(stub_gettimeofday));
     commpage_memcpy(commpage_kva + COMMPAGE_STUB_NANOTIME,
                     stub_nanotime, sizeof(stub_nanotime));
+    commpage_memcpy(commpage_kva + COMMPAGE_STUB_SIGRETURN,
+                    stub_sigreturn, sizeof(stub_sigreturn));
 
     kprintf("[commpage] CommPage ready: phys=0x%lx freq=%lu Hz\n",
             commpage_phys, freq);
+    kprintf("[commpage] sigreturn trampoline at CommPage+0x%x\n",
+            COMMPAGE_STUB_SIGRETURN);
     kprintf("[commpage] gettimeofday stub at CommPage+0x%x\n",
             COMMPAGE_STUB_GETTIMEOFDAY);
     kprintf("[commpage] nanotime stub at CommPage+0x%x\n",

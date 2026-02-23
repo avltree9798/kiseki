@@ -1499,8 +1499,7 @@ int main(int argc, char **argv)
     printf("\n");
     
     printf("[signal.h]\n");
-    printf("  (skipped - signal delivery not yet implemented)\n");
-    /* RUN_TEST(signal_raise); - hangs because raise() blocks waiting for signal delivery */
+    RUN_TEST(signal_raise);
     printf("\n");
     
     printf("[pthread.h]\n");

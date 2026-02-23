@@ -22,10 +22,13 @@ LIBDIR   := $(BUILDDIR)/lib
 DYLIB   := $(LIBDIR)/libSystem.B.dylib
 
 # Compiler flags for Mach-O dylib (macOS clang)
+# NOTE: -mcpu=cortex-a53 ensures ARMv8.0 compatible atomics (LDXR/STXR)
+# instead of LSE atomics (SWPAL, etc.) which require ARMv8.1+.
 DYLIB_CC     := clang
 DYLIB_CFLAGS := -target arm64-apple-macos11 \
                 -nostdlib -ffreestanding -fno-builtin \
                 -fno-stack-protector \
+                -mcpu=cortex-a53 \
                 -O2 -Wall -Wextra \
                 -Wno-unused-parameter
 

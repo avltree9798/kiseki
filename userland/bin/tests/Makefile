@@ -6,9 +6,11 @@ LIBDIR   := $(BUILDDIR)/lib
 BINDIR   := $(BUILDDIR)/bin
 
 # Compiler settings (macOS clang targeting Kiseki)
+# NOTE: -mcpu=cortex-a53 ensures ARMv8.0 compatible atomics (LDXR/STXR)
 CC := clang
 CFLAGS := -target arm64-apple-macos11 \
           -nostdlib -ffreestanding -fno-builtin \
+          -mcpu=cortex-a53 \
           -I../../libsystem/include \
           -O2 -Wall
 

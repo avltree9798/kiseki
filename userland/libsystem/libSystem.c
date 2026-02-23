@@ -166,8 +166,10 @@ typedef long fpos_t;
 #define EDESTADDRREQ    39
 #define EMSGSIZE        40
 #define ENAMETOOLONG    63
+#define ETIMEDOUT       60
 #define ENOTEMPTY       66
 #define ENOSYS          78
+#define EDEADLK         11
 
 /* TIOCGETA ioctl for isatty */
 #define TIOCGETA        0x40487413
@@ -5944,7 +5946,11 @@ EXPORT int pthread_cancel(unsigned long thread)
 /* Thread attributes (stubs) */
 EXPORT int pthread_attr_init(void *attr)
 {
-    if (attr) memset(attr, 0, sizeof(unsigned long));
+    struct { int detachstate; size_t stacksize; } *a = attr;
+    if (a) {
+        a->detachstate = 0;  /* PTHREAD_CREATE_JOINABLE */
+        a->stacksize = 8 * 1024 * 1024;  /* 8MB default */
+    }
     return 0;
 }
 
@@ -5956,29 +5962,29 @@ EXPORT int pthread_attr_destroy(void *attr)
 
 EXPORT int pthread_attr_setdetachstate(void *attr, int detachstate)
 {
-    (void)attr;
-    (void)detachstate;
+    struct { int detachstate; size_t stacksize; } *a = attr;
+    a->detachstate = detachstate;
     return 0;
 }
 
 EXPORT int pthread_attr_getdetachstate(const void *attr, int *detachstate)
 {
-    (void)attr;
-    if (detachstate) *detachstate = 0; /* PTHREAD_CREATE_JOINABLE */
+    const struct { int detachstate; size_t stacksize; } *a = attr;
+    if (detachstate) *detachstate = a->detachstate;
     return 0;
 }
 
 EXPORT int pthread_attr_setstacksize(void *attr, size_t stacksize)
 {
-    (void)attr;
-    (void)stacksize;
+    struct { int detachstate; size_t stacksize; } *a = attr;
+    a->stacksize = stacksize;
     return 0;
 }
 
 EXPORT int pthread_attr_getstacksize(const void *attr, size_t *stacksize)
 {
-    (void)attr;
-    if (stacksize) *stacksize = 8 * 1024 * 1024; /* 8MB default */
+    const struct { int detachstate; size_t stacksize; } *a = attr;
+    if (stacksize) *stacksize = a->stacksize ? a->stacksize : 8 * 1024 * 1024;
     return 0;
 }
 
@@ -6267,9 +6273,43 @@ EXPORT int pthread_cond_wait(void *cond_ptr, void *mutex_ptr)
 
 EXPORT int pthread_cond_timedwait(void *cond_ptr, void *mutex_ptr, const void *abstime)
 {
-    (void)abstime;
-    /* For now, just do regular wait (no timeout) */
-    return pthread_cond_wait(cond_ptr, mutex_ptr);
+    struct {
+        volatile int waiters;
+        volatile int signal_count;
+        void *mutex;
+    } *cond = cond_ptr;
+    
+    const struct _timespec *deadline = abstime;
+    
+    cond->mutex = mutex_ptr;
+    cond->waiters++;
+    
+    int saved_signal = cond->signal_count;
+    
+    pthread_mutex_unlock(mutex_ptr);
+    
+    /* Wait for signal with timeout */
+    while (cond->signal_count == saved_signal) {
+        /* Check if deadline has passed */
+        struct _timespec now;
+        clock_gettime(0 /* CLOCK_REALTIME */, (void *)&now);
+        
+        if (now.tv_sec > deadline->tv_sec ||
+            (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
+            /* Timeout - restore state and return */
+            cond->waiters--;
+            pthread_mutex_lock(mutex_ptr);
+            return ETIMEDOUT;
+        }
+        
+        /* Sleep a bit */
+        struct _timespec ts = { 0, 1000000 }; /* 1ms */
+        nanosleep(&ts, NULL);
+    }
+    
+    cond->waiters--;
+    pthread_mutex_lock(mutex_ptr);
+    return 0;
 }
 
 EXPORT int pthread_cond_signal(void *cond_ptr)
@@ -6318,7 +6358,8 @@ EXPORT int pthread_condattr_destroy(void *attr)
 EXPORT int pthread_rwlock_init(void *rwlock_ptr, const void *attr)
 {
     (void)attr;
-    memset(rwlock_ptr, 0, 24); /* sizeof pthread_rwlock_t */
+    /* pthread_rwlock_t is 32 bytes with padding for alignment */
+    memset(rwlock_ptr, 0, 32);
     return 0;
 }
 

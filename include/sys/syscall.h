@@ -115,6 +115,12 @@
 #define SYS_close_nocancel  399
 #define SYS_fcntl_nocancel  406
 
+/* BSD thread syscalls (macOS-compatible) */
+#define SYS_bsdthread_create    360
+#define SYS_bsdthread_terminate 361
+#define SYS_bsdthread_register  366
+#define SYS_thread_selfid       372
+
 /* Kiseki extensions (500+) */
 #define SYS_getentropy      500
 #define SYS_openpty         501

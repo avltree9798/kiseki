@@ -94,6 +94,18 @@ struct thread {
     /* Timed sleep support */
     uint64_t            wakeup_tick;        /* Tick at which to wake (0 = not timed) */
     struct thread       *sleep_next;        /* Next in sleep queue */
+
+    /* Thread linkage within task */
+    struct thread       *task_next;         /* Next thread in same task */
+
+    /* Thread-local storage pointer (for userspace pthread) */
+    uint64_t            tls_base;           /* User TLS base address (TPIDR_EL0) */
+
+    /* Join/detach state */
+    bool                detached;           /* If true, no join possible */
+    bool                joined;             /* If true, another thread is joining */
+    void                *exit_value;        /* Return value from pthread_exit */
+    struct thread       *join_waiter;       /* Thread waiting to join this one */
 };
 
 /*
@@ -160,6 +172,17 @@ void thread_sleep_ticks(uint64_t ticks);
 
 /* Get current thread */
 struct thread *current_thread_get(void);
+
+/* Create a user thread (for bsdthread_create syscall) */
+struct thread *thread_create_user(struct task *task, uint64_t entry,
+                                  uint64_t arg, uint64_t stack,
+                                  uint64_t tls_base, int priority);
+
+/* Terminate the current thread (user thread exit) */
+void thread_terminate(void *retval) __noreturn;
+
+/* Get thread by TID */
+struct thread *thread_find(uint64_t tid);
 
 /* ============================================================================
  * Scheduler API

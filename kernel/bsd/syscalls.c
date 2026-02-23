@@ -305,6 +305,12 @@ static int sys_fsync(struct trap_frame *tf);
 static int sys_ftruncate(struct trap_frame *tf);
 static int sys_truncate(struct trap_frame *tf);
 
+/* BSD thread syscalls */
+static int sys_bsdthread_create(struct trap_frame *tf);
+static int sys_bsdthread_terminate(struct trap_frame *tf);
+static int sys_bsdthread_register(struct trap_frame *tf);
+static int sys_thread_selfid(struct trap_frame *tf);
+
 /* External: poll for received network packets */
 void virtio_net_recv(void);
 
@@ -666,6 +672,23 @@ void syscall_handler(struct trap_frame *tf)
 
     case SYS_truncate:
         error = sys_truncate(tf);
+        break;
+
+    /* BSD thread syscalls */
+    case SYS_bsdthread_create:
+        error = sys_bsdthread_create(tf);
+        break;
+
+    case SYS_bsdthread_terminate:
+        error = sys_bsdthread_terminate(tf);
+        break;
+
+    case SYS_bsdthread_register:
+        error = sys_bsdthread_register(tf);
+        break;
+
+    case SYS_thread_selfid:
+        error = sys_thread_selfid(tf);
         break;
 
     default:
@@ -4878,4 +4901,162 @@ static int sys_truncate(struct trap_frame *tf)
     if (err == 0)
         syscall_return(tf, 0);
     return err;
+}
+
+/* ============================================================================
+ * BSD Thread Syscalls (pthread support)
+ * ============================================================================ */
+
+/*
+ * sys_bsdthread_create - Create a new user thread (pthread_create)
+ *
+ * XNU ABI (simplified for Kiseki):
+ *   x0 = start_routine (function pointer)
+ *   x1 = arg (argument to start_routine)
+ *   x2 = stack (user stack pointer, top of stack)
+ *   x3 = pthread struct pointer (for TLS, stored in TPIDR_EL0)
+ *   x4 = flags (unused for now)
+ *   x5 = reserved
+ *
+ * Returns:
+ *   On success: thread ID in x0, carry clear
+ *   On failure: errno in x0, carry set
+ *
+ * The new thread starts executing start_routine(arg) with:
+ *   - SP = stack
+ *   - x0 = arg
+ *   - TPIDR_EL0 = pthread struct pointer (for TLS access)
+ */
+static int sys_bsdthread_create(struct trap_frame *tf)
+{
+    uint64_t start_routine = tf->regs[0];
+    uint64_t arg           = tf->regs[1];
+    uint64_t stack         = tf->regs[2];
+    uint64_t pthread_ptr   = tf->regs[3];
+    /* uint64_t flags      = tf->regs[4]; */
+
+    struct thread *cur = current_thread_get();
+    if (cur == NULL || cur->task == NULL)
+        return EINVAL;
+
+    struct task *task = cur->task;
+
+    /* Validate parameters */
+    if (start_routine == 0 || stack == 0)
+        return EINVAL;
+
+    /* Create the new user thread */
+    struct thread *new_thread = thread_create_user(
+        task,
+        start_routine,
+        arg,
+        stack,
+        pthread_ptr,  /* TLS base = pthread struct */
+        PRI_DEFAULT
+    );
+
+    if (new_thread == NULL) {
+        kprintf("[bsdthread_create] thread_create_user failed\n");
+        return EAGAIN;  /* Resource temporarily unavailable */
+    }
+
+    /* Enqueue the thread so the scheduler can run it */
+    sched_enqueue(new_thread);
+
+    /* Return the thread ID to the caller */
+    syscall_return(tf, (int64_t)new_thread->tid);
+    return 0;
+}
+
+/*
+ * sys_bsdthread_terminate - Terminate the calling thread
+ *
+ * XNU ABI:
+ *   x0 = stack base (to free)
+ *   x1 = stack size (to free)
+ *   x2 = port (unused)
+ *   x3 = semaphore (unused)
+ *   x4 = exit value
+ *
+ * This syscall does not return (thread is terminated).
+ *
+ * Note: Stack deallocation should be handled by userspace before calling
+ * this, as we can't safely free the stack while running on it in kernel mode.
+ */
+static int sys_bsdthread_terminate(struct trap_frame *tf)
+{
+    /* uint64_t stack_base = tf->regs[0]; */
+    /* uint64_t stack_size = tf->regs[1]; */
+    void *exit_value = (void *)tf->regs[4];
+
+    struct thread *cur = current_thread_get();
+    if (cur == NULL)
+        return EINVAL;
+
+    /*
+     * If this is the last thread in the task, we should exit the process.
+     * Check if there are other threads.
+     */
+    if (cur->task) {
+        struct thread *other = cur->task->threads;
+        int thread_count = 0;
+        while (other) {
+            if (other != cur && other->state != TH_TERM)
+                thread_count++;
+            other = other->task_next;
+        }
+
+        if (thread_count == 0) {
+            /* Last thread - exit the entire process */
+            struct proc *p = proc_current();
+            if (p) {
+                proc_exit(p, W_EXITCODE(0, 0));
+            }
+            thread_exit();
+            /* NOTREACHED */
+        }
+    }
+
+    /* Terminate just this thread */
+    thread_terminate(exit_value);
+    /* NOTREACHED */
+    return 0;
+}
+
+/*
+ * sys_bsdthread_register - Register pthread library callbacks
+ *
+ * XNU ABI:
+ *   x0 = pthread_start (callback when thread starts)
+ *   x1 = wqthread (workqueue thread callback)
+ *   x2 = pthsize (size of pthread struct)
+ *   x3-x5 = reserved
+ *
+ * This is called once by libpthread during initialization to register
+ * callbacks. For Kiseki's simplified model, we just accept and ignore it.
+ */
+static int sys_bsdthread_register(struct trap_frame *tf)
+{
+    /* Accept registration but don't do anything with it for now.
+     * In a full implementation, we'd store these callbacks for use
+     * when creating new threads. */
+    (void)tf;
+    syscall_return(tf, 0);
+    return 0;
+}
+
+/*
+ * sys_thread_selfid - Get the calling thread's ID
+ *
+ * Returns the unique thread ID (TID) of the calling thread.
+ * This is used by pthread_self() implementation.
+ */
+static int sys_thread_selfid(struct trap_frame *tf)
+{
+    struct thread *cur = current_thread_get();
+    if (cur == NULL)
+        return EINVAL;
+
+    syscall_return(tf, (int64_t)cur->tid);
+    return 0;
 }

@@ -97,6 +97,12 @@ typedef long fpos_t;
 #define SYS_getentropy  500
 #define SYS_openpty     501
 
+/* BSD thread syscalls */
+#define SYS_bsdthread_create    360
+#define SYS_bsdthread_terminate 361
+#define SYS_bsdthread_register  366
+#define SYS_thread_selfid       372
+
 /* open flags */
 #define O_RDONLY    0x0000
 #define O_WRONLY    0x0001
@@ -224,6 +230,12 @@ static inline long _check(long ret)
 
 /* ============================================================================
  * errno
+ *
+ * Note: For full thread-local errno, each thread would need its own errno
+ * location. For simplicity, we use a global errno for now. Programs that
+ * need thread-local errno should use pthread_getspecific/setspecific.
+ *
+ * TODO: Implement true thread-local errno by storing it in the pthread struct.
  * ============================================================================ */
 
 EXPORT int errno = 0;
@@ -5585,6 +5597,1023 @@ EXPORT int getrusage(int who, struct rusage *usage)
     }
     memset(usage, 0, sizeof(*usage));
     return 0;
+}
+
+/* ============================================================================
+ * POSIX Threads (pthread) Implementation
+ *
+ * Full multi-threading support using bsdthread_create kernel syscall.
+ * ============================================================================ */
+
+/* Thread-local storage - per-thread data stored in pthread structure */
+#define PTHREAD_KEYS_MAX 128
+#define PTHREAD_STACK_SIZE (2 * 1024 * 1024)  /* 2MB default stack per thread */
+#define PTHREAD_MAX_THREADS 64
+
+/* Internal pthread structure - this is what pthread_t points to */
+struct __pthread {
+    unsigned long       tid;            /* Kernel thread ID */
+    void               *stack_base;     /* Allocated stack base (for munmap) */
+    size_t              stack_size;     /* Stack size */
+    void               *(*start_routine)(void *);
+    void               *arg;
+    void               *retval;         /* Return value for join */
+    int                 detached;       /* 1 if detached */
+    int                 joined;         /* 1 if another thread is joining */
+    int                 exited;         /* 1 if thread has exited */
+    void               *tls[PTHREAD_KEYS_MAX];  /* Thread-local storage */
+    struct __pthread   *joiner;         /* Thread waiting to join us */
+};
+
+/* Global TLS key management (shared across threads) */
+static void (*_pthread_key_destructors[PTHREAD_KEYS_MAX])(void *);
+static int _pthread_key_used[PTHREAD_KEYS_MAX];
+static unsigned int _pthread_next_key = 0;
+
+/* Thread table for tracking all pthreads */
+static struct __pthread _pthread_table[PTHREAD_MAX_THREADS];
+static int _pthread_table_init = 0;
+
+/* Main thread's pthread structure */
+static struct __pthread _main_pthread;
+
+/* Get current thread's pthread structure from TPIDR_EL0 */
+static inline struct __pthread *_pthread_get_self(void)
+{
+    struct __pthread *self;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(self));
+    if (self == NULL) {
+        /* Main thread hasn't been set up yet, return main pthread */
+        return &_main_pthread;
+    }
+    return self;
+}
+
+/* Initialize pthread system (called automatically) */
+static void _pthread_init(void)
+{
+    if (_pthread_table_init)
+        return;
+    
+    /* Initialize main thread's pthread structure */
+    memset(&_main_pthread, 0, sizeof(_main_pthread));
+    _main_pthread.tid = (unsigned long)syscall0(SYS_thread_selfid);
+    if ((long)_main_pthread.tid < 0)
+        _main_pthread.tid = 1;  /* Fallback if syscall not available */
+    _main_pthread.stack_base = NULL;  /* Main thread stack is process stack */
+    _main_pthread.stack_size = 0;
+    _main_pthread.detached = 0;
+    
+    /* Set TPIDR_EL0 for main thread */
+    __asm__ volatile("msr tpidr_el0, %0" :: "r"(&_main_pthread));
+    
+    /* Clear thread table */
+    memset(_pthread_table, 0, sizeof(_pthread_table));
+    memset(_pthread_key_destructors, 0, sizeof(_pthread_key_destructors));
+    memset(_pthread_key_used, 0, sizeof(_pthread_key_used));
+    
+    _pthread_table_init = 1;
+}
+
+/* Allocate a pthread structure from the table */
+static struct __pthread *_pthread_alloc(void)
+{
+    _pthread_init();
+    for (int i = 0; i < PTHREAD_MAX_THREADS; i++) {
+        if (_pthread_table[i].tid == 0) {
+            return &_pthread_table[i];
+        }
+    }
+    return NULL;
+}
+
+/* Free a pthread structure */
+static void _pthread_free(struct __pthread *pt)
+{
+    if (pt && pt != &_main_pthread) {
+        memset(pt, 0, sizeof(*pt));
+    }
+}
+
+/* Forward declaration */
+EXPORT NORETURN void pthread_exit(void *retval);
+
+/*
+ * Thread start wrapper - this is the actual entry point the kernel calls.
+ * It sets up TLS, calls the user's start_routine, then calls pthread_exit.
+ */
+static void _pthread_start_wrapper(void)
+{
+    struct __pthread *self = _pthread_get_self();
+    
+    /* Call the user's start routine */
+    void *retval = self->start_routine(self->arg);
+    
+    /* Thread is done - exit with the return value */
+    pthread_exit(retval);
+}
+
+/* pthread_t is just the thread ID for now */
+EXPORT unsigned long pthread_self(void)
+{
+    _pthread_init();
+    struct __pthread *self = _pthread_get_self();
+    return (unsigned long)self;
+}
+
+EXPORT int pthread_equal(unsigned long t1, unsigned long t2)
+{
+    return t1 == t2;
+}
+
+/*
+ * pthread_create - Create a new thread
+ *
+ * Allocates a stack for the new thread, sets up the pthread structure,
+ * and calls bsdthread_create to actually create the kernel thread.
+ */
+EXPORT int pthread_create(unsigned long *thread, const void *attr,
+                          void *(*start_routine)(void *), void *arg)
+{
+    (void)attr;  /* TODO: handle attributes */
+    
+    _pthread_init();
+    
+    if (start_routine == NULL) {
+        errno = EINVAL;
+        return EINVAL;
+    }
+    
+    /* Allocate pthread structure */
+    struct __pthread *pt = _pthread_alloc();
+    if (pt == NULL) {
+        errno = EAGAIN;
+        return EAGAIN;
+    }
+    
+    /* Determine stack size (use default or from attr) */
+    size_t stack_size = PTHREAD_STACK_SIZE;
+    
+    /* Allocate stack for the new thread */
+    void *stack_base = (void *)syscall6(SYS_mmap, 0, stack_size,
+                                        PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (stack_base == MAP_FAILED || (long)stack_base < 0) {
+        _pthread_free(pt);
+        errno = ENOMEM;
+        return ENOMEM;
+    }
+    
+    /* Initialize pthread structure */
+    pt->stack_base = stack_base;
+    pt->stack_size = stack_size;
+    pt->start_routine = start_routine;
+    pt->arg = arg;
+    pt->retval = NULL;
+    pt->detached = 0;
+    pt->joined = 0;
+    pt->exited = 0;
+    pt->joiner = NULL;
+    memset(pt->tls, 0, sizeof(pt->tls));
+    
+    /* Stack grows down, so entry SP = base + size */
+    uint64_t stack_top = (uint64_t)stack_base + stack_size;
+    /* Align to 16 bytes (ARM64 requirement) */
+    stack_top &= ~0xFUL;
+    
+    /*
+     * Call bsdthread_create:
+     *   x0 = start_routine (we use our wrapper)
+     *   x1 = arg (the pthread structure itself, so wrapper can access it)
+     *   x2 = stack (top of stack)
+     *   x3 = pthread (for TPIDR_EL0 / TLS base)
+     *   x4 = flags (unused)
+     */
+    long ret = syscall6(SYS_bsdthread_create,
+                        (long)_pthread_start_wrapper,
+                        (long)pt,  /* arg to wrapper - NOT user's arg */
+                        stack_top,
+                        (long)pt,  /* TLS base = pthread struct */
+                        0,         /* flags */
+                        0);
+    
+    if (ret < 0) {
+        /* Thread creation failed - free resources */
+        syscall2(SYS_munmap, (long)stack_base, stack_size);
+        _pthread_free(pt);
+        errno = -ret;
+        return -ret;
+    }
+    
+    /* Success - ret is the kernel thread ID */
+    pt->tid = (unsigned long)ret;
+    
+    if (thread)
+        *thread = (unsigned long)pt;
+    
+    return 0;
+}
+
+EXPORT NORETURN void pthread_exit(void *retval)
+{
+    struct __pthread *self = _pthread_get_self();
+    
+    /* Call TLS destructors */
+    for (int i = 0; i < PTHREAD_KEYS_MAX; i++) {
+        if (_pthread_key_used[i] && _pthread_key_destructors[i] && self->tls[i]) {
+            _pthread_key_destructors[i](self->tls[i]);
+            self->tls[i] = NULL;
+        }
+    }
+    
+    /* Store return value for join */
+    self->retval = retval;
+    self->exited = 1;
+    
+    /* If this is the main thread, exit the process */
+    if (self == &_main_pthread) {
+        _exit(0);
+    }
+    
+    /* 
+     * Call bsdthread_terminate:
+     *   x0 = stack base (to free)
+     *   x1 = stack size
+     *   x2 = port (unused)
+     *   x3 = semaphore (unused)
+     *   x4 = exit value
+     *
+     * Note: The kernel won't actually free the stack while we're on it,
+     * but we pass it anyway for potential future use.
+     */
+    syscall6(SYS_bsdthread_terminate,
+             (long)self->stack_base,
+             self->stack_size,
+             0,  /* port */
+             0,  /* semaphore */
+             (long)retval,
+             0);
+    
+    /* Should never return, but just in case... */
+    _exit(0);
+}
+
+EXPORT int pthread_join(unsigned long thread, void **retval)
+{
+    struct __pthread *pt = (struct __pthread *)thread;
+    struct __pthread *self = _pthread_get_self();
+    
+    if (pt == NULL || pt == self) {
+        errno = EINVAL;
+        return EINVAL;
+    }
+    
+    if (pt->detached) {
+        errno = EINVAL;
+        return EINVAL;
+    }
+    
+    if (pt->joined) {
+        errno = EINVAL;
+        return EINVAL;
+    }
+    
+    pt->joined = 1;
+    pt->joiner = self;
+    
+    /* Busy-wait for thread to exit (simple implementation) */
+    /* TODO: Use proper kernel-level thread join when available */
+    while (!pt->exited) {
+        /* Yield to other threads */
+        syscall0(SYS_nanosleep);  /* Short sleep */
+    }
+    
+    /* Get return value */
+    if (retval)
+        *retval = pt->retval;
+    
+    /* Free thread resources */
+    if (pt->stack_base) {
+        syscall2(SYS_munmap, (long)pt->stack_base, pt->stack_size);
+    }
+    _pthread_free(pt);
+    
+    return 0;
+}
+
+EXPORT int pthread_detach(unsigned long thread)
+{
+    struct __pthread *pt = (struct __pthread *)thread;
+    
+    if (pt == NULL) {
+        errno = ESRCH;
+        return ESRCH;
+    }
+    
+    if (pt->joined) {
+        errno = EINVAL;
+        return EINVAL;
+    }
+    
+    pt->detached = 1;
+    
+    /* If thread already exited, free resources now */
+    if (pt->exited && pt->stack_base) {
+        syscall2(SYS_munmap, (long)pt->stack_base, pt->stack_size);
+        _pthread_free(pt);
+    }
+    
+    return 0;
+}
+
+EXPORT int pthread_cancel(unsigned long thread)
+{
+    struct __pthread *pt = (struct __pthread *)thread;
+    
+    if (pt == NULL) {
+        errno = ESRCH;
+        return ESRCH;
+    }
+    
+    /* TODO: Implement thread cancellation properly */
+    /* For now, just mark as cancelled - thread should check cancel state */
+    errno = ESRCH;
+    return ESRCH;
+}
+
+/* Thread attributes (stubs) */
+EXPORT int pthread_attr_init(void *attr)
+{
+    if (attr) memset(attr, 0, sizeof(unsigned long));
+    return 0;
+}
+
+EXPORT int pthread_attr_destroy(void *attr)
+{
+    (void)attr;
+    return 0;
+}
+
+EXPORT int pthread_attr_setdetachstate(void *attr, int detachstate)
+{
+    (void)attr;
+    (void)detachstate;
+    return 0;
+}
+
+EXPORT int pthread_attr_getdetachstate(const void *attr, int *detachstate)
+{
+    (void)attr;
+    if (detachstate) *detachstate = 0; /* PTHREAD_CREATE_JOINABLE */
+    return 0;
+}
+
+EXPORT int pthread_attr_setstacksize(void *attr, size_t stacksize)
+{
+    (void)attr;
+    (void)stacksize;
+    return 0;
+}
+
+EXPORT int pthread_attr_getstacksize(const void *attr, size_t *stacksize)
+{
+    (void)attr;
+    if (stacksize) *stacksize = 8 * 1024 * 1024; /* 8MB default */
+    return 0;
+}
+
+/* Scheduling (stubs) */
+EXPORT int pthread_setschedparam(unsigned long thread, int policy, const void *param)
+{
+    (void)thread;
+    (void)policy;
+    (void)param;
+    return 0;
+}
+
+EXPORT int pthread_getschedparam(unsigned long thread, int *policy, void *param)
+{
+    (void)thread;
+    if (policy) *policy = 0; /* SCHED_OTHER */
+    if (param) memset(param, 0, sizeof(int));
+    return 0;
+}
+
+EXPORT int pthread_yield(void)
+{
+    /* No-op in single-threaded mode */
+    return 0;
+}
+
+/* Cancel state (stubs) */
+EXPORT int pthread_setcancelstate(int state, int *oldstate)
+{
+    (void)state;
+    if (oldstate) *oldstate = 0; /* PTHREAD_CANCEL_ENABLE */
+    return 0;
+}
+
+EXPORT int pthread_setcanceltype(int type, int *oldtype)
+{
+    (void)type;
+    if (oldtype) *oldtype = 0; /* PTHREAD_CANCEL_DEFERRED */
+    return 0;
+}
+
+EXPORT void pthread_testcancel(void)
+{
+    /* No-op */
+}
+
+/* ============================================================================
+ * Mutex Implementation (works in single-threaded mode, ready for multi)
+ * ============================================================================ */
+
+/* Simple spinlock for mutex implementation */
+static inline void _spin_lock(volatile int *lock)
+{
+    while (__sync_lock_test_and_set(lock, 1)) {
+        while (*lock) {
+            /* spin */
+        }
+    }
+}
+
+static inline void _spin_unlock(volatile int *lock)
+{
+    __sync_lock_release(lock);
+}
+
+EXPORT int pthread_mutex_init(void *mutex_ptr, const void *attr)
+{
+    struct {
+        int type;
+        int locked;
+        unsigned long owner;
+        int recursion;
+        volatile int spinlock;
+    } *mutex = mutex_ptr;
+    
+    memset(mutex, 0, sizeof(*mutex));
+    if (attr) {
+        const struct { int type; } *a = attr;
+        mutex->type = a->type;
+    }
+    return 0;
+}
+
+EXPORT int pthread_mutex_destroy(void *mutex_ptr)
+{
+    struct {
+        int type;
+        int locked;
+        unsigned long owner;
+        int recursion;
+        volatile int spinlock;
+    } *mutex = mutex_ptr;
+    
+    if (mutex->locked)
+        return EBUSY;
+    return 0;
+}
+
+EXPORT int pthread_mutex_lock(void *mutex_ptr)
+{
+    struct {
+        int type;
+        int locked;
+        unsigned long owner;
+        int recursion;
+        volatile int spinlock;
+    } *mutex = mutex_ptr;
+    
+    unsigned long self = pthread_self();
+    
+    _spin_lock(&mutex->spinlock);
+    
+    if (mutex->locked && mutex->owner == self) {
+        /* Already own the lock */
+        if (mutex->type == 2 /* PTHREAD_MUTEX_RECURSIVE */) {
+            mutex->recursion++;
+            _spin_unlock(&mutex->spinlock);
+            return 0;
+        } else if (mutex->type == 1 /* PTHREAD_MUTEX_ERRORCHECK */) {
+            _spin_unlock(&mutex->spinlock);
+            return EDEADLK;
+        }
+        /* PTHREAD_MUTEX_NORMAL: undefined behavior, will deadlock */
+    }
+    
+    /* Wait for lock (spin in single-threaded mode) */
+    while (mutex->locked) {
+        _spin_unlock(&mutex->spinlock);
+        /* In multi-threaded mode, we'd yield or sleep here */
+        _spin_lock(&mutex->spinlock);
+    }
+    
+    mutex->locked = 1;
+    mutex->owner = self;
+    mutex->recursion = 1;
+    
+    _spin_unlock(&mutex->spinlock);
+    return 0;
+}
+
+EXPORT int pthread_mutex_trylock(void *mutex_ptr)
+{
+    struct {
+        int type;
+        int locked;
+        unsigned long owner;
+        int recursion;
+        volatile int spinlock;
+    } *mutex = mutex_ptr;
+    
+    unsigned long self = pthread_self();
+    
+    _spin_lock(&mutex->spinlock);
+    
+    if (mutex->locked) {
+        if (mutex->owner == self && mutex->type == 2 /* RECURSIVE */) {
+            mutex->recursion++;
+            _spin_unlock(&mutex->spinlock);
+            return 0;
+        }
+        _spin_unlock(&mutex->spinlock);
+        return EBUSY;
+    }
+    
+    mutex->locked = 1;
+    mutex->owner = self;
+    mutex->recursion = 1;
+    
+    _spin_unlock(&mutex->spinlock);
+    return 0;
+}
+
+EXPORT int pthread_mutex_unlock(void *mutex_ptr)
+{
+    struct {
+        int type;
+        int locked;
+        unsigned long owner;
+        int recursion;
+        volatile int spinlock;
+    } *mutex = mutex_ptr;
+    
+    unsigned long self = pthread_self();
+    
+    _spin_lock(&mutex->spinlock);
+    
+    if (!mutex->locked || mutex->owner != self) {
+        _spin_unlock(&mutex->spinlock);
+        return mutex->type == 1 ? EPERM : 0;
+    }
+    
+    if (mutex->type == 2 /* RECURSIVE */ && mutex->recursion > 1) {
+        mutex->recursion--;
+        _spin_unlock(&mutex->spinlock);
+        return 0;
+    }
+    
+    mutex->locked = 0;
+    mutex->owner = 0;
+    mutex->recursion = 0;
+    
+    _spin_unlock(&mutex->spinlock);
+    return 0;
+}
+
+EXPORT int pthread_mutex_timedlock(void *mutex, const void *abstime)
+{
+    (void)abstime;
+    /* For now, just do a regular lock (no timeout support) */
+    return pthread_mutex_lock(mutex);
+}
+
+/* Mutex attributes */
+EXPORT int pthread_mutexattr_init(void *attr)
+{
+    if (attr) memset(attr, 0, sizeof(int));
+    return 0;
+}
+
+EXPORT int pthread_mutexattr_destroy(void *attr)
+{
+    (void)attr;
+    return 0;
+}
+
+EXPORT int pthread_mutexattr_settype(void *attr_ptr, int type)
+{
+    struct { int type; } *attr = attr_ptr;
+    if (type < 0 || type > 2) return EINVAL;
+    attr->type = type;
+    return 0;
+}
+
+EXPORT int pthread_mutexattr_gettype(const void *attr_ptr, int *type)
+{
+    const struct { int type; } *attr = attr_ptr;
+    if (type) *type = attr->type;
+    return 0;
+}
+
+/* ============================================================================
+ * Condition Variable Implementation
+ * ============================================================================ */
+
+EXPORT int pthread_cond_init(void *cond_ptr, const void *attr)
+{
+    (void)attr;
+    memset(cond_ptr, 0, 24); /* sizeof pthread_cond_t */
+    return 0;
+}
+
+EXPORT int pthread_cond_destroy(void *cond_ptr)
+{
+    (void)cond_ptr;
+    return 0;
+}
+
+EXPORT int pthread_cond_wait(void *cond_ptr, void *mutex_ptr)
+{
+    struct {
+        volatile int waiters;
+        volatile int signal_count;
+        void *mutex;
+    } *cond = cond_ptr;
+    
+    cond->mutex = mutex_ptr;
+    cond->waiters++;
+    
+    int saved_signal = cond->signal_count;
+    
+    pthread_mutex_unlock(mutex_ptr);
+    
+    /* Wait for signal (busy wait in single-threaded mode) */
+    while (cond->signal_count == saved_signal) {
+        /* In real multi-threaded mode, we'd sleep here */
+        /* For single-threaded, this will spin forever - caller's bug */
+        struct _timespec ts = { 0, 1000000 }; /* 1ms */
+        nanosleep(&ts, NULL);
+    }
+    
+    cond->waiters--;
+    
+    pthread_mutex_lock(mutex_ptr);
+    return 0;
+}
+
+EXPORT int pthread_cond_timedwait(void *cond_ptr, void *mutex_ptr, const void *abstime)
+{
+    (void)abstime;
+    /* For now, just do regular wait (no timeout) */
+    return pthread_cond_wait(cond_ptr, mutex_ptr);
+}
+
+EXPORT int pthread_cond_signal(void *cond_ptr)
+{
+    struct {
+        volatile int waiters;
+        volatile int signal_count;
+        void *mutex;
+    } *cond = cond_ptr;
+    
+    if (cond->waiters > 0) {
+        cond->signal_count++;
+    }
+    return 0;
+}
+
+EXPORT int pthread_cond_broadcast(void *cond_ptr)
+{
+    struct {
+        volatile int waiters;
+        volatile int signal_count;
+        void *mutex;
+    } *cond = cond_ptr;
+    
+    cond->signal_count += cond->waiters;
+    return 0;
+}
+
+/* Condition variable attributes */
+EXPORT int pthread_condattr_init(void *attr)
+{
+    if (attr) memset(attr, 0, sizeof(int));
+    return 0;
+}
+
+EXPORT int pthread_condattr_destroy(void *attr)
+{
+    (void)attr;
+    return 0;
+}
+
+/* ============================================================================
+ * Read-Write Lock Implementation
+ * ============================================================================ */
+
+EXPORT int pthread_rwlock_init(void *rwlock_ptr, const void *attr)
+{
+    (void)attr;
+    memset(rwlock_ptr, 0, 24); /* sizeof pthread_rwlock_t */
+    return 0;
+}
+
+EXPORT int pthread_rwlock_destroy(void *rwlock_ptr)
+{
+    (void)rwlock_ptr;
+    return 0;
+}
+
+EXPORT int pthread_rwlock_rdlock(void *rwlock_ptr)
+{
+    struct {
+        volatile int readers;
+        volatile int writer;
+        volatile int writer_waiting;
+        unsigned long writer_tid;
+        volatile int spinlock;
+    } *rwlock = rwlock_ptr;
+    
+    _spin_lock(&rwlock->spinlock);
+    
+    while (rwlock->writer || rwlock->writer_waiting) {
+        _spin_unlock(&rwlock->spinlock);
+        struct _timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+        _spin_lock(&rwlock->spinlock);
+    }
+    
+    rwlock->readers++;
+    _spin_unlock(&rwlock->spinlock);
+    return 0;
+}
+
+EXPORT int pthread_rwlock_tryrdlock(void *rwlock_ptr)
+{
+    struct {
+        volatile int readers;
+        volatile int writer;
+        volatile int writer_waiting;
+        unsigned long writer_tid;
+        volatile int spinlock;
+    } *rwlock = rwlock_ptr;
+    
+    _spin_lock(&rwlock->spinlock);
+    
+    if (rwlock->writer || rwlock->writer_waiting) {
+        _spin_unlock(&rwlock->spinlock);
+        return EBUSY;
+    }
+    
+    rwlock->readers++;
+    _spin_unlock(&rwlock->spinlock);
+    return 0;
+}
+
+EXPORT int pthread_rwlock_wrlock(void *rwlock_ptr)
+{
+    struct {
+        volatile int readers;
+        volatile int writer;
+        volatile int writer_waiting;
+        unsigned long writer_tid;
+        volatile int spinlock;
+    } *rwlock = rwlock_ptr;
+    
+    unsigned long self = pthread_self();
+    
+    _spin_lock(&rwlock->spinlock);
+    rwlock->writer_waiting++;
+    
+    while (rwlock->readers > 0 || rwlock->writer) {
+        _spin_unlock(&rwlock->spinlock);
+        struct _timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+        _spin_lock(&rwlock->spinlock);
+    }
+    
+    rwlock->writer_waiting--;
+    rwlock->writer = 1;
+    rwlock->writer_tid = self;
+    
+    _spin_unlock(&rwlock->spinlock);
+    return 0;
+}
+
+EXPORT int pthread_rwlock_trywrlock(void *rwlock_ptr)
+{
+    struct {
+        volatile int readers;
+        volatile int writer;
+        volatile int writer_waiting;
+        unsigned long writer_tid;
+        volatile int spinlock;
+    } *rwlock = rwlock_ptr;
+    
+    _spin_lock(&rwlock->spinlock);
+    
+    if (rwlock->readers > 0 || rwlock->writer) {
+        _spin_unlock(&rwlock->spinlock);
+        return EBUSY;
+    }
+    
+    rwlock->writer = 1;
+    rwlock->writer_tid = pthread_self();
+    
+    _spin_unlock(&rwlock->spinlock);
+    return 0;
+}
+
+EXPORT int pthread_rwlock_unlock(void *rwlock_ptr)
+{
+    struct {
+        volatile int readers;
+        volatile int writer;
+        volatile int writer_waiting;
+        unsigned long writer_tid;
+        volatile int spinlock;
+    } *rwlock = rwlock_ptr;
+    
+    _spin_lock(&rwlock->spinlock);
+    
+    if (rwlock->writer) {
+        rwlock->writer = 0;
+        rwlock->writer_tid = 0;
+    } else if (rwlock->readers > 0) {
+        rwlock->readers--;
+    }
+    
+    _spin_unlock(&rwlock->spinlock);
+    return 0;
+}
+
+/* RW lock attributes */
+EXPORT int pthread_rwlockattr_init(void *attr)
+{
+    if (attr) memset(attr, 0, sizeof(int));
+    return 0;
+}
+
+EXPORT int pthread_rwlockattr_destroy(void *attr)
+{
+    (void)attr;
+    return 0;
+}
+
+/* ============================================================================
+ * Thread-Specific Data (TLS) Implementation
+ * ============================================================================ */
+
+EXPORT int pthread_key_create(unsigned int *key, void (*destructor)(void *))
+{
+    _pthread_init();
+    
+    if (_pthread_next_key >= PTHREAD_KEYS_MAX) {
+        return EAGAIN;
+    }
+    
+    *key = _pthread_next_key;
+    _pthread_key_destructors[_pthread_next_key] = destructor;
+    _pthread_key_used[_pthread_next_key] = 1;
+    _pthread_next_key++;
+    
+    return 0;
+}
+
+EXPORT int pthread_key_delete(unsigned int key)
+{
+    if (key >= PTHREAD_KEYS_MAX || !_pthread_key_used[key])
+        return EINVAL;
+    
+    _pthread_key_used[key] = 0;
+    _pthread_key_destructors[key] = NULL;
+    return 0;
+}
+
+EXPORT void *pthread_getspecific(unsigned int key)
+{
+    if (key >= PTHREAD_KEYS_MAX || !_pthread_key_used[key])
+        return NULL;
+    
+    struct __pthread *self = _pthread_get_self();
+    return self->tls[key];
+}
+
+EXPORT int pthread_setspecific(unsigned int key, const void *value)
+{
+    if (key >= PTHREAD_KEYS_MAX || !_pthread_key_used[key])
+        return EINVAL;
+    
+    struct __pthread *self = _pthread_get_self();
+    self->tls[key] = (void *)value;
+    return 0;
+}
+
+/* ============================================================================
+ * Once Implementation
+ * ============================================================================ */
+
+EXPORT int pthread_once(void *once_control_ptr, void (*init_routine)(void))
+{
+    struct {
+        volatile int done;
+        volatile int in_progress;
+    } *once = once_control_ptr;
+    
+    if (once->done)
+        return 0;
+    
+    if (__sync_bool_compare_and_swap(&once->in_progress, 0, 1)) {
+        init_routine();
+        once->done = 1;
+    } else {
+        /* Another thread is running init_routine, wait */
+        while (!once->done) {
+            struct _timespec ts = { 0, 1000000 };
+            nanosleep(&ts, NULL);
+        }
+    }
+    
+    return 0;
+}
+
+/* ============================================================================
+ * Spinlock Implementation
+ * ============================================================================ */
+
+EXPORT int pthread_spin_init(volatile int *lock, int pshared)
+{
+    (void)pshared;
+    *lock = 0;
+    return 0;
+}
+
+EXPORT int pthread_spin_destroy(volatile int *lock)
+{
+    (void)lock;
+    return 0;
+}
+
+EXPORT int pthread_spin_lock(volatile int *lock)
+{
+    _spin_lock(lock);
+    return 0;
+}
+
+EXPORT int pthread_spin_trylock(volatile int *lock)
+{
+    if (__sync_lock_test_and_set(lock, 1))
+        return EBUSY;
+    return 0;
+}
+
+EXPORT int pthread_spin_unlock(volatile int *lock)
+{
+    _spin_unlock(lock);
+    return 0;
+}
+
+/* ============================================================================
+ * Non-portable Extensions
+ * ============================================================================ */
+
+EXPORT int pthread_setname_np(const char *name)
+{
+    (void)name;
+    /* No-op for now */
+    return 0;
+}
+
+EXPORT int pthread_getname_np(unsigned long thread, char *name, size_t len)
+{
+    (void)thread;
+    if (name && len > 0) {
+        name[0] = '\0';
+    }
+    return 0;
+}
+
+EXPORT int pthread_threadid_np(unsigned long thread, uint64_t *thread_id)
+{
+    if (thread == 0) thread = pthread_self();
+    if (thread_id) *thread_id = thread;
+    return 0;
+}
+
+EXPORT void *pthread_get_stackaddr_np(unsigned long thread)
+{
+    (void)thread;
+    return NULL;
+}
+
+EXPORT size_t pthread_get_stacksize_np(unsigned long thread)
+{
+    (void)thread;
+    return 8 * 1024 * 1024; /* 8MB */
 }
 
 /* ============================================================================

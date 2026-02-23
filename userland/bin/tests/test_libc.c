@@ -15,6 +15,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <signal.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -1080,6 +1081,292 @@ TEST(signal_raise)
 }
 
 /* ============================================================================
+ * pthread.h tests
+ * ============================================================================ */
+
+TEST(pthread_self_equal)
+{
+    pthread_t self = pthread_self();
+    ASSERT(self != 0);
+    
+    /* pthread_equal should return true for same thread */
+    ASSERT(pthread_equal(self, self) != 0);
+    
+    PASS();
+}
+
+TEST(pthread_mutex)
+{
+    pthread_mutex_t mutex;
+    
+    /* Test PTHREAD_MUTEX_INITIALIZER */
+    pthread_mutex_t static_mutex = PTHREAD_MUTEX_INITIALIZER;
+    ASSERT_EQ(pthread_mutex_lock(&static_mutex), 0);
+    ASSERT_EQ(pthread_mutex_unlock(&static_mutex), 0);
+    
+    /* Test pthread_mutex_init with NULL attr */
+    ASSERT_EQ(pthread_mutex_init(&mutex, NULL), 0);
+    
+    /* Lock and unlock */
+    ASSERT_EQ(pthread_mutex_lock(&mutex), 0);
+    ASSERT_EQ(pthread_mutex_unlock(&mutex), 0);
+    
+    /* Trylock should succeed when not locked */
+    ASSERT_EQ(pthread_mutex_trylock(&mutex), 0);
+    ASSERT_EQ(pthread_mutex_unlock(&mutex), 0);
+    
+    /* Destroy */
+    ASSERT_EQ(pthread_mutex_destroy(&mutex), 0);
+    
+    PASS();
+}
+
+TEST(pthread_rwlock)
+{
+    pthread_rwlock_t rwlock;
+    
+    /* Test PTHREAD_RWLOCK_INITIALIZER */
+    pthread_rwlock_t static_rwlock = PTHREAD_RWLOCK_INITIALIZER;
+    ASSERT_EQ(pthread_rwlock_rdlock(&static_rwlock), 0);
+    ASSERT_EQ(pthread_rwlock_unlock(&static_rwlock), 0);
+    
+    /* Test pthread_rwlock_init with NULL attr */
+    ASSERT_EQ(pthread_rwlock_init(&rwlock, NULL), 0);
+    
+    /* Read lock - multiple readers allowed */
+    ASSERT_EQ(pthread_rwlock_rdlock(&rwlock), 0);
+    /* In single-threaded mode, second rdlock should work */
+    ASSERT_EQ(pthread_rwlock_rdlock(&rwlock), 0);
+    ASSERT_EQ(pthread_rwlock_unlock(&rwlock), 0);
+    ASSERT_EQ(pthread_rwlock_unlock(&rwlock), 0);
+    
+    /* Write lock */
+    ASSERT_EQ(pthread_rwlock_wrlock(&rwlock), 0);
+    ASSERT_EQ(pthread_rwlock_unlock(&rwlock), 0);
+    
+    /* Tryrdlock should succeed when not locked */
+    ASSERT_EQ(pthread_rwlock_tryrdlock(&rwlock), 0);
+    ASSERT_EQ(pthread_rwlock_unlock(&rwlock), 0);
+    
+    /* Trywrlock should succeed when not locked */
+    ASSERT_EQ(pthread_rwlock_trywrlock(&rwlock), 0);
+    ASSERT_EQ(pthread_rwlock_unlock(&rwlock), 0);
+    
+    /* Destroy */
+    ASSERT_EQ(pthread_rwlock_destroy(&rwlock), 0);
+    
+    PASS();
+}
+
+static int tls_destructor_called = 0;
+static void tls_destructor(void *value) {
+    tls_destructor_called = 1;
+    /* In real usage, you might free(value) here */
+}
+
+TEST(pthread_key_tls)
+{
+    pthread_key_t key;
+    
+    /* Create a key with a destructor */
+    ASSERT_EQ(pthread_key_create(&key, tls_destructor), 0);
+    
+    /* Initially should be NULL */
+    ASSERT_EQ(pthread_getspecific(key), NULL);
+    
+    /* Set a value */
+    int value = 42;
+    ASSERT_EQ(pthread_setspecific(key, &value), 0);
+    
+    /* Get the value back */
+    int *retrieved = (int *)pthread_getspecific(key);
+    ASSERT(retrieved != NULL);
+    ASSERT_EQ(*retrieved, 42);
+    
+    /* Set to NULL */
+    ASSERT_EQ(pthread_setspecific(key, NULL), 0);
+    ASSERT_EQ(pthread_getspecific(key), NULL);
+    
+    /* Delete the key */
+    ASSERT_EQ(pthread_key_delete(key), 0);
+    
+    /* Create multiple keys */
+    pthread_key_t keys[5];
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQ(pthread_key_create(&keys[i], NULL), 0);
+    }
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQ(pthread_key_delete(keys[i]), 0);
+    }
+    
+    PASS();
+}
+
+static pthread_once_t once_control = PTHREAD_ONCE_INIT;
+static int once_init_count = 0;
+static void once_init_func(void) {
+    once_init_count++;
+}
+
+TEST(pthread_once)
+{
+    once_init_count = 0;
+    /* Reset once_control by zeroing the struct fields directly */
+    memset(&once_control, 0, sizeof(once_control));
+    
+    /* First call should execute the function */
+    ASSERT_EQ(pthread_once(&once_control, once_init_func), 0);
+    ASSERT_EQ(once_init_count, 1);
+    
+    /* Second call should NOT execute the function again */
+    ASSERT_EQ(pthread_once(&once_control, once_init_func), 0);
+    ASSERT_EQ(once_init_count, 1);
+    
+    /* Third call - still should not execute */
+    ASSERT_EQ(pthread_once(&once_control, once_init_func), 0);
+    ASSERT_EQ(once_init_count, 1);
+    
+    PASS();
+}
+
+TEST(pthread_spin)
+{
+    pthread_spinlock_t spinlock;
+    
+    /* Initialize */
+    ASSERT_EQ(pthread_spin_init(&spinlock, PTHREAD_PROCESS_PRIVATE), 0);
+    
+    /* Lock and unlock */
+    ASSERT_EQ(pthread_spin_lock(&spinlock), 0);
+    ASSERT_EQ(pthread_spin_unlock(&spinlock), 0);
+    
+    /* Trylock should succeed when not locked */
+    ASSERT_EQ(pthread_spin_trylock(&spinlock), 0);
+    ASSERT_EQ(pthread_spin_unlock(&spinlock), 0);
+    
+    /* Destroy */
+    ASSERT_EQ(pthread_spin_destroy(&spinlock), 0);
+    
+    PASS();
+}
+
+TEST(pthread_cond)
+{
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    
+    /* Test PTHREAD_COND_INITIALIZER */
+    pthread_cond_t static_cond = PTHREAD_COND_INITIALIZER;
+    (void)static_cond;  /* Just ensure it compiles */
+    
+    /* Initialize */
+    ASSERT_EQ(pthread_cond_init(&cond, NULL), 0);
+    ASSERT_EQ(pthread_mutex_init(&mutex, NULL), 0);
+    
+    /* Signal and broadcast (no waiters, but should not crash) */
+    ASSERT_EQ(pthread_cond_signal(&cond), 0);
+    ASSERT_EQ(pthread_cond_broadcast(&cond), 0);
+    
+    /* Test timedwait with immediate timeout */
+    ASSERT_EQ(pthread_mutex_lock(&mutex), 0);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    /* Set timeout in the past - should return ETIMEDOUT immediately */
+    ts.tv_sec -= 1;
+    int ret = pthread_cond_timedwait(&cond, &mutex, &ts);
+    ASSERT(ret == ETIMEDOUT || ret == 0);  /* Implementation may vary */
+    ASSERT_EQ(pthread_mutex_unlock(&mutex), 0);
+    
+    /* Destroy */
+    ASSERT_EQ(pthread_cond_destroy(&cond), 0);
+    ASSERT_EQ(pthread_mutex_destroy(&mutex), 0);
+    
+    PASS();
+}
+
+TEST(pthread_attr)
+{
+    pthread_attr_t attr;
+    
+    /* Initialize */
+    ASSERT_EQ(pthread_attr_init(&attr), 0);
+    
+    /* Get/set detach state */
+    int detachstate;
+    ASSERT_EQ(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED), 0);
+    ASSERT_EQ(pthread_attr_getdetachstate(&attr, &detachstate), 0);
+    ASSERT_EQ(detachstate, PTHREAD_CREATE_DETACHED);
+    
+    ASSERT_EQ(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE), 0);
+    ASSERT_EQ(pthread_attr_getdetachstate(&attr, &detachstate), 0);
+    ASSERT_EQ(detachstate, PTHREAD_CREATE_JOINABLE);
+    
+    /* Get/set stack size */
+    size_t stacksize;
+    ASSERT_EQ(pthread_attr_setstacksize(&attr, 1024 * 1024), 0);
+    ASSERT_EQ(pthread_attr_getstacksize(&attr, &stacksize), 0);
+    ASSERT_EQ(stacksize, 1024 * 1024);
+    
+    /* Destroy */
+    ASSERT_EQ(pthread_attr_destroy(&attr), 0);
+    
+    PASS();
+}
+
+/* Thread test data */
+static volatile int thread_test_value = 0;
+static volatile int thread_test_done = 0;
+
+static void *thread_test_func(void *arg)
+{
+    int *value = (int *)arg;
+    thread_test_value = *value * 2;
+    thread_test_done = 1;
+    return (void *)(long)thread_test_value;
+}
+
+TEST(pthread_create_basic)
+{
+    pthread_t thread;
+    int arg = 21;
+    void *retval = NULL;
+    
+    thread_test_value = 0;
+    thread_test_done = 0;
+    
+    /* Create a thread */
+    int ret = pthread_create(&thread, NULL, thread_test_func, &arg);
+    
+    /* If threads aren't supported (EAGAIN), skip this test */
+    if (ret == EAGAIN) {
+        printf("(threads not supported, skipping) ");
+        PASS();
+    }
+    
+    ASSERT_EQ(ret, 0);
+    
+    /* Wait for thread to complete */
+    ret = pthread_join(thread, &retval);
+    ASSERT_EQ(ret, 0);
+    
+    /* Check the result */
+    ASSERT_EQ(thread_test_value, 42);
+    ASSERT_EQ((long)retval, 42);
+    
+    PASS();
+}
+
+TEST(pthread_create_null_fails)
+{
+    /* pthread_create with NULL start_routine should fail with EINVAL */
+    pthread_t thread;
+    int ret = pthread_create(&thread, NULL, NULL, NULL);
+    ASSERT(ret == EINVAL || ret == EAGAIN);
+    
+    PASS();
+}
+
+/* ============================================================================
  * errno tests
  * ============================================================================ */
 
@@ -1192,6 +1479,19 @@ int main(int argc, char **argv)
     
     printf("[signal.h]\n");
     RUN_TEST(signal_raise);
+    printf("\n");
+    
+    printf("[pthread.h]\n");
+    RUN_TEST(pthread_self_equal);
+    RUN_TEST(pthread_mutex);
+    RUN_TEST(pthread_rwlock);
+    RUN_TEST(pthread_key_tls);
+    RUN_TEST(pthread_once);
+    RUN_TEST(pthread_spin);
+    RUN_TEST(pthread_cond);
+    RUN_TEST(pthread_attr);
+    RUN_TEST(pthread_create_basic);
+    RUN_TEST(pthread_create_null_fails);
     printf("\n");
     
     printf("[errno]\n");

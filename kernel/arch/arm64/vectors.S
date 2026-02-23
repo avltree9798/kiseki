@@ -183,6 +183,42 @@ fork_child_return:
     RESTORE_REGS 0
 
 /* ============================================================================
+ * user_thread_return - Entry point for newly created user threads (pthread)
+ *
+ * Called via the scheduler when a pthread_create'd thread gets its first
+ * context switch. The thread was set up by thread_create_user with:
+ *   - context.x30 = user_thread_return
+ *   - context.sp  = top of kernel stack (where trap frame is placed)
+ *   - context.x19 = pointer to task's vm_space (for TTBR0 switch)
+ *   - context.x20 = TLS base address (for TPIDR_EL0)
+ *
+ * We need to:
+ *   1. Switch to the thread's address space (TTBR0) - same as task
+ *   2. Set up TLS base in TPIDR_EL0
+ *   3. Enable interrupts
+ *   4. Restore the trap frame and eret to user mode
+ * ============================================================================ */
+.global user_thread_return
+user_thread_return:
+    /* x19 = pointer to task's vm_space (set by thread_create_user context)
+     * vm_space layout: [pgd (8 bytes)][asid (8 bytes)]
+     * We need TTBR0 = pgd | (asid << 48) */
+    ldr     x0, [x19, #0]       /* x0 = pgd */
+    ldr     x1, [x19, #8]       /* x1 = asid */
+    orr     x0, x0, x1, lsl #48
+    msr     ttbr0_el1, x0
+    isb                         /* Ensure TTBR0 change takes effect */
+
+    /* x20 = TLS base address - set TPIDR_EL0 for user-space pthread TLS */
+    msr     tpidr_el0, x20
+
+    /* Enable interrupts (thread starts with IRQs masked from context_switch) */
+    msr     daifclr, #0x2
+
+    /* SP already points to the trap frame. Do RESTORE_REGS 0 inline. */
+    RESTORE_REGS 0
+
+/* ============================================================================
  * Unhandled exception - minimal save and panic
  * ============================================================================ */
 _vec_unhandled:

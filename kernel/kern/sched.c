@@ -524,3 +524,189 @@ void sched_tick(void)
         }
     }
 }
+
+/* ============================================================================
+ * User Thread Creation (bsdthread_create support)
+ * ============================================================================ */
+
+/*
+ * user_thread_return - Entry point for newly created user threads
+ *
+ * Similar to fork_child_return, but for pthread_create'd threads.
+ * The thread was set up with:
+ *   - context.x30 = user_thread_return
+ *   - context.sp  = top of kernel stack (where trap frame is placed)
+ *   - context.x19 = pointer to task's vm_space (for TTBR0 switch)
+ *   - context.x20 = TLS base address (for TPIDR_EL0)
+ *
+ * Assembly trampoline defined in vectors.S
+ */
+extern void user_thread_return(void);
+
+/*
+ * thread_find - Find a thread by TID
+ */
+struct thread *thread_find(uint64_t tid)
+{
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (thread_pool[i].tid == tid && thread_pool[i].state != TH_TERM)
+            return &thread_pool[i];
+    }
+    return NULL;
+}
+
+/*
+ * thread_create_user - Create a user-mode thread within an existing task
+ *
+ * @task:     The Mach task this thread belongs to
+ * @entry:    User-space entry point (start_routine)
+ * @arg:      Argument to pass to entry (in x0)
+ * @stack:    User stack pointer (top of stack)
+ * @tls_base: Thread-local storage base address (TPIDR_EL0)
+ * @priority: Thread priority
+ *
+ * Sets up the thread to start executing at `entry` in user mode with
+ * `arg` in x0 and stack at `stack`. The TLS base is set in TPIDR_EL0.
+ *
+ * Returns the new thread on success, NULL on failure.
+ */
+struct thread *thread_create_user(struct task *task, uint64_t entry,
+                                  uint64_t arg, uint64_t stack,
+                                  uint64_t tls_base, int priority)
+{
+    if (task == NULL || task->vm_space == NULL)
+        return NULL;
+
+    struct thread *th = alloc_thread();
+    if (!th)
+        return NULL;
+
+    /* Allocate kernel stack (4 pages = 16KB) */
+    uint64_t stack_pa = pmm_alloc_pages(2);  /* 2^2 = 4 pages */
+    if (!stack_pa) {
+        th->tid = 0;
+        th->state = TH_TERM;
+        return NULL;
+    }
+
+    th->kernel_stack = (uint64_t *)stack_pa;
+    th->kernel_stack_size = 4 * PAGE_SIZE;
+    th->priority = priority;
+    th->effective_priority = priority;
+    th->sched_policy = SCHED_OTHER;
+    th->quantum = SCHED_QUANTUM_DEFAULT;
+    th->state = TH_RUN;
+    th->task = task;
+    th->wait_channel = NULL;
+    th->wait_reason = NULL;
+    th->run_next = NULL;
+    th->wait_next = NULL;
+    th->continuation = 0;
+    th->cpu = -1;
+    th->tls_base = tls_base;
+    th->detached = false;
+    th->joined = false;
+    th->exit_value = NULL;
+    th->join_waiter = NULL;
+
+    /*
+     * Set up a trap frame at the top of the kernel stack.
+     * This is what user_thread_return will restore via RESTORE_REGS.
+     */
+    uint64_t kstack_top = stack_pa + th->kernel_stack_size;
+
+    /* TF_SIZE is defined in machine/trap.h - it's the size of trap_frame */
+    /* trap_frame is: 31 regs (x0-x30) + sp + elr + spsr = 34 * 8 = 272 bytes */
+    #define TF_SIZE_LOCAL 272
+
+    uint64_t tf_base = kstack_top - TF_SIZE_LOCAL;
+    struct {
+        uint64_t regs[31];  /* x0-x30 */
+        uint64_t sp;
+        uint64_t elr;
+        uint64_t spsr;
+    } *user_tf = (void *)tf_base;
+
+    /* Zero out the trap frame */
+    for (int i = 0; i < 31; i++)
+        user_tf->regs[i] = 0;
+
+    /* x0 = arg (first argument to start_routine) */
+    user_tf->regs[0] = arg;
+
+    /* User stack pointer */
+    user_tf->sp = stack;
+
+    /* User entry point */
+    user_tf->elr = entry;
+
+    /* SPSR: EL0t (user mode), IRQs enabled */
+    /* SPSR_EL1 for EL0: M[4:0] = 0b00000 (EL0t), DAIF = 0 (all enabled) */
+    user_tf->spsr = 0x0;
+
+    /*
+     * Set up the kernel-mode context for the first context switch.
+     * context_switch will restore this, then "return" to user_thread_return.
+     *
+     * context.x30 (LR) = user_thread_return
+     * context.sp       = tf_base (where the trap frame lives)
+     * context.x19      = task->vm_space (for TTBR0 switch)
+     * context.x20      = tls_base (for TPIDR_EL0 setup)
+     */
+    th->context.x30 = (uint64_t)user_thread_return;
+    th->context.sp  = tf_base;
+    th->context.x19 = (uint64_t)task->vm_space;
+    th->context.x20 = tls_base;
+    th->context.x29 = 0;  /* FP sentinel */
+
+    /* Link thread into task's thread list */
+    th->task_next = task->threads;
+    task->threads = th;
+
+    return th;
+}
+
+/*
+ * thread_terminate - Terminate the current user thread
+ *
+ * @retval: Return value for pthread_join
+ *
+ * This is called from bsdthread_terminate syscall or when a thread's
+ * start_routine returns.
+ */
+void thread_terminate(void *retval)
+{
+    struct cpu_data *cd = get_cpu_data();
+    struct thread *th = cd->current_thread;
+
+    /* Store exit value for join */
+    th->exit_value = retval;
+
+    /* Wake up any thread waiting to join us */
+    if (th->join_waiter) {
+        thread_unblock(th->join_waiter);
+        th->join_waiter = NULL;
+    }
+
+    /* Remove from task's thread list */
+    if (th->task) {
+        struct thread **pp = &th->task->threads;
+        while (*pp) {
+            if (*pp == th) {
+                *pp = th->task_next;
+                break;
+            }
+            pp = &(*pp)->task_next;
+        }
+    }
+
+    /* Mark as terminated */
+    th->state = TH_TERM;
+
+    /* Switch to next thread (never returns) */
+    sched_switch();
+
+    /* Should never reach here */
+    panic("thread_terminate: sched_switch returned");
+    __builtin_unreachable();
+}

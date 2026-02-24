@@ -157,6 +157,13 @@ populate_linux() {
         echo "  Installed /usr/lib/libSystem.B.dylib"
     fi
 
+    # Install libobjc.A.dylib (Objective-C runtime)
+    if [ -f "${BUILDDIR}/lib/libobjc.A.dylib" ]; then
+        sudo cp "${BUILDDIR}/lib/libobjc.A.dylib" "${MOUNT_DIR}/usr/lib/libobjc.A.dylib"
+        sudo chmod 755 "${MOUNT_DIR}/usr/lib/libobjc.A.dylib"
+        echo "  Installed /usr/lib/libobjc.A.dylib"
+    fi
+
     # Install hello test binary
     if [ -f "${MACHO_HELLO}" ]; then
         sudo cp "${MACHO_HELLO}" "${MOUNT_DIR}/bin/hello"
@@ -266,6 +273,11 @@ DIRS
     # Install libSystem.B.dylib
     if [ -f "${BUILDDIR}/lib/libSystem.B.dylib" ]; then
         echo "write ${BUILDDIR}/lib/libSystem.B.dylib /usr/lib/libSystem.B.dylib" >> "${CMDS}"
+    fi
+
+    # Install libobjc.A.dylib (Objective-C runtime)
+    if [ -f "${BUILDDIR}/lib/libobjc.A.dylib" ]; then
+        echo "write ${BUILDDIR}/lib/libobjc.A.dylib /usr/lib/libobjc.A.dylib" >> "${CMDS}"
     fi
 
     # Install TCC from tcc build directory

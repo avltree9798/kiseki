@@ -1,0 +1,40 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _malloc, _calloc, _realloc, _free, _abort, _atexit, _exit,
+                   _memcpy, _memmove, _memset, _memcmp, _bzero, _memchr,
+                   _memset_pattern16,
+                   _strlen, _strcmp, _strncmp, _strcpy, _strncpy, _strdup, _strstr, _strchr, _strrchr, _strlcpy,
+                   _strtol, _atoi,
+                   _printf, _fprintf, _snprintf, _vsnprintf, _vfprintf, _fwrite,
+                   ___stderrp, ___stdoutp,
+                   _getenv,
+                   _mmap, _munmap, _mprotect,
+                   _getpagesize, _sysconf,
+                   _pthread_mutex_init, _pthread_mutex_lock, _pthread_mutex_unlock, _pthread_mutex_destroy,
+                   _pthread_mutexattr_init, _pthread_mutexattr_settype, _pthread_mutexattr_destroy,
+                   _pthread_key_create, _pthread_key_delete, _pthread_setspecific, _pthread_getspecific,
+                   _pthread_once, _pthread_self,
+                   _write, _read, _close, _open, _isatty,
+                   ___cxa_atexit, ___cxa_guard_acquire, ___cxa_guard_release, ___cxa_guard_abort,
+                   ___cxa_pure_virtual,
+                   ___cxa_throw, ___cxa_begin_catch, ___cxa_end_catch,
+                   ___cxa_allocate_exception, ___cxa_free_exception,
+                   ___gxx_personality_v0,
+                   __Unwind_RaiseException, __Unwind_Resume,
+                   __Unwind_GetLanguageSpecificData, __Unwind_GetIP,
+                   __Unwind_GetRegionStart, __Unwind_SetIP, __Unwind_SetGR,
+                   __Znwm, __Znam, __ZdlPv, __ZdaPv, __ZdlPvm, __ZdaPvm,
+                   _errno,
+                   ___stack_chk_fail, ___stack_chk_guard,
+                   _sleep,
+                   ___assert_rtn,
+                   ___clear_cache,
+                   __ZSt9terminatev,
+                   __ZNSt3__122__libcpp_verbose_abortEPKcz ]
+...

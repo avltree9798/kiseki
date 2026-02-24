@@ -921,6 +921,9 @@ EXPORT void *calloc(size_t nmemb, size_t size)
 static void (*_atexit_funcs[MAX_ATEXIT])(void);
 static int _atexit_count = 0;
 
+/* Forward declaration — defined with __cxa_atexit below */
+static void _cxa_finalize_all(void);
+
 EXPORT int atexit(void (*func)(void))
 {
     if (_atexit_count >= MAX_ATEXIT)
@@ -1170,6 +1173,8 @@ EXPORT NORETURN void exit(int status)
     syscall3(SYS_write, 2, (long)numbuf, idx);
     syscall3(SYS_write, 2, (long)"\n", 1);
 #endif
+    /* Run C++ destructors registered via __cxa_atexit (LIFO) */
+    _cxa_finalize_all();
     /* Call atexit handlers in reverse */
     while (_atexit_count > 0) {
         _atexit_count--;
@@ -2555,12 +2560,258 @@ EXPORT void longjmp(jmp_buf buf, int val)
  * __cxa_atexit (C++ ABI support - needed by some C programs too)
  * ============================================================================ */
 
+/*
+ * Proper __cxa_atexit with argument support.
+ *
+ * C++ uses __cxa_atexit to register destructors for static objects.
+ * Each registration includes the destructor function, an argument
+ * (typically `this`), and a DSO handle for unload ordering.
+ * We maintain a separate list from plain atexit() to preserve the
+ * argument.  At exit time these run in LIFO order before atexit().
+ */
+struct __cxa_atexit_entry {
+    void (*func)(void *);
+    void *arg;
+    void *dso_handle;
+};
+
+#define MAX_CXA_ATEXIT 64
+static struct __cxa_atexit_entry _cxa_entries[MAX_CXA_ATEXIT];
+static int _cxa_count = 0;
+
 EXPORT int __cxa_atexit(void (*func)(void *), void *arg, void *dso_handle)
 {
-    (void)arg;
-    (void)dso_handle;
-    /* Simplify: treat as atexit */
-    return atexit((void (*)(void))func);
+    if (_cxa_count >= MAX_CXA_ATEXIT)
+        return -1;
+    _cxa_entries[_cxa_count].func = func;
+    _cxa_entries[_cxa_count].arg = arg;
+    _cxa_entries[_cxa_count].dso_handle = dso_handle;
+    _cxa_count++;
+    return 0;
+}
+
+/* Called by exit() — run C++ destructors in reverse order */
+static void _cxa_finalize_all(void)
+{
+    for (int i = _cxa_count - 1; i >= 0; i--) {
+        if (_cxa_entries[i].func)
+            _cxa_entries[i].func(_cxa_entries[i].arg);
+    }
+    _cxa_count = 0;
+}
+
+/* ============================================================================
+ * C++ Runtime Support
+ *
+ * Minimal C++ ABI support required by Objective-C++ and C++ code.
+ * These symbols are normally provided by libc++abi / libcxxrt.
+ * ============================================================================ */
+
+/* operator new / operator delete — delegate to malloc/free */
+EXPORT void *_Znwm(unsigned long size)           /* operator new(size_t) */
+{
+    void *p = malloc(size);
+    if (!p) abort();
+    return p;
+}
+
+EXPORT void *_Znam(unsigned long size)           /* operator new[](size_t) */
+{
+    void *p = malloc(size);
+    if (!p) abort();
+    return p;
+}
+
+EXPORT void _ZdlPv(void *ptr)                    /* operator delete(void*) */
+{
+    free(ptr);
+}
+
+EXPORT void _ZdaPv(void *ptr)                    /* operator delete[](void*) */
+{
+    free(ptr);
+}
+
+EXPORT void _ZdlPvm(void *ptr, unsigned long sz) /* operator delete(void*, size_t) */
+{
+    (void)sz;
+    free(ptr);
+}
+
+EXPORT void _ZdaPvm(void *ptr, unsigned long sz) /* operator delete[](void*, size_t) */
+{
+    (void)sz;
+    free(ptr);
+}
+
+/*
+ * __cxa_guard_acquire / __cxa_guard_release / __cxa_guard_abort
+ *
+ * Thread-safe initialisation of C++ static local variables.
+ * The guard is a 64-bit value; byte 0 indicates "initialised",
+ * byte 1 indicates "initialisation in progress".
+ *
+ * Reference: Itanium C++ ABI section 3.3.2
+ */
+EXPORT int __cxa_guard_acquire(volatile long long *guard)
+{
+    char *g = (char *)guard;
+    if (g[0]) return 0;  /* Already initialised */
+
+    /* Spin if another thread is initialising */
+    while (__sync_bool_compare_and_swap(&g[1], 0, 1) == 0) {
+        /* Wait for the other thread */
+        if (g[0]) return 0;  /* It finished while we waited */
+    }
+
+    if (g[0]) {
+        g[1] = 0;  /* Release — was already done */
+        return 0;
+    }
+    return 1;  /* Caller should initialise */
+}
+
+EXPORT void __cxa_guard_release(volatile long long *guard)
+{
+    char *g = (char *)guard;
+    __sync_synchronize();
+    g[0] = 1;  /* Mark as initialised */
+    g[1] = 0;  /* Release in-progress flag */
+}
+
+EXPORT void __cxa_guard_abort(volatile long long *guard)
+{
+    char *g = (char *)guard;
+    g[1] = 0;  /* Release in-progress flag without setting initialised */
+}
+
+/* __cxa_pure_virtual — called when a pure virtual function is invoked */
+EXPORT void __cxa_pure_virtual(void)
+{
+    const char msg[] = "Pure virtual function called\n";
+    write(2, msg, sizeof(msg) - 1);
+    abort();
+}
+
+/* __cxa_throw / __cxa_begin_catch / __cxa_end_catch — exception handling stubs.
+ * Full C++ exception handling requires libunwind + a real __cxa_throw.
+ * For now, throw aborts. */
+EXPORT void __cxa_throw(void *obj, void *tinfo, void (*dest)(void *))
+{
+    (void)obj; (void)tinfo; (void)dest;
+    const char msg[] = "C++ exception thrown (no handler)\n";
+    write(2, msg, sizeof(msg) - 1);
+    abort();
+}
+
+EXPORT void *__cxa_begin_catch(void *exc)
+{
+    return exc;
+}
+
+EXPORT void __cxa_end_catch(void)
+{
+}
+
+EXPORT void *__cxa_allocate_exception(unsigned long size)
+{
+    return malloc(size);
+}
+
+EXPORT void __cxa_free_exception(void *exc)
+{
+    free(exc);
+}
+
+/* __gxx_personality_v0 — C++ exception personality function stub */
+EXPORT int __gxx_personality_v0(void)
+{
+    return 0;
+}
+
+/* _Unwind stubs — needed by eh_personality.c */
+EXPORT int _Unwind_RaiseException(void *exc)
+{
+    (void)exc;
+    abort();
+    return 0;
+}
+
+EXPORT void _Unwind_Resume(void *exc)
+{
+    (void)exc;
+    abort();
+}
+
+EXPORT int _Unwind_GetLanguageSpecificData(void *ctx)
+{
+    (void)ctx;
+    return 0;
+}
+
+EXPORT unsigned long _Unwind_GetIP(void *ctx)
+{
+    (void)ctx;
+    return 0;
+}
+
+EXPORT unsigned long _Unwind_GetRegionStart(void *ctx)
+{
+    (void)ctx;
+    return 0;
+}
+
+EXPORT void _Unwind_SetIP(void *ctx, unsigned long ip)
+{
+    (void)ctx; (void)ip;
+}
+
+EXPORT void _Unwind_SetGR(void *ctx, int reg, unsigned long val)
+{
+    (void)ctx; (void)reg; (void)val;
+}
+
+/* std::terminate() — C++ termination handler.
+ * Called when exception handling fails or an exception escapes main/noexcept.
+ * Mangled name: _ZSt9terminatev */
+EXPORT NORETURN void _ZSt9terminatev(void)
+{
+    static const char msg[] = "std::terminate() called\n";
+    syscall3(SYS_write, 2, (long)msg, sizeof(msg) - 1);
+    abort();
+    __builtin_unreachable();
+}
+
+/* std::__1::__libcpp_verbose_abort — libc++ fatal error handler.
+ * Called by libc++ when a fatal condition is detected (e.g., debug assertions).
+ * Mangled name: _ZNSt3__122__libcpp_verbose_abortEPKcz */
+EXPORT NORETURN void _ZNSt3__122__libcpp_verbose_abortEPKcz(const char *fmt, ...)
+{
+    /* Best-effort: print a short message then abort */
+    static const char msg[] = "__libcpp_verbose_abort: fatal libc++ error\n";
+    syscall3(SYS_write, 2, (long)msg, sizeof(msg) - 1);
+    abort();
+    __builtin_unreachable();
+}
+
+/* __clear_cache — Flush instruction cache for self-modifying code.
+ * On ARM64, this ensures modified code is visible to the instruction fetch unit. */
+EXPORT void __clear_cache(void *start, void *end)
+{
+    unsigned long cache_line_size = 64;
+    unsigned char *p;
+    /* Clean data cache */
+    p = (unsigned char *)((unsigned long)start & ~(cache_line_size - 1));
+    for (; p < (unsigned char *)end; p += cache_line_size) {
+        __asm__ volatile("dc cvau, %0" :: "r"(p) : "memory");
+    }
+    __asm__ volatile("dsb ish" ::: "memory");
+    /* Invalidate instruction cache */
+    p = (unsigned char *)((unsigned long)start & ~(cache_line_size - 1));
+    for (; p < (unsigned char *)end; p += cache_line_size) {
+        __asm__ volatile("ic ivau, %0" :: "r"(p) : "memory");
+    }
+    __asm__ volatile("dsb ish\n\tisb" ::: "memory");
 }
 
 /* ============================================================================
@@ -5135,6 +5386,29 @@ EXPORT int getpagesize(void)
 EXPORT int getdtablesize(void)
 {
     return 256;  /* VFS_MAX_FD */
+}
+
+/* sysconf - get configurable system variables */
+EXPORT long sysconf(int name)
+{
+    switch (name) {
+    case 11: /* _SC_PAGESIZE */
+        return 4096;
+    case 5:  /* _SC_OPEN_MAX */
+        return 256;
+    case 1:  /* _SC_ARG_MAX */
+        return 262144;
+    case 2:  /* _SC_CHILD_MAX */
+        return 256;
+    case 3:  /* _SC_CLK_TCK */
+        return 100;
+    case 57: /* _SC_NPROCESSORS_CONF */
+    case 58: /* _SC_NPROCESSORS_ONLN */
+        return 4;
+    default:
+        errno = EINVAL;
+        return -1;
+    }
 }
 
 /* Note: sync() is already defined earlier in the file */

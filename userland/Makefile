@@ -28,9 +28,9 @@ COREUTILS := cat cp mv rm ln touch mkdir rmdir \
 # Networking tools
 NETTOOLS := ifconfig ping nc curl ntpdate
 
-.PHONY: all dyld libsystem iokit bash coreutils nettools sbin tcc tests clean $(COREUTILS) $(NETTOOLS)
+.PHONY: all dyld libsystem iokit libobjc bash coreutils nettools sbin tcc tests clean $(COREUTILS) $(NETTOOLS)
 
-all: dyld libsystem iokit sbin bash coreutils nettools tcc tests
+all: dyld libsystem iokit libobjc sbin bash coreutils nettools tcc tests
 
 tcc:
 	@echo "=== Building TCC ==="
@@ -47,6 +47,10 @@ libsystem:
 iokit:
 	@echo "=== Building IOKit.framework ==="
 	@$(MAKE) -C IOKit
+
+libobjc:
+	@echo "=== Building libobjc.A.dylib ==="
+	@$(MAKE) -C libobjc
 
 sbin:
 	@echo "=== Building sbin (init/getty/login) ==="
@@ -74,6 +78,7 @@ clean:
 	@$(MAKE) -C dyld clean
 	@$(MAKE) -C libSystem clean
 	@$(MAKE) -C IOKit clean
+	@$(MAKE) -C libobjc clean
 	@$(MAKE) -C sbin clean
 	@$(MAKE) -C bin/bash clean
 	@$(MAKE) -C bin/tcc clean

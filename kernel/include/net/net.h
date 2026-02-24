@@ -25,10 +25,14 @@
  * ============================================================================ */
 
 #define AF_UNSPEC       0       /* Unspecified */
+#define AF_UNIX         1       /* Unix domain (local IPC) */
+#define AF_LOCAL        AF_UNIX /* POSIX alias */
 #define AF_INET         2       /* IPv4 */
 #define AF_INET6        30      /* IPv6 (XNU value) */
 
 /* Protocol family aliases */
+#define PF_UNIX         AF_UNIX
+#define PF_LOCAL        AF_LOCAL
 #define PF_INET         AF_INET
 #define PF_INET6        AF_INET6
 
@@ -86,6 +90,29 @@ struct sockaddr_in {
 #define INADDR_ANY          0x00000000U     /* 0.0.0.0 */
 #define INADDR_BROADCAST    0xFFFFFFFFU     /* 255.255.255.255 */
 #define INADDR_LOOPBACK     0x7F000001U     /* 127.0.0.1 (host order) */
+
+/*
+ * Unix domain socket address (XNU bsd/sys/un.h)
+ */
+#define UNIX_PATH_MAX   104     /* XNU uses 104 (sizeof(struct sockaddr_un) = 106) */
+
+struct sockaddr_un {
+    uint8_t     sun_len;                /* Total length */
+    uint8_t     sun_family;             /* AF_UNIX */
+    char        sun_path[UNIX_PATH_MAX]; /* Path name */
+};
+
+/*
+ * Unix domain protocol control block
+ *
+ * Modelled on XNU's struct unpcb (bsd/sys/unpcb.h).
+ * Each AF_UNIX socket has one of these as so_pcb.
+ */
+struct unpcb {
+    int         unp_peer;               /* Peer socket index (-1 if none) */
+    char        unp_path[UNIX_PATH_MAX]; /* Bound path (empty if unnamed) */
+    bool        unp_bound;              /* True if bind() was called */
+};
 
 /* ============================================================================
  * Byte Order Conversion (ARM64 is little-endian)
@@ -157,23 +184,25 @@ struct sockbuf {
 struct socket {
     int                 so_type;        /* SOCK_STREAM, SOCK_DGRAM, etc. */
     int                 so_protocol;    /* IPPROTO_TCP, IPPROTO_UDP */
-    int                 so_family;      /* AF_INET, AF_INET6 */
+    int                 so_family;      /* AF_INET, AF_UNIX, AF_INET6 */
     int                 so_state;       /* SS_UNCONNECTED, SS_CONNECTED, ... */
     int                 so_error;       /* Pending error code */
     int                 so_options;     /* SO_REUSEADDR, SO_KEEPALIVE, etc. */
     int                 so_sflags;      /* Shutdown flags (SS_CANTRCVMORE, etc.) */
     bool                so_active;      /* Slot is allocated */
 
-    /* Local and remote addresses */
-    struct sockaddr_in  so_local;       /* Local (bound) address */
-    struct sockaddr_in  so_remote;      /* Remote (connected) address */
+    /* Local and remote addresses (family-specific) */
+    struct sockaddr_in  so_local;       /* AF_INET local address */
+    struct sockaddr_in  so_remote;      /* AF_INET remote address */
 
     /* Data buffers */
     struct sockbuf      so_snd;         /* Send buffer */
     struct sockbuf      so_rcv;         /* Receive buffer */
 
-    /* Protocol control block (for TCP) */
-    void               *so_pcb;         /* Points to tcpcb for TCP sockets */
+    /* Protocol control block
+     *   AF_INET SOCK_STREAM: points to struct tcpcb
+     *   AF_UNIX:             points to struct unpcb */
+    void               *so_pcb;
 
     /* Listening state */
     int                 so_qlimit;      /* Max pending connections (backlog) */
@@ -278,5 +307,23 @@ ssize_t net_recv(int sockfd, void *buf, size_t len);
  * Returns 0 on success, -errno on failure.
  */
 int net_close(int sockfd);
+
+/* ============================================================================
+ * AF_UNIX Socket Operations (kernel-internal)
+ *
+ * Modelled on XNU's uipc_usrreq.c (bsd/kern/uipc_usrreq.c).
+ * These are called from the generic socket API when so_family == AF_UNIX.
+ * ============================================================================ */
+
+int unix_bind(int sockfd, const struct sockaddr_un *addr);
+int unix_listen(int sockfd, int backlog);
+int unix_accept(int sockfd, struct sockaddr_un *addr);
+int unix_connect(int sockfd, const struct sockaddr_un *addr);
+ssize_t unix_send(int sockfd, const void *buf, size_t len);
+ssize_t unix_recv(int sockfd, void *buf, size_t len);
+int unix_close(int sockfd);
+
+/* Access to socket table for AF_UNIX operations */
+extern struct socket socket_table[];
 
 #endif /* _NET_NET_H */

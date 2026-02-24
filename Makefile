@@ -103,7 +103,9 @@ KERN_SRCS   := $(SRCDIR)/kern/main.c \
                $(SRCDIR)/kern/proc.c \
                $(SRCDIR)/kern/commpage.c \
                $(SRCDIR)/kern/tty.c \
-               $(SRCDIR)/kern/pty.c
+               $(SRCDIR)/kern/pty.c \
+               $(SRCDIR)/kern/font8x16.c \
+               $(SRCDIR)/kern/fbconsole.c
 
 # C sources - Architecture specific
 ARCH_SRCS   := $(ARCHDIR)/smp.c
@@ -116,7 +118,9 @@ DRV_SRCS    := $(SRCDIR)/drivers/uart/pl011.c \
                $(SRCDIR)/drivers/virtio/virtio_blk.c \
                $(SRCDIR)/drivers/emmc/emmc.c \
                $(SRCDIR)/drivers/blkdev/blkdev.c \
-               $(SRCDIR)/drivers/net/virtio_net.c
+               $(SRCDIR)/drivers/net/virtio_net.c \
+               $(SRCDIR)/drivers/virtio/virtio_gpu.c \
+               $(SRCDIR)/drivers/virtio/virtio_input.c
 
 # C sources - BSD layer
 BSD_SRCS    := $(SRCDIR)/bsd/syscalls.c \
@@ -203,8 +207,8 @@ QEMU        := qemu-system-aarch64
 # hardware virtualization cache coherency issues. HVF on Apple Silicon
 # has stricter cache coherency requirements that cause External Aborts
 # during instruction fetch after fork.
-QEMU_FLAGS  := -M virt -accel tcg -cpu cortex-a72 -smp 4 -m 1G \
-               -nographic \
+QEMU_FLAGS  := -M virt -accel tcg -cpu cortex-a72 -smp 4 -m 4G \
+               -display cocoa \
                -kernel $(KERNEL_ELF) \
                -serial mon:stdio
 
@@ -221,6 +225,14 @@ endif
 # The guest static IP is 192.168.64.10, host/gateway is 192.168.64.1.
 QEMU_FLAGS += -netdev vmnet-shared,id=net0 \
               -device virtio-net-device,netdev=net0
+
+# Add virtio-gpu device for framebuffer support
+# The GPU is always present; display output requires -display sdl/gtk/cocoa.
+# With -nographic the GPU initialises but has no visible display output.
+QEMU_FLAGS += -device virtio-gpu-device
+
+# Add virtio-keyboard device for framebuffer console input
+QEMU_FLAGS += -device virtio-keyboard-device
 
 run: all
 	@echo ""

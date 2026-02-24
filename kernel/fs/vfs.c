@@ -29,11 +29,16 @@ static spinlock_t       fs_type_lock = SPINLOCK_INIT;
 static struct file      file_pool[VFS_MAX_FILES];
 static spinlock_t       file_pool_lock = SPINLOCK_INIT;
 
-/* Global file descriptor table (kernel-level, not per-process yet) */
-/* Each entry points to a file in file_pool, or NULL if unused */
-static struct file     *fd_table[VFS_MAX_FD];
-static uint8_t          fd_flags[VFS_MAX_FD];   /* Per-FD flags (FD_CLOEXEC etc.) */
-static spinlock_t       fd_lock = SPINLOCK_INIT;
+/*
+ * Per-process file descriptor table.
+ *
+ * All fd lookups go through the current process's p_fd (struct filedesc).
+ * There is no global fd_table. This matches the XNU/BSD model where each
+ * process has its own file descriptor namespace.
+ *
+ * During early boot (before proc subsystem is initialised), fd operations
+ * are not used — kprintf goes directly to UART/fbconsole, not through fds.
+ */
 
 /* Vnode pool */
 #define VFS_MAX_VNODES  1024
@@ -212,8 +217,8 @@ vnode_release(struct vnode *vp)
  * File Descriptor Management
  *
  * Architecture:
- * - file_pool[]: Pool of struct file (open file descriptions)
- * - fd_table[]: Array of pointers into file_pool (file descriptors)
+ * - file_pool[]: Pool of struct file (open file descriptions, system-wide)
+ * - p_fd.fd_ofiles[]: Per-process array of pointers into file_pool
  *
  * Multiple FDs can point to the same file (via dup/fork), sharing offset.
  * f_refcount tracks how many FDs reference each file description.
@@ -275,38 +280,67 @@ file_unref(struct file *fp)
 }
 
 /*
+ * proc_fd_table - Get the current process's file descriptor table.
+ *
+ * Returns NULL during early boot when no process context exists.
+ */
+static struct filedesc *
+proc_fd_table(void)
+{
+    struct proc *p = proc_current();
+    if (p == NULL)
+        return NULL;
+    return &p->p_fd;
+}
+
+/*
  * vfs_fd_alloc - Allocate a file descriptor and associated file description
+ *
+ * Installs the new struct file into the current process's fd table
+ * at the lowest available slot.
  */
 static int
 vfs_fd_alloc(void)
 {
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp == NULL)
+        return -EBADF;  /* No process context */
+
     struct file *fp = file_alloc();
     if (fp == NULL)
         return -ENFILE;  /* File table full */
 
-    spin_lock(&fd_lock);
-    for (int i = 0; i < VFS_MAX_FD; i++) {
-        if (fd_table[i] == NULL) {
-            fd_table[i] = fp;
-            fd_flags[i] = 0;
-            spin_unlock(&fd_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&fdp->fd_lock, &flags);
+    for (int i = 0; i < PROC_FD_MAX; i++) {
+        if (fdp->fd_ofiles[i] == NULL) {
+            fdp->fd_ofiles[i] = fp;
+            fdp->fd_oflags[i] = 0;
+            if ((uint32_t)(i + 1) > fdp->fd_nfiles)
+                fdp->fd_nfiles = (uint32_t)(i + 1);
+            spin_unlock_irqrestore(&fdp->fd_lock, flags);
             return i;
         }
     }
-    spin_unlock(&fd_lock);
+    spin_unlock_irqrestore(&fdp->fd_lock, flags);
     file_unref(fp);  /* Release the file we allocated */
     return -EMFILE;  /* FD table full */
 }
 
 /*
  * fd_get - Get file description for a file descriptor
+ *
+ * Looks up in the current process's per-process fd table.
  */
 static struct file *
 fd_get(int fd)
 {
-    if (fd < 0 || fd >= VFS_MAX_FD)
+    if (fd < 0 || fd >= PROC_FD_MAX)
         return NULL;
-    return fd_table[fd];  /* May be NULL if fd not open */
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp == NULL)
+        return NULL;
+    return fdp->fd_ofiles[fd];  /* May be NULL if fd not open */
 }
 
 /*
@@ -315,13 +349,17 @@ fd_get(int fd)
 static void
 fd_free(int fd)
 {
-    if (fd < 0 || fd >= VFS_MAX_FD)
+    if (fd < 0 || fd >= PROC_FD_MAX)
         return;
-    spin_lock(&fd_lock);
-    struct file *fp = fd_table[fd];
-    fd_table[fd] = NULL;
-    fd_flags[fd] = 0;
-    spin_unlock(&fd_lock);
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp == NULL)
+        return;
+    uint64_t flags;
+    spin_lock_irqsave(&fdp->fd_lock, &flags);
+    struct file *fp = fdp->fd_ofiles[fd];
+    fdp->fd_ofiles[fd] = NULL;
+    fdp->fd_oflags[fd] = 0;
+    spin_unlock_irqrestore(&fdp->fd_lock, flags);
     if (fp)
         file_unref(fp);
 }
@@ -365,28 +403,32 @@ vfs_fd_get_vnode(int fd)
 }
 
 /*
- * Per-FD flags (FD_CLOEXEC etc.)
+ * Per-FD flags (FD_CLOEXEC etc.) — stored in the per-process fd table.
  */
 int
 vfs_get_fd_flags(int fd)
 {
-    if (fd < 0 || fd >= VFS_MAX_FD)
+    if (fd < 0 || fd >= PROC_FD_MAX)
         return -EBADF;
-    struct file *fp = fd_get(fd);
-    if (fp == NULL)
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp == NULL)
         return -EBADF;
-    return (int)fd_flags[fd];
+    if (fdp->fd_ofiles[fd] == NULL)
+        return -EBADF;
+    return (int)fdp->fd_oflags[fd];
 }
 
 int
 vfs_set_fd_flags(int fd, uint8_t flags)
 {
-    if (fd < 0 || fd >= VFS_MAX_FD)
+    if (fd < 0 || fd >= PROC_FD_MAX)
         return -EBADF;
-    struct file *fp = fd_get(fd);
-    if (fp == NULL)
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp == NULL)
         return -EBADF;
-    fd_flags[fd] = flags;
+    if (fdp->fd_ofiles[fd] == NULL)
+        return -EBADF;
+    fdp->fd_oflags[fd] = flags;
     return 0;
 }
 
@@ -419,29 +461,37 @@ vfs_set_file_flags(int fd, uint32_t flags)
  *
  * The new FD points to the same file description as oldfd, sharing
  * the file offset, flags, and underlying vnode. This is POSIX dup() semantics.
+ * Operates on the current process's per-process fd table.
  */
 int
 vfs_dup_fd(int oldfd, int minfd)
 {
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp == NULL)
+        return -EBADF;
+
     struct file *fp = fd_get(oldfd);
     if (fp == NULL)
         return -EBADF;
 
-    spin_lock(&fd_lock);
-    for (int i = minfd; i < VFS_MAX_FD; i++) {
-        if (fd_table[i] == NULL) {
+    uint64_t flags;
+    spin_lock_irqsave(&fdp->fd_lock, &flags);
+    for (int i = minfd; i < PROC_FD_MAX; i++) {
+        if (fdp->fd_ofiles[i] == NULL) {
             /* Point new FD to the same file description */
-            fd_table[i] = fp;
-            fd_flags[i] = 0;  /* New FD does not inherit FD_CLOEXEC */
+            fdp->fd_ofiles[i] = fp;
+            fdp->fd_oflags[i] = 0;  /* New FD does not inherit FD_CLOEXEC */
 
             /* Increment file description refcount */
             file_ref(fp);
 
-            spin_unlock(&fd_lock);
+            if ((uint32_t)(i + 1) > fdp->fd_nfiles)
+                fdp->fd_nfiles = (uint32_t)(i + 1);
+            spin_unlock_irqrestore(&fdp->fd_lock, flags);
             return i;
         }
     }
-    spin_unlock(&fd_lock);
+    spin_unlock_irqrestore(&fdp->fd_lock, flags);
     return -EMFILE;
 }
 
@@ -456,10 +506,13 @@ vfs_alloc_sockfd(int sockidx)
     if (fd < 0)
         return fd;
 
-    struct file *fp = fd_table[fd];
+    struct file *fp = fd_get(fd);
     fp->f_vnode = NULL;
     fp->f_sockidx = sockidx;
-    fd_flags[fd] = FD_SOCKET;
+
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp)
+        fdp->fd_oflags[fd] = FD_SOCKET;
 
     return fd;
 }
@@ -467,12 +520,15 @@ vfs_alloc_sockfd(int sockidx)
 int
 vfs_get_sockidx(int fd)
 {
-    if (fd < 0 || fd >= VFS_MAX_FD)
+    if (fd < 0 || fd >= PROC_FD_MAX)
         return -1;
-    struct file *fp = fd_table[fd];
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp == NULL)
+        return -1;
+    struct file *fp = fdp->fd_ofiles[fd];
     if (fp == NULL)
         return -1;
-    if (!(fd_flags[fd] & FD_SOCKET))
+    if (!(fdp->fd_oflags[fd] & FD_SOCKET))
         return -1;
     return fp->f_sockidx;
 }
@@ -496,11 +552,14 @@ vfs_alloc_pipefd(void *pipe_data, int dir)
     if (fd < 0)
         return fd;
 
-    struct file *fp = fd_table[fd];
+    struct file *fp = fd_get(fd);
     fp->f_vnode = NULL;
     fp->f_pipe = pipe_data;
     fp->f_pipe_dir = (uint32_t)dir;
-    fd_flags[fd] |= FD_PIPE;
+
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp)
+        fdp->fd_oflags[fd] |= FD_PIPE;
 
     return fd;
 }
@@ -508,9 +567,9 @@ vfs_alloc_pipefd(void *pipe_data, int dir)
 void *
 vfs_get_pipe(int fd, int *dir)
 {
-    if (fd < 0 || fd >= VFS_MAX_FD)
+    if (fd < 0 || fd >= PROC_FD_MAX)
         return NULL;
-    struct file *fp = fd_table[fd];
+    struct file *fp = fd_get(fd);
     if (fp == NULL)
         return NULL;
     if (fp->f_pipe == NULL)
@@ -523,9 +582,9 @@ vfs_get_pipe(int fd, int *dir)
 void *
 vfs_get_pty(int fd, int *side)
 {
-    if (fd < 0 || fd >= VFS_MAX_FD)
+    if (fd < 0 || fd >= PROC_FD_MAX)
         return NULL;
-    struct file *fp = fd_table[fd];
+    struct file *fp = fd_get(fd);
     if (fp == NULL)
         return NULL;
     if (fp->f_pty == NULL)
@@ -541,7 +600,7 @@ vfs_alloc_pty_fd(void *pty_ptr, int side)
     int fd = vfs_fd_alloc();
     if (fd < 0)
         return fd;
-    struct file *fp = fd_table[fd];
+    struct file *fp = fd_get(fd);
     fp->f_pty = pty_ptr;
     fp->f_pty_side = (uint32_t)side;
     fp->f_flags = O_RDWR;
@@ -734,7 +793,6 @@ vfs_init(void)
 {
     spin_init(&mount_lock);
     spin_init(&fs_type_lock);
-    spin_init(&fd_lock);
     spin_init(&vnode_pool_lock);
     spin_init(&file_pool_lock);
 
@@ -743,23 +801,14 @@ vfs_init(void)
         mount_table[i].mnt_active = false;
     for (uint32_t i = 0; i < VFS_MAX_FSTYPES; i++)
         fs_types[i].active = false;
-    for (int i = 0; i < VFS_MAX_FD; i++)
-        fd_table[i] = NULL;
     for (int i = 0; i < VFS_MAX_FILES; i++)
         file_pool[i].f_refcount = 0;
 
     /*
-     * Reserve fds 0, 1, 2 for console stdin/stdout/stderr.
-     * These are handled by the console fast path in sys_read/sys_write,
-     * not by VFS vnodes. We allocate file descriptions for them so
-     * that fd_table[0/1/2] != NULL, preventing vfs_fd_alloc() from
-     * ever returning them for file opens.
+     * No global fd table reservation needed.
+     * Console fds 0/1/2 are set up per-process in setup_stdio() (proc.c).
+     * Each process has its own fd namespace via p_fd (struct filedesc).
      */
-    for (int i = 0; i < 3; i++) {
-        struct file *fp = file_alloc();
-        fp->f_vnode = NULL;  /* Console - no vnode */
-        fd_table[i] = fp;
-    }
     for (uint32_t i = 0; i < VFS_MAX_VNODES; i++) {
         vnode_pool[i].v_refcount = 0;
         vnode_pool[i].v_type = VNON;
@@ -768,8 +817,8 @@ vfs_init(void)
     mount_count = 0;
     root_vnode = NULL;
 
-    kprintf("vfs: initialized (max %d mounts, %d vnodes, %d fds)\n",
-            VFS_MAX_MOUNTS, VFS_MAX_VNODES, VFS_MAX_FD);
+    kprintf("vfs: initialized (max %d mounts, %d vnodes, %d fds/proc)\n",
+            VFS_MAX_MOUNTS, VFS_MAX_VNODES, PROC_FD_MAX);
 }
 
 /* ============================================================================
@@ -989,7 +1038,7 @@ vfs_open(const char *path, uint32_t flags, mode_t mode)
         return fd;
     }
 
-    struct file *fp = fd_table[fd];
+    struct file *fp = fd_get(fd);
     fp->f_vnode = vp;
     fp->f_flags = flags;
     fp->f_offset = 0;
@@ -1037,11 +1086,28 @@ vfs_read(int fd, void *buf, uint64_t count)
     if (vp->v_ops == NULL || vp->v_ops->read == NULL)
         return -ENOSYS;
 
+    /*
+     * Snapshot the current offset under the lock, then release the lock
+     * before performing the actual I/O. This is critical because character
+     * device reads (e.g., TTY via tty_read → tty_getc → thread_sleep_on)
+     * may block, and sleeping while holding a spinlock is incorrect.
+     *
+     * This matches XNU's vn_read() pattern: the lock protects the offset
+     * bookkeeping, not the I/O itself. For regular files, concurrent reads
+     * on the same struct file may interleave, but POSIX does not guarantee
+     * atomicity of concurrent reads sharing a file description anyway.
+     */
     spin_lock(&fp->f_lock);
-    int64_t nread = vp->v_ops->read(vp, buf, fp->f_offset, count);
-    if (nread > 0)
-        fp->f_offset += (uint64_t)nread;
+    uint64_t off = fp->f_offset;
     spin_unlock(&fp->f_lock);
+
+    int64_t nread = vp->v_ops->read(vp, buf, off, count);
+
+    if (nread > 0) {
+        spin_lock(&fp->f_lock);
+        fp->f_offset += (uint64_t)nread;
+        spin_unlock(&fp->f_lock);
+    }
 
     return nread;
 }
@@ -1065,27 +1131,25 @@ vfs_write(int fd, const void *buf, uint64_t count)
     if (vp->v_ops == NULL || vp->v_ops->write == NULL)
         return -ENOSYS;
 
+    /*
+     * Snapshot offset under the lock, same pattern as vfs_read.
+     * For O_APPEND, set offset to the current file size.
+     * TTY writes (tty_write → t_putc) typically don't block, but
+     * consistency with the read path is important for correctness.
+     */
     spin_lock(&fp->f_lock);
-
-    /* O_APPEND: always write at end */
     if (fp->f_flags & O_APPEND)
         fp->f_offset = vp->v_size;
-
-#ifdef DEBUG
-    kprintf("[vfs] write: fd=%d offset=%lu count=%lu\n",
-            fd, (unsigned long)fp->f_offset, (unsigned long)count);
-#endif
-
-    int64_t nwritten = vp->v_ops->write(vp, buf, fp->f_offset, count);
-    if (nwritten > 0)
-        fp->f_offset += (uint64_t)nwritten;
-
-#ifdef DEBUG
-    kprintf("[vfs] write done: fd=%d nwritten=%ld newoff=%lu\n",
-            fd, (long)nwritten, (unsigned long)fp->f_offset);
-#endif
-
+    uint64_t off = fp->f_offset;
     spin_unlock(&fp->f_lock);
+
+    int64_t nwritten = vp->v_ops->write(vp, buf, off, count);
+
+    if (nwritten > 0) {
+        spin_lock(&fp->f_lock);
+        fp->f_offset += (uint64_t)nwritten;
+        spin_unlock(&fp->f_lock);
+    }
 
     return nwritten;
 }
@@ -1098,19 +1162,24 @@ vfs_close(int fd)
         return -EBADF;
 
     /*
-     * Detach fd from the table and decrement the file description refcount.
-     * Only release the vnode when no more fds reference this file description.
+     * Detach fd from the per-process table and decrement the file
+     * description refcount. Only release the vnode when no more fds
+     * reference this file description.
      *
      * This matches the POSIX/XNU model: dup()'d fds share a struct file.
      * close() on one fd must not destroy the vnode that other fds still use.
      */
     struct vnode *vp = fp->f_vnode;
 
-    /* Remove the fd table entry and drop fd_flags */
-    spin_lock(&fd_lock);
-    fd_table[fd] = NULL;
-    fd_flags[fd] = 0;
-    spin_unlock(&fd_lock);
+    /* Remove the fd from the per-process table */
+    struct filedesc *fdp = proc_fd_table();
+    if (fdp) {
+        uint64_t flags;
+        spin_lock_irqsave(&fdp->fd_lock, &flags);
+        fdp->fd_ofiles[fd] = NULL;
+        fdp->fd_oflags[fd] = 0;
+        spin_unlock_irqrestore(&fdp->fd_lock, flags);
+    }
 
     /* Decrement refcount; release resources only when it hits zero */
     spin_lock(&fp->f_lock);
@@ -1149,9 +1218,20 @@ vfs_readdir(int fd, struct dirent *buf, uint32_t count)
     if (vp->v_ops == NULL || vp->v_ops->readdir == NULL)
         return -ENOSYS;
 
+    /*
+     * For readdir, the offset is a cookie that the filesystem uses to
+     * track position. We snapshot it, pass a local copy to the vop,
+     * and write back the updated value. This avoids holding the lock
+     * across potentially blocking filesystem I/O.
+     */
     spin_lock(&fp->f_lock);
-    /* The readdir vop updates fp->f_offset to the next byte position */
-    int nread = vp->v_ops->readdir(vp, buf, &fp->f_offset, count);
+    uint64_t dir_off = fp->f_offset;
+    spin_unlock(&fp->f_lock);
+
+    int nread = vp->v_ops->readdir(vp, buf, &dir_off, count);
+
+    spin_lock(&fp->f_lock);
+    fp->f_offset = dir_off;
     spin_unlock(&fp->f_lock);
 
     return nread;

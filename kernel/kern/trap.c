@@ -579,6 +579,14 @@ void trap_irq_el0(struct trap_frame *tf)
 /* VirtIO-net interrupt handler (defined in virtio_net.c) */
 extern void virtio_net_recv(void);
 
+/* VirtIO-GPU interrupt handler and IRQ query (defined in virtio_gpu.c) */
+extern void virtio_gpu_irq_handler(void);
+extern uint32_t virtio_gpu_get_irq(void);
+
+/* VirtIO-input interrupt handler and IRQ query (defined in virtio_input.c) */
+extern void virtio_input_irq_handler(void);
+extern uint32_t virtio_input_get_irq(void);
+
 void irq_dispatch(uint32_t irq)
 {
     switch (irq) {
@@ -616,7 +624,12 @@ void irq_dispatch(uint32_t irq)
         /* Check if this is a VirtIO MMIO interrupt (IRQ 48..79) */
         if (irq >= VIRTIO_MMIO_IRQ_BASE &&
             irq < VIRTIO_MMIO_IRQ_BASE + VIRTIO_MMIO_COUNT) {
-            virtio_net_recv();
+            if (irq == virtio_gpu_get_irq())
+                virtio_gpu_irq_handler();
+            else if (irq == virtio_input_get_irq())
+                virtio_input_irq_handler();
+            else
+                virtio_net_recv();
         } else {
             kprintf("[irq] Unhandled IRQ %u\n", irq);
         }

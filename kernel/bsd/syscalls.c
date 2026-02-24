@@ -31,6 +31,8 @@
 
 /* devfs query — check if a vnode is a console/tty character device */
 extern bool devfs_is_console(struct vnode *vp);
+extern bool devfs_is_tty_device(struct vnode *vp);
+extern struct tty *devfs_get_tty_for_vnode(struct vnode *vp);
 
 /* Buffer cache sync */
 extern void buf_sync(void);
@@ -1794,18 +1796,21 @@ static int sys_ioctl(struct trap_frame *tf)
     }
 
     /*
-     * Character device vnodes (e.g., /dev/console opened by getty):
-     * If the fd's vnode is a devfs console device, route to TTY ioctl.
+     * Character device vnodes (e.g., /dev/console or /dev/fbcon0 opened
+     * by getty): If the fd's vnode is any devfs TTY device, route to the
+     * appropriate TTY's ioctl handler.
      */
     {
         struct vnode *vp = vfs_fd_get_vnode(fd);
-        if (vp != NULL && devfs_is_console(vp)) {
-            struct tty *tp = tty_get_console();
-            int err = tty_ioctl(tp, cmd, arg);
-            if (err != 0)
-                return err;
-            syscall_return(tf, 0);
-            return 0;
+        if (vp != NULL && devfs_is_tty_device(vp)) {
+            struct tty *tp = devfs_get_tty_for_vnode(vp);
+            if (tp != NULL) {
+                int err = tty_ioctl(tp, cmd, arg);
+                if (err != 0)
+                    return err;
+                syscall_return(tf, 0);
+                return 0;
+            }
         }
     }
 
@@ -1881,20 +1886,50 @@ static int sys_ioctl(struct trap_frame *tf)
  */
 
 /* mmap flags (XNU-compatible) */
-#define MAP_ANON_K      0x1000
+#define MAP_SHARED_K    0x0001
 #define MAP_PRIVATE_K   0x0002
 #define MAP_FIXED_K     0x0010
+#define MAP_ANON_K      0x1000
 
 /* mmap prot (XNU-compatible) */
 #define PROT_READ_K     0x01
 #define PROT_WRITE_K    0x02
 #define PROT_EXEC_K     0x04
 
-/* Simple bump allocator for anonymous mmap address hints.
- * Starts at 0x300000000 (12GB) to avoid collisions with main binary
- * (0x100000000) and dyld (0x200000000). */
-static uint64_t mmap_next_addr = 0x300000000UL;
+/*
+ * prot_to_pte_flags - Convert PROT_* bitmask to ARM64 PTE flags
+ */
+static uint64_t prot_to_pte_flags(uint32_t prot)
+{
+    if ((prot & PROT_READ_K) && (prot & PROT_WRITE_K) && (prot & PROT_EXEC_K))
+        return PTE_USER_RWX;
+    else if ((prot & PROT_READ_K) && (prot & PROT_WRITE_K))
+        return PTE_USER_RW;
+    else if ((prot & PROT_READ_K) && (prot & PROT_EXEC_K))
+        return PTE_USER_RX;
+    else if (prot & PROT_READ_K)
+        return PTE_USER_RO;
+    else
+        return PTE_USER_RW;  /* Default: RW */
+}
 
+/*
+ * sys_mmap - Map files or anonymous memory into the process address space
+ *
+ * x0 = addr, x1 = length, x2 = prot, x3 = flags, x4 = fd, x5 = offset
+ * Returns: mapped address in x0, or sets carry + errno on error
+ *
+ * Supports:
+ *   - MAP_ANON | MAP_PRIVATE: anonymous zero-filled pages
+ *   - MAP_ANON | MAP_SHARED:  anonymous shared pages (IPC shared memory)
+ *   - MAP_PRIVATE with fd:    private file-backed mapping (COW semantics)
+ *   - MAP_SHARED with fd:     shared file-backed mapping
+ *   - MAP_FIXED:              place mapping at exact address
+ *
+ * The implementation follows XNU's mmap() → vm_map_enter() call chain
+ * (bsd/kern/kern_mman.c). A vm_map_entry is created to track the region,
+ * then physical pages are allocated and mapped in the pmap.
+ */
 int sys_mmap(struct trap_frame *tf)
 {
     uint64_t addr   = tf->regs[0];
@@ -1903,11 +1938,6 @@ int sys_mmap(struct trap_frame *tf)
     uint32_t flags  = (uint32_t)tf->regs[3];
     int fd          = (int)tf->regs[4];
     int64_t offset  = (int64_t)tf->regs[5];
-
-    /* Verbose mmap tracing - uncomment for debugging
-    kprintf("[mmap] enter: addr=0x%lx len=0x%lx prot=0x%x flags=0x%x fd=%d\n",
-            addr, length, prot, flags, fd);
-    */
 
     if (length == 0)
         return EINVAL;
@@ -1919,37 +1949,78 @@ int sys_mmap(struct trap_frame *tf)
     if (p == NULL || p->p_vmspace == NULL)
         return EINVAL;
 
-    /* Determine the virtual address for the mapping */
+    /* Determine protection bits */
+    uint8_t vm_prot = 0;
+    if (prot & PROT_READ_K)  vm_prot |= VM_PROT_READ;
+    if (prot & PROT_WRITE_K) vm_prot |= VM_PROT_WRITE;
+    if (prot & PROT_EXEC_K)  vm_prot |= VM_PROT_EXECUTE;
+
+    /*
+     * max_protection: for anonymous mappings, allow anything. For
+     * file-backed, XNU derives it from the file's open mode. We
+     * simplify to VM_PROT_ALL for now.
+     */
+    uint8_t max_prot = VM_PROT_ALL;
+
+    /* Determine inheritance and sharing */
+    bool is_shared = (flags & MAP_SHARED_K) != 0;
+    uint8_t inheritance;
+    if (is_shared)
+        inheritance = VM_INHERIT_SHARE;
+    else
+        inheritance = VM_INHERIT_COPY;
+
+    /* Resolve backing vnode for file-backed mappings */
+    struct vnode *backing_vnode = NULL;
+    int backing_fd = -1;
+    if (!(flags & MAP_ANON_K) && fd >= 0) {
+        backing_fd = fd;
+        struct file *fp = vfs_get_file(fd);
+        if (fp && fp->f_vnode)
+            backing_vnode = fp->f_vnode;
+    }
+
+    /* Determine the virtual address */
     uint64_t map_va;
     if (flags & MAP_FIXED_K) {
         if (addr == 0)
             return EINVAL;
         map_va = addr & ~(PAGE_SIZE - 1);
     } else if (addr != 0) {
-        /* Hint address — try it, but we just use it directly for simplicity */
         map_va = addr & ~(PAGE_SIZE - 1);
     } else {
-        /* Kernel chooses the address */
-        map_va = ALIGN_UP(mmap_next_addr, PAGE_SIZE);
-        mmap_next_addr = map_va + length;
+        map_va = 0;  /* Let vm_map_enter find space */
+    }
+
+    /*
+     * Create a vm_map_entry for this region via vm_map_enter().
+     * This is the XNU-accurate path: mmap() → vm_map_enter().
+     */
+    struct vm_map *map = p->p_vmspace->map;
+    if (map) {
+        int ret = vm_map_enter(map, &map_va, length, vm_prot, max_prot,
+                               inheritance, is_shared, backing_fd,
+                               (uint64_t)offset, backing_vnode);
+        if (ret != 0)
+            return -ret;  /* vm_map_enter returns -errno */
+    } else {
+        /*
+         * Fallback for processes without a vm_map (e.g., kernel processes
+         * or processes created before the vm_map subsystem was initialised).
+         * Use the legacy bump allocator.
+         */
+        if (map_va == 0) {
+            static uint64_t legacy_mmap_next = USER_MMAP_BASE;
+            map_va = ALIGN_UP(legacy_mmap_next, PAGE_SIZE);
+            legacy_mmap_next = map_va + length;
+        }
     }
 
     /* Determine PTE flags from prot */
-    uint64_t pte_flags;
-    if ((prot & PROT_READ_K) && (prot & PROT_WRITE_K) && (prot & PROT_EXEC_K))
-        pte_flags = PTE_USER_RWX;
-    else if ((prot & PROT_READ_K) && (prot & PROT_WRITE_K))
-        pte_flags = PTE_USER_RW;
-    else if ((prot & PROT_READ_K) && (prot & PROT_EXEC_K))
-        pte_flags = PTE_USER_RX;
-    else if (prot & PROT_READ_K)
-        pte_flags = PTE_USER_RO;
-    else
-        pte_flags = PTE_USER_RW;  /* Default: RW */
+    uint64_t pte_flags = prot_to_pte_flags(prot);
 
-    /* Allocate physical pages and map them */
+    /* Allocate physical pages and map them in the pmap */
     uint64_t num_pages = length / PAGE_SIZE;
-    /* kprintf("[mmap] mapping %lu pages at VA 0x%lx\n", num_pages, map_va); */
     for (uint64_t i = 0; i < num_pages; i++) {
         uint64_t pa = pmm_alloc_page();
         if (pa == 0) {
@@ -1960,6 +2031,9 @@ int sys_mmap(struct trap_frame *tf)
                 if (old_pa)
                     pmm_free_page(old_pa);
             }
+            /* Remove the vm_map_entry we just created */
+            if (map)
+                vm_map_remove(map, map_va, map_va + length);
             return ENOMEM;
         }
 
@@ -1972,16 +2046,20 @@ int sys_mmap(struct trap_frame *tf)
                                map_va + i * PAGE_SIZE, pa, pte_flags);
         if (ret != 0) {
             pmm_free_page(pa);
+            if (map)
+                vm_map_remove(map, map_va, map_va + length);
             return ENOMEM;
         }
     }
 
     /*
-     * If this is a file-backed mapping (not MAP_ANON), read file data
-     * into the mapped pages. dyld uses this pattern:
-     *   mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
-     * followed by sys_read() to fill the buffer. So this path is less
-     * critical, but we support it for completeness.
+     * For file-backed mappings, read file data into the mapped pages.
+     *
+     * Note: this is a simplified "read at mmap time" approach, not true
+     * demand-paged file-backed mmap with a page fault handler. That would
+     * require a vnode pager (XNU's vm_object + memory_object + ubc_info).
+     * We implement the simpler version first, which is correct for
+     * MAP_PRIVATE (data is copied in) and for MAP_SHARED with small files.
      */
     if (!(flags & MAP_ANON_K) && fd >= 0) {
         /* Save and restore file position */
@@ -1990,8 +2068,7 @@ int sys_mmap(struct trap_frame *tf)
         if (offset >= 0)
             vfs_lseek(fd, offset, SEEK_SET);
 
-        /* Read file data into the mapped region.
-         * We read page by page, translating user VA to PA for the copy. */
+        /* Read file data into the mapped region page by page */
         uint64_t remaining = length;
         uint64_t cur_va = map_va;
         while (remaining > 0) {
@@ -2013,7 +2090,6 @@ int sys_mmap(struct trap_frame *tf)
     }
 
     /* Return the mapped address */
-    /* kprintf("[mmap] addr=0x%lx -> 0x%lx\n", addr, map_va); */
     syscall_return(tf, (int64_t)map_va);
     return 0;
 }
@@ -2022,6 +2098,9 @@ int sys_mmap(struct trap_frame *tf)
  * sys_munmap - Unmap memory
  *
  * x0 = addr, x1 = length
+ *
+ * Removes the mapping from both the vm_map (region tracking) and the
+ * pmap (hardware page tables). Physical pages are freed.
  */
 int sys_munmap(struct trap_frame *tf)
 {
@@ -2037,13 +2116,18 @@ int sys_munmap(struct trap_frame *tf)
     if (p == NULL || p->p_vmspace == NULL)
         return EINVAL;
 
-    /* Unmap each page and free the physical page */
+    /* Remove from vm_map first (clips and removes entries) */
+    struct vm_map *map = p->p_vmspace->map;
+    if (map)
+        vm_map_remove(map, addr, addr + length);
+
+    /* Unmap each page from the pmap and free physical pages */
     uint64_t num_pages = length / PAGE_SIZE;
     for (uint64_t i = 0; i < num_pages; i++) {
         uint64_t pa = vmm_unmap_page(p->p_vmspace->pgd,
                                       addr + i * PAGE_SIZE);
         if (pa != 0)
-            pmm_free_page(pa);
+            pmm_page_unref(pa);  /* Respect refcount for shared pages */
     }
 
     syscall_return(tf, 0);
@@ -2055,9 +2139,8 @@ int sys_munmap(struct trap_frame *tf)
  *
  * x0 = addr, x1 = length, x2 = prot
  *
- * For now, always succeeds (we don't actually change the PTE permissions).
- * This is safe because our initial mappings are typically RW or RWX.
- * A full implementation would walk the page tables and update PTE AP/XN bits.
+ * Updates protection in both the vm_map (clips entries, updates protection
+ * field) and the pmap (updates PTE AP/XN bits).
  */
 int sys_mprotect(struct trap_frame *tf)
 {
@@ -2075,20 +2158,25 @@ int sys_mprotect(struct trap_frame *tf)
     addr &= ~(PAGE_SIZE - 1);
     length = ALIGN_UP(length, PAGE_SIZE);
 
-    /* Convert prot to PTE flags (same mapping as sys_mmap) */
-    uint64_t pte_flags;
-    if ((prot & PROT_READ_K) && (prot & PROT_WRITE_K) && (prot & PROT_EXEC_K))
-        pte_flags = PTE_USER_RWX;
-    else if ((prot & PROT_READ_K) && (prot & PROT_WRITE_K))
-        pte_flags = PTE_USER_RW;
-    else if ((prot & PROT_READ_K) && (prot & PROT_EXEC_K))
-        pte_flags = PTE_USER_RX;
-    else if (prot & PROT_READ_K)
-        pte_flags = PTE_USER_RO;
-    else
-        pte_flags = PTE_USER_RO;  /* PROT_NONE → read-only (simplification) */
+    /* Convert prot to VM_PROT_* and PTE flags */
+    uint8_t vm_prot = 0;
+    if (prot & PROT_READ_K)  vm_prot |= VM_PROT_READ;
+    if (prot & PROT_WRITE_K) vm_prot |= VM_PROT_WRITE;
+    if (prot & PROT_EXEC_K)  vm_prot |= VM_PROT_EXECUTE;
 
-    /* Walk each page and update its PTE flags */
+    /* Update vm_map entries (clips at boundaries, checks max_protection) */
+    struct vm_map *map = p->p_vmspace->map;
+    if (map) {
+        int ret = vm_map_protect(map, addr, addr + length, vm_prot);
+        /* If vm_map_protect fails (e.g., exceeds max_protection), we could
+         * return EACCES. For now, we proceed with the pmap update anyway
+         * to maintain backward compatibility with code that relied on the
+         * old always-succeeds behaviour. */
+        (void)ret;
+    }
+
+    /* Update PTE flags in the pmap */
+    uint64_t pte_flags = prot_to_pte_flags(prot);
     for (uint64_t va = addr; va < addr + length; va += PAGE_SIZE) {
         vmm_protect_page(p->p_vmspace->pgd, va, pte_flags);
         /* Silently skip unmapped pages — matches XNU behaviour */

@@ -2184,7 +2184,7 @@ static int elf_output_file(TCCState *s1, const char *filename)
     file_offset = layout_sections(s1, phdr, phnum, interp, strsec, &dyninf,
                                   sec_order);
 
-    /* Fill remaining program header and finalize relocation related to dynamic
+    /* Fill remaining program header and finalise relocation related to dynamic
        linking. */
     if (file_type != TCC_OUTPUT_OBJ) {
         fill_unloadable_phdr(phdr, phnum, interp, dynamic);

@@ -436,6 +436,8 @@ struct fs_type {
 #define ENOEXEC     8       /* Exec format error */
 #define EFBIG       27      /* File too large */
 #define EPIPE       32      /* Broken pipe */
+#define EOPNOTSUPP  45      /* Operation not supported */
+#define EISCONN     56      /* Socket is already connected */
 
 /* ============================================================================
  * VFS Public API

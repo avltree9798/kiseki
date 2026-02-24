@@ -336,7 +336,7 @@ static const uint32_t stub_sigreturn[] = {
  */
 void commpage_init(void)
 {
-    kprintf("[commpage] Initializing CommPage at VA 0x%lx...\n", COMMPAGE_VA);
+    kprintf("[commpage] Initialising CommPage at VA 0x%lx...\n", COMMPAGE_VA);
 
     /* Allocate a physical page */
     commpage_phys = pmm_alloc_page();

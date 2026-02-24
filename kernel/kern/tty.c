@@ -19,6 +19,7 @@
 #include <kern/proc.h>
 #include <kern/vmm.h>
 #include <kern/thread.h>
+#include <kern/fbconsole.h>
 #include <drivers/uart.h>
 #include <fs/vfs.h>
 
@@ -96,6 +97,10 @@ void tty_init(void)
     tp->t_pgrp = 0;
     tp->t_session = 0;
     tp->t_flags = TTY_OPENED;
+
+    /* Default output goes to UART serial console */
+    tp->t_putc = uart_putc;
+    tp->t_devprivate = NULL;
 
     /* Clear line buffer */
     tp->t_linepos = 0;
@@ -314,9 +319,8 @@ int tty_ioctl(struct tty *tp, unsigned long cmd, uint64_t data)
  * Buffers the character in the raw ring buffer for later tty_read().
  * ============================================================================ */
 
-void tty_input_char(char c)
+void tty_input_char_tp(struct tty *tp, char c)
 {
-    struct tty *tp = &console_tty;
     struct termios *t = &tp->t_termios;
 
     /* Signal generation: check ISIG flag and special characters.
@@ -328,10 +332,10 @@ void tty_input_char(char c)
             /* Don't buffer the character — it's consumed by signal */
             /* But we do need to echo ^C if ECHO is set */
             if (t->c_lflag & ECHO) {
-                uart_putc('^');
-                uart_putc('C');
-                uart_putc('\r');
-                uart_putc('\n');
+                tp->t_putc('^');
+                tp->t_putc('C');
+                tp->t_putc('\r');
+                tp->t_putc('\n');
             }
             /* Flush input buffers */
             tp->t_linepos = 0;
@@ -341,10 +345,10 @@ void tty_input_char(char c)
         if (c == (char)t->c_cc[VQUIT] && tp->t_pgrp > 0) {
             signal_send_pgid(tp->t_pgrp, SIGQUIT);
             if (t->c_lflag & ECHO) {
-                uart_putc('^');
-                uart_putc('\\');
-                uart_putc('\r');
-                uart_putc('\n');
+                tp->t_putc('^');
+                tp->t_putc('\\');
+                tp->t_putc('\r');
+                tp->t_putc('\n');
             }
             tp->t_linepos = 0;
             tp->t_lineout = 0;
@@ -353,10 +357,10 @@ void tty_input_char(char c)
         if (c == (char)t->c_cc[VSUSP] && tp->t_pgrp > 0) {
             signal_send_pgid(tp->t_pgrp, SIGTSTP);
             if (t->c_lflag & ECHO) {
-                uart_putc('^');
-                uart_putc('Z');
-                uart_putc('\r');
-                uart_putc('\n');
+                tp->t_putc('^');
+                tp->t_putc('Z');
+                tp->t_putc('\r');
+                tp->t_putc('\n');
             }
             tp->t_linepos = 0;
             tp->t_lineout = 0;
@@ -377,6 +381,16 @@ void tty_input_char(char c)
      * This is the XNU wakeup(chan) pattern — called from IRQ context.
      */
     thread_wakeup_on(&tp->t_rawcount);
+}
+
+/*
+ * tty_input_char - Feed a character into the console TTY.
+ *
+ * Convenience wrapper for UART IRQ handler compatibility.
+ */
+void tty_input_char(char c)
+{
+    tty_input_char_tp(&console_tty, c);
 }
 
 /* ============================================================================
@@ -407,15 +421,22 @@ static char tty_getc(struct tty *tp)
             return c;
         }
 
-        /* Fallback: if UART has data but IRQ hasn't fired yet, read directly */
-        if (uart_rx_ready()) {
+        /*
+         * Fallback: if this is the serial console TTY and the UART has
+         * data but the IRQ hasn't fired yet, read directly from hardware.
+         *
+         * This fallback must ONLY apply to the serial console TTY —
+         * other TTYs (e.g., fbcon0) receive input exclusively through
+         * their IRQ handlers calling tty_input_char_tp().
+         */
+        if (tp == tty_get_console() && uart_rx_ready()) {
             char c = uart_getc();
             return c;
         }
 
         /*
          * No data available — sleep on &tp->t_rawcount until
-         * tty_input_char() calls thread_wakeup_on() after buffering
+         * tty_input_char_tp() calls thread_wakeup_on() after buffering
          * a character. This deschedules the thread (TH_WAIT) so the
          * idle thread runs WFI, letting QEMU process I/O.
          */
@@ -458,10 +479,10 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
                 if (t->c_lflag & ISIG) {
                     if (c == (char)t->c_cc[VINTR]) {
                         if (t->c_lflag & ECHO) {
-                            uart_putc('^');
-                            uart_putc('C');
-                            uart_putc('\r');
-                            uart_putc('\n');
+                            tp->t_putc('^');
+                            tp->t_putc('C');
+                            tp->t_putc('\r');
+                            tp->t_putc('\n');
                         }
                         tp->t_linepos = 0;
                         tp->t_lineout = 0;
@@ -471,10 +492,10 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
                     }
                     if (c == (char)t->c_cc[VQUIT]) {
                         if (t->c_lflag & ECHO) {
-                            uart_putc('^');
-                            uart_putc('\\');
-                            uart_putc('\r');
-                            uart_putc('\n');
+                            tp->t_putc('^');
+                            tp->t_putc('\\');
+                            tp->t_putc('\r');
+                            tp->t_putc('\n');
                         }
                         tp->t_linepos = 0;
                         tp->t_lineout = 0;
@@ -484,10 +505,10 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
                     }
                     if (c == (char)t->c_cc[VSUSP]) {
                         if (t->c_lflag & ECHO) {
-                            uart_putc('^');
-                            uart_putc('Z');
-                            uart_putc('\r');
-                            uart_putc('\n');
+                            tp->t_putc('^');
+                            tp->t_putc('Z');
+                            tp->t_putc('\r');
+                            tp->t_putc('\n');
                         }
                         tp->t_linepos = 0;
                         tp->t_lineout = 0;
@@ -513,9 +534,11 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
                     if (tp->t_linepos > 0) {
                         tp->t_linepos--;
                         if (t->c_lflag & ECHOE) {
-                            uart_putc('\b');
-                            uart_putc(' ');
-                            uart_putc('\b');
+                            tp->t_putc('\b');
+                            tp->t_putc(' ');
+                            tp->t_putc('\b');
+                            if (tp->t_putc == fbconsole_putc)
+                                fbconsole_flush();
                         }
                     }
                     continue;
@@ -526,14 +549,14 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
                     while (tp->t_linepos > 0) {
                         tp->t_linepos--;
                         if (t->c_lflag & ECHOK) {
-                            uart_putc('\b');
-                            uart_putc(' ');
-                            uart_putc('\b');
+                            tp->t_putc('\b');
+                            tp->t_putc(' ');
+                            tp->t_putc('\b');
                         }
                     }
                     if (t->c_lflag & ECHOK) {
-                        uart_putc('\n');
-                        uart_putc('\r');
+                        tp->t_putc('\n');
+                        tp->t_putc('\r');
                     }
                     continue;
                 }
@@ -544,18 +567,18 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
                            tp->t_linebuf[tp->t_linepos - 1] == ' ') {
                         tp->t_linepos--;
                         if (t->c_lflag & ECHOE) {
-                            uart_putc('\b');
-                            uart_putc(' ');
-                            uart_putc('\b');
+                            tp->t_putc('\b');
+                            tp->t_putc(' ');
+                            tp->t_putc('\b');
                         }
                     }
                     while (tp->t_linepos > 0 &&
                            tp->t_linebuf[tp->t_linepos - 1] != ' ') {
                         tp->t_linepos--;
                         if (t->c_lflag & ECHOE) {
-                            uart_putc('\b');
-                            uart_putc(' ');
-                            uart_putc('\b');
+                            tp->t_putc('\b');
+                            tp->t_putc(' ');
+                            tp->t_putc('\b');
                         }
                     }
                     continue;
@@ -564,17 +587,23 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
                 /* Echo */
                 if (t->c_lflag & ECHO) {
                     if (c == '\n') {
-                        uart_putc('\n');
+                        tp->t_putc('\n');
                         if (t->c_oflag & ONLCR)
-                            uart_putc('\r');
+                            tp->t_putc('\r');
                     } else if ((unsigned char)c < 0x20 && c != '\t') {
                         if (t->c_lflag & ECHOCTL) {
-                            uart_putc('^');
-                            uart_putc(c + '@');
+                            tp->t_putc('^');
+                            tp->t_putc(c + '@');
                         }
                     } else {
-                        uart_putc(c);
+                        tp->t_putc(c);
                     }
+                    /*
+                     * Flush fbconsole after echo so typed characters
+                     * appear immediately on the framebuffer display.
+                     */
+                    if (tp->t_putc == fbconsole_putc)
+                        fbconsole_flush();
                 }
 
                 /* Buffer the character */
@@ -638,8 +667,11 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
                 c = '\n';
 
             /* Echo in raw mode if ECHO is set */
-            if (t->c_lflag & ECHO)
-                uart_putc(c);
+            if (t->c_lflag & ECHO) {
+                tp->t_putc(c);
+                if (tp->t_putc == fbconsole_putc)
+                    fbconsole_flush();
+            }
 
             /* Copy to user */
             uint64_t pa = vmm_translate(p->p_vmspace->pgd, uva + nread);
@@ -677,17 +709,31 @@ int64_t tty_write(struct tty *tp, const void *ubuf, uint64_t count)
         if (t->c_oflag & OPOST) {
             /* Output post-processing */
             if (c == '\n' && (t->c_oflag & ONLCR)) {
-                uart_putc('\r');
-                uart_putc('\n');
+                tp->t_putc('\r');
+                tp->t_putc('\n');
             } else {
-                uart_putc(c);
+                tp->t_putc(c);
             }
         } else {
-            uart_putc(c);
+            tp->t_putc(c);
         }
 
         nwritten++;
     }
+
+    /*
+     * Flush the framebuffer console if this TTY writes to it.
+     *
+     * Since fbconsole_putc() batches output (only flushing on \n),
+     * we need an explicit flush at the end of each tty_write() call
+     * to ensure partial lines (e.g., "login: " prompts) appear
+     * immediately on the display.
+     *
+     * fbconsole_flush() is a no-op if there's nothing dirty or if
+     * the fbconsole isn't active, so this is safe to call for any TTY.
+     */
+    if (tp->t_putc == fbconsole_putc)
+        fbconsole_flush();
 
     return (int64_t)nwritten;
 }

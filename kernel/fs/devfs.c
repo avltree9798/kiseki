@@ -20,6 +20,7 @@
 #include <kern/kprintf.h>
 #include <kern/sync.h>
 #include <kern/tty.h>
+#include <kern/fbconsole.h>
 
 /* ============================================================================
  * Device Identifiers
@@ -29,6 +30,7 @@
 #define DEVFS_TTY       2       /* /dev/tty (alias for console) */
 #define DEVFS_NULL      3       /* /dev/null */
 #define DEVFS_ZERO      4       /* /dev/zero */
+#define DEVFS_FBCON0    5       /* /dev/fbcon0 (framebuffer console) */
 
 #define DEVFS_MAX_NODES 16
 
@@ -136,6 +138,13 @@ devfs_chr_read(struct vnode *vp, void *buf, uint64_t offset, uint64_t count)
         return tty_read(tp, buf, count);
     }
 
+    case DEVFS_FBCON0: {
+        struct tty *tp = fbconsole_get_tty();
+        if (tp == NULL)
+            return -EIO;
+        return tty_read(tp, buf, count);
+    }
+
     case DEVFS_NULL:
         /* Reading from /dev/null always returns EOF */
         return 0;
@@ -168,6 +177,13 @@ devfs_chr_write(struct vnode *vp, const void *buf, uint64_t offset,
     case DEVFS_CONSOLE:
     case DEVFS_TTY: {
         struct tty *tp = tty_get_console();
+        return tty_write(tp, buf, count);
+    }
+
+    case DEVFS_FBCON0: {
+        struct tty *tp = fbconsole_get_tty();
+        if (tp == NULL)
+            return -EIO;
         return tty_write(tp, buf, count);
     }
 
@@ -356,6 +372,7 @@ devfs_mount(struct mount *mp)
         { "tty",     DEVFS_TTY     },
         { "null",    DEVFS_NULL    },
         { "zero",    DEVFS_ZERO    },
+        { "fbcon0",  DEVFS_FBCON0  },
     };
 
     for (int i = 0; i < (int)(sizeof(devices) / sizeof(devices[0])); i++) {
@@ -468,4 +485,64 @@ bool devfs_is_console(struct vnode *vp)
         return false;
 
     return (dn->devid == DEVFS_CONSOLE || dn->devid == DEVFS_TTY);
+}
+
+/*
+ * devfs_is_fbcon - Check if a vnode is the framebuffer console device.
+ *
+ * Returns true if the vnode represents /dev/fbcon0.
+ */
+bool devfs_is_fbcon(struct vnode *vp)
+{
+    if (vp == NULL || vp->v_type != VCHR)
+        return false;
+    if (vp->v_ops != &devfs_chr_ops)
+        return false;
+
+    struct devfs_node *dn = (struct devfs_node *)vp->v_data;
+    if (dn == NULL)
+        return false;
+
+    return (dn->devid == DEVFS_FBCON0);
+}
+
+/*
+ * devfs_is_tty_device - Check if a vnode is any TTY device in devfs.
+ *
+ * Returns true for /dev/console, /dev/tty, and /dev/fbcon0.
+ * Used by sys_ioctl to determine if a vnode-backed fd should route
+ * ioctls through the TTY layer.
+ */
+bool devfs_is_tty_device(struct vnode *vp)
+{
+    return devfs_is_console(vp) || devfs_is_fbcon(vp);
+}
+
+/*
+ * devfs_get_tty_for_vnode - Return the TTY associated with a devfs vnode.
+ *
+ * For /dev/console and /dev/tty: returns the serial console TTY.
+ * For /dev/fbcon0: returns the framebuffer console TTY.
+ * For anything else: returns NULL.
+ */
+struct tty *devfs_get_tty_for_vnode(struct vnode *vp)
+{
+    if (vp == NULL || vp->v_type != VCHR)
+        return NULL;
+    if (vp->v_ops != &devfs_chr_ops)
+        return NULL;
+
+    struct devfs_node *dn = (struct devfs_node *)vp->v_data;
+    if (dn == NULL)
+        return NULL;
+
+    switch (dn->devid) {
+    case DEVFS_CONSOLE:
+    case DEVFS_TTY:
+        return tty_get_console();
+    case DEVFS_FBCON0:
+        return fbconsole_get_tty();
+    default:
+        return NULL;
+    }
 }

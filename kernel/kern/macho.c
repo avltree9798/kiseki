@@ -106,16 +106,22 @@ static uint64_t vmprot_to_pte(uint32_t prot)
  *   - Zero-fill (vmsize > filesize): allocated as zero pages (BSS)
  *   - Slide: all vmaddrs are adjusted by slide
  *
- * @fd:        File descriptor for the Mach-O binary
+ * @vp:        Vnode for the Mach-O binary (direct vnode I/O, no fd table)
  * @seg:       The segment_command_64 to load
  * @space:     Target user VM space
  * @slide:     ASLR slide to apply
  * @result:    Load result to update with segment info
  *
+ * Uses vnode-level read with explicit offsets rather than fd-based seek/read.
+ * This avoids the global fd table entirely, preventing SMP races where one
+ * process's close() could invalidate another process's kernel-internal fd.
+ *
+ * Reference: XNU bsd/kern/mach_loader.c load_segment() uses vnode_pager
+ *
  * Returns LOAD_SUCCESS or error.
  */
 static load_return_t
-load_segment(int fd, struct segment_command_64 *seg,
+load_segment(struct vnode *vp, struct segment_command_64 *seg,
              struct vm_space *space, int64_t slide,
              load_result_t *result)
 {
@@ -178,15 +184,12 @@ load_segment(int fd, struct segment_command_64 *seg,
             seg->segname, vmaddr, vmsize, fileoff, filesize, vm_pages);
 #endif
 
-    /* Seek to segment data in file */
-    if (filesize > 0) {
-        int64_t seekret = vfs_lseek(fd, (int64_t)fileoff, SEEK_SET);
-        if (seekret < 0) {
-            kprintf("macho: seek failed for '%.16s': %ld\n",
-                    seg->segname, seekret);
-            return LOAD_IOERROR;
-        }
-    }
+    /*
+     * Read segment data from the vnode using explicit file offsets.
+     * No seek required — vnode read takes (vp, buf, offset, count).
+     * This is immune to the global fd table SMP race.
+     */
+    uint64_t file_offset_cursor = fileoff;  /* Tracks current read position */
 
     for (uint64_t p = 0; p < vm_pages; p++) {
         uint64_t pa = pmm_alloc_page();
@@ -208,8 +211,8 @@ load_segment(int fd, struct segment_command_64 *seg,
             if (chunk > PAGE_SIZE)
                 chunk = PAGE_SIZE;
 
-            /* Read directly into the page — no intermediate buffer needed */
-            int64_t nread = vfs_read(fd, kva, chunk);
+            /* Read directly into the page via vnode read at explicit offset */
+            int64_t nread = vp->v_ops->read(vp, kva, file_offset_cursor, chunk);
 #ifdef DEBUG
             if (p == 0 || strncmp_k(seg->segname, "__TEXT", 6) == 0) {
                 kprintf("macho:   page %lu: read %ld bytes, first word = 0x%08x\n",
@@ -219,6 +222,7 @@ load_segment(int fd, struct segment_command_64 *seg,
             (void)nread;
 #endif
 
+            file_offset_cursor += chunk;
             file_remaining -= chunk;
         }
 
@@ -268,7 +272,7 @@ load_segment(int fd, struct segment_command_64 *seg,
  *   Pass 3: Linking — LC_LOAD_DYLINKER (recursive dyld load),
  *           LC_LOAD_DYLIB (record dependencies)
  *
- * @fd:      Open file descriptor for the Mach-O binary
+ * @vp:      Vnode for the Mach-O binary (direct vnode I/O)
  * @hdr:     Already-validated Mach-O header
  * @space:   Target user VM space
  * @depth:   Recursion depth (1=main binary, 2=dyld)
@@ -276,11 +280,16 @@ load_segment(int fd, struct segment_command_64 *seg,
  * @result:  Load result to fill
  * @binresult: Parent binary's load result (non-NULL when loading dyld)
  *
+ * All file I/O uses vnode-level read with explicit offsets, bypassing
+ * the global fd table entirely. This prevents SMP races where one
+ * process's close() syscall could invalidate a kernel-internal fd
+ * being used by another process's exec path.
+ *
  * Returns LOAD_SUCCESS or error.
  * ============================================================================ */
 
 static load_return_t
-parse_machfile(int fd, struct mach_header_64 *hdr,
+parse_machfile(struct vnode *vp, struct mach_header_64 *hdr,
                struct vm_space *space, int depth,
                int64_t slide, load_result_t *result,
                load_result_t *binresult __attribute__((unused)))
@@ -349,7 +358,10 @@ parse_machfile(int fd, struct mach_header_64 *hdr,
 
     /* Identity mapping: PA == VA for RAM */
     uint8_t *cmds_buf = (uint8_t *)cmds_pa;
-    int64_t nread = vfs_read(fd, cmds_buf, cmds_size);
+
+    /* Load commands start immediately after the Mach-O header */
+    uint64_t cmds_offset = sizeof(struct mach_header_64);
+    int64_t nread = vp->v_ops->read(vp, cmds_buf, cmds_offset, cmds_size);
     if (nread != (int64_t)cmds_size) {
         kprintf("macho: short read on load commands (%ld/%u)\n",
                 (long)nread, cmds_size);
@@ -516,7 +528,7 @@ parse_machfile(int fd, struct mach_header_64 *hdr,
             struct segment_command_64 *seg =
                 (struct segment_command_64 *)cmd_ptr;
 
-            ret = load_segment(fd, seg, space, slide, result);
+            ret = load_segment(vp, seg, space, slide, result);
             if (ret != LOAD_SUCCESS) {
                 kprintf("macho: load_segment failed for '%.16s': %d\n",
                         seg->segname, ret);
@@ -561,24 +573,27 @@ parse_machfile(int fd, struct mach_header_64 *hdr,
         result->dylinker_path[MACHO_DYLINKER_PATH_MAX - 1] = '\0';
 
         /*
-         * Open dyld and load it recursively.
+         * Look up dyld's vnode and load it recursively.
          * XNU's load_dylinker calls get_macho_vnode + parse_machfile
-         * at depth+1.
+         * at depth+1. We use vfs_lookup for vnode resolution, matching
+         * the XNU pattern of operating on vnodes rather than fds.
          */
-        int dyld_fd = vfs_open(result->dylinker_path, O_RDONLY, 0);
-        if (dyld_fd < 0) {
-            kprintf("macho: cannot open dyld '%s': %d\n",
-                    result->dylinker_path, -dyld_fd);
+        struct vnode *dyld_vp = NULL;
+        int dyld_err = vfs_lookup(result->dylinker_path, &dyld_vp);
+        if (dyld_err != 0 || dyld_vp == NULL) {
+            kprintf("macho: cannot find dyld '%s': %d\n",
+                    result->dylinker_path, -dyld_err);
             /* Don't fail — fall back to direct entry */
             kprintf("macho: WARNING: falling back to direct entry "
                     "(no dynamic linker)\n");
         } else {
-            /* Read dyld's Mach-O header */
+            /* Read dyld's Mach-O header via vnode read at offset 0 */
             struct mach_header_64 dyld_hdr;
-            int64_t dread = vfs_read(dyld_fd, &dyld_hdr, sizeof(dyld_hdr));
+            int64_t dread = dyld_vp->v_ops->read(dyld_vp, &dyld_hdr, 0,
+                                                  sizeof(dyld_hdr));
             if (dread != (int64_t)sizeof(dyld_hdr)) {
                 kprintf("macho: short read on dyld header\n");
-                vfs_close(dyld_fd);
+                vnode_release(dyld_vp);
             } else if (dyld_hdr.magic != MH_MAGIC_64 ||
                        (dyld_hdr.cputype & ~CPU_ARCH_MASK) !=
                        (CPU_TYPE_ARM & ~0) ||
@@ -586,7 +601,7 @@ parse_machfile(int fd, struct mach_header_64 *hdr,
                 kprintf("macho: dyld is not a valid MH_DYLINKER "
                         "(magic=0x%x type=%u)\n",
                         dyld_hdr.magic, dyld_hdr.filetype);
-                vfs_close(dyld_fd);
+                vnode_release(dyld_vp);
             } else {
                 /*
                  * Recursively parse dyld at depth 2.
@@ -608,7 +623,7 @@ parse_machfile(int fd, struct mach_header_64 *hdr,
                 uint64_t dr_pa = pmm_alloc_pages(3); /* 32KB (order 3 = 8 pages) */
                 if (dr_pa == 0) {
                     kprintf("macho: OOM for dyld_result\n");
-                    vfs_close(dyld_fd);
+                    vnode_release(dyld_vp);
                 } else {
                 load_result_t *dyld_result = (load_result_t *)dr_pa;
                 memset_k(dyld_result, 0, sizeof(*dyld_result));
@@ -628,10 +643,10 @@ parse_machfile(int fd, struct mach_header_64 *hdr,
                 dyld_slide = (int64_t)dyld_base;
 
                 load_return_t dyld_ret = parse_machfile(
-                    dyld_fd, &dyld_hdr, space, depth + 1,
+                    dyld_vp, &dyld_hdr, space, depth + 1,
                     dyld_slide, dyld_result, result);
 
-                vfs_close(dyld_fd);
+                vnode_release(dyld_vp);
 
                 if (dyld_ret == LOAD_SUCCESS) {
                     /*
@@ -748,7 +763,6 @@ load_return_t macho_load(const char *path, struct vm_space *space,
                          load_result_t *result)
 {
     struct mach_header_64 hdr;
-    int fd;
     int64_t nread;
     int ret;
 
@@ -756,25 +770,35 @@ load_return_t macho_load(const char *path, struct vm_space *space,
     memset_k(result, 0, sizeof(*result));
     result->min_vm_addr = 0xFFFFFFFFFFFFFFFFUL;
 
-    /* Open the binary */
-    fd = vfs_open(path, O_RDONLY, 0);
-    if (fd < 0) {
-        kprintf("macho: cannot open '%s': error %d\n", path, -fd);
+    /*
+     * Look up the binary's vnode directly instead of using vfs_open/fd.
+     *
+     * XNU's execve path uses get_macho_vnode() → vnode_pager for all
+     * Mach-O loading — it never allocates a user-visible file descriptor
+     * for the binary being exec'd. Using vnode-level I/O here prevents
+     * the SMP race where a concurrent process's close() syscall could
+     * invalidate a global fd table entry being used by the macho loader
+     * on another CPU.
+     */
+    struct vnode *vp = NULL;
+    int verr = vfs_lookup(path, &vp);
+    if (verr != 0 || vp == NULL) {
+        kprintf("macho: cannot open '%s': error %d\n", path, -verr);
         return LOAD_IOERROR;
     }
 
-    /* Read the Mach-O header */
-    nread = vfs_read(fd, &hdr, sizeof(hdr));
+    /* Read the Mach-O header via vnode read at offset 0 */
+    nread = vp->v_ops->read(vp, &hdr, 0, sizeof(hdr));
     if (nread != (int64_t)sizeof(hdr)) {
         kprintf("macho: short read on header (%ld bytes)\n", (long)nread);
-        vfs_close(fd);
+        vnode_release(vp);
         return LOAD_IOERROR;
     }
 
     /* Validate header */
     ret = macho_validate_header(&hdr);
     if (ret != 0) {
-        vfs_close(fd);
+        vnode_release(vp);
         return LOAD_BADMACHO;
     }
 
@@ -801,10 +825,10 @@ load_return_t macho_load(const char *path, struct vm_space *space,
     int64_t aslr_slide = 0;
     (void)hdr.flags;  /* Suppress unused warning until ASLR enabled */
 
-    load_return_t lret = parse_machfile(fd, &hdr, space, 1,
+    load_return_t lret = parse_machfile(vp, &hdr, space, 1,
                                         aslr_slide, result, NULL);
 
-    vfs_close(fd);
+    vnode_release(vp);
 
     if (lret != LOAD_SUCCESS)
         return lret;

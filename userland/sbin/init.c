@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <dirent.h>
 #include <mach/mach.h>
@@ -756,18 +757,28 @@ static void start_system_daemons(void)
  * Getty / Console
  * ============================================================================ */
 
-static int spawn_getty(void)
+/*
+ * spawn_getty_on - Spawn a getty process on a specific TTY device.
+ *
+ * This matches how macOS launchd creates separate getty instances for
+ * each console device (serial console, virtual console, etc.).
+ *
+ * @devpath: Device path (e.g., "/dev/console", "/dev/fbcon0")
+ *
+ * Returns the child PID on success, -1 on failure.
+ */
+static int spawn_getty_on(const char *devpath)
 {
     int pid = fork();
 
     if (pid < 0) {
-        printf("init: fork failed\n");
+        printf("init: fork failed for getty on %s\n", devpath);
         return -1;
     }
 
     if (pid == 0) {
-        /* Child: exec getty */
-        char *argv[] = { "getty", "/dev/console", NULL };
+        /* Child: exec getty with the specified device */
+        char *argv[] = { "getty", (char *)devpath, NULL };
         char *envp[] = {
             "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
             "HOME=/root",
@@ -787,11 +798,19 @@ static int spawn_getty(void)
         argv[0] = "-bash";
         execve("/bin/bash", argv, envp);
 
-        printf("init: cannot exec getty, login, or bash\n");
+        printf("init: cannot exec getty, login, or bash on %s\n", devpath);
         _exit(1);
     }
 
     return pid;
+}
+
+/*
+ * spawn_getty - Spawn getty on the serial console (legacy wrapper).
+ */
+static int spawn_getty(void)
+{
+    return spawn_getty_on("/dev/console");
 }
 
 /* ============================================================================
@@ -840,7 +859,31 @@ int main(void)
     /* Start system daemons (launchd-style) */
     start_system_daemons();
 
-    /* Main loop: spawn getty, reap children */
+    /*
+     * Spawn getty on the framebuffer console if /dev/fbcon0 exists.
+     *
+     * This runs independently from the serial console getty — both
+     * consoles operate in parallel, each with their own session.
+     * Matches how macOS launchd manages multiple console devices.
+     *
+     * The fbcon0 getty is "fire and forget" for now; if it exits,
+     * we re-spawn it below alongside the serial getty.
+     */
+    int fbcon_getty_pid = -1;
+    {
+        /* Try to open /dev/fbcon0 to check if it exists and is functional */
+        int testfd = open("/dev/fbcon0", O_RDONLY);
+        if (testfd >= 0) {
+            close(testfd);
+            fbcon_getty_pid = spawn_getty_on("/dev/fbcon0");
+            if (fbcon_getty_pid > 0) {
+                printf("init: spawned getty on /dev/fbcon0 (pid %d)\n",
+                       fbcon_getty_pid);
+            }
+        }
+    }
+
+    /* Main loop: spawn serial console getty, reap children */
     for (;;) {
         int getty_pid = spawn_getty();
         if (getty_pid < 0) {
@@ -863,6 +906,17 @@ int main(void)
                 printf("\ninit: getty (pid %d) exited, status=%d\n",
                        rpid, (status >> 8) & 0xFF);
                 break;
+            }
+
+            /* Re-spawn fbcon0 getty if it exited */
+            if (rpid == fbcon_getty_pid) {
+                printf("init: fbcon0 getty (pid %d) exited, respawning\n", rpid);
+                fbcon_getty_pid = spawn_getty_on("/dev/fbcon0");
+                if (fbcon_getty_pid > 0) {
+                    printf("init: respawned fbcon0 getty (pid %d)\n",
+                           fbcon_getty_pid);
+                }
+                continue;
             }
 
             /* Check if a daemon exited */

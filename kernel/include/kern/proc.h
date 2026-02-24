@@ -48,6 +48,7 @@
 
 struct filedesc {
     struct file     *fd_ofiles[PROC_FD_MAX];    /* Open file pointers */
+    uint8_t         fd_oflags[PROC_FD_MAX];     /* Per-FD flags (FD_CLOEXEC etc.) */
     uint32_t        fd_nfiles;                  /* Number of allocated slots */
     spinlock_t      fd_lock;                    /* Protects table */
 };

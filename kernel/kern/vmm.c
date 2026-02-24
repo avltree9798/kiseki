@@ -13,6 +13,17 @@
 #include <kern/kprintf.h>
 #include <kern/sync.h>
 
+/* BSD errno values used by vm_map operations */
+#ifndef EINVAL
+#define EINVAL  22
+#endif
+#ifndef ENOMEM
+#define ENOMEM  12
+#endif
+#ifndef EACCES
+#define EACCES  13
+#endif
+
 /* Kernel L0 page table (allocated at init, never freed) */
 static pte_t *kernel_pgd;
 
@@ -384,6 +395,32 @@ struct vm_space *vmm_create_space(void)
      * So user ASIDs range from 1 to 255. When we wrap, flush the entire
      * TLB so stale entries from the previous generation can't alias.
      */
+    /*
+     * Create the vm_map for this address space.
+     *
+     * The user VA layout is:
+     *   0x100000000 — Mach-O main binary
+     *   0x200000000 — dyld
+     *   0x300000000 — mmap region
+     *   ...
+     *   0x7FFFFFFF0000 — user stack top
+     *
+     * We set min_offset to 0 (some regions like commpage are below
+     * USER_VA_BASE) and max_offset to just above the stack.
+     */
+    space->map = vm_map_create(0, USER_STACK_TOP + PAGE_SIZE);
+    if (!space->map) {
+        /* OOM — clean up and fail */
+        /* Free per-process L1 tables */
+        for (int i = 0; i < PT_ENTRIES; i++) {
+            if (space->pgd[i] & PTE_VALID)
+                pmm_free_page(PTE_TO_PHYS(space->pgd[i]));
+        }
+        pmm_free_page((uint64_t)space->pgd);
+        pmm_free_page(pa);
+        return NULL;
+    }
+
     uint64_t irq_flags;
     spin_lock_irqsave(&vmm_lock, &irq_flags);
     space->asid = next_asid++;
@@ -483,6 +520,13 @@ void vmm_destroy_space(struct vm_space *space)
 
         /* Free the L0 table page */
         pmm_free_page((uint64_t)space->pgd);
+    }
+
+    /* Free the vm_map */
+    if (space->map) {
+        spin_unlock_irqrestore(&vmm_lock, irq_flags);
+        vm_map_destroy(space->map);
+        spin_lock_irqsave(&vmm_lock, &irq_flags);
     }
 
     /* Free the vm_space struct itself */
@@ -663,6 +707,570 @@ int vmm_protect_page(pte_t *pgd, uint64_t va, uint64_t new_flags)
 pte_t *vmm_get_pte(pte_t *pgd, uint64_t va)
 {
     return walk_pgd(pgd, va, false);
+}
+
+/* ============================================================================
+ * VM Map — Region-level virtual memory management
+ *
+ * Modelled on XNU's vm_map (osfmk/vm/vm_map.c). Tracks what virtual
+ * address regions are mapped, with what protections, inheritance, and
+ * backing store. The vm_map is authoritative; the pmap (hardware page
+ * tables) is a cache.
+ *
+ * Implementation uses a sentinel-headed sorted doubly-linked list of
+ * vm_map_entry structures. XNU also uses an RB-tree for O(log n) lookup;
+ * we omit that for now and use linear search — sufficient for the current
+ * scale of ~50-100 entries per process.
+ * ============================================================================ */
+
+/*
+ * vm_map_alloc_entry - Allocate an entry from the map's static pool
+ */
+static struct vm_map_entry *vm_map_alloc_entry(struct vm_map *map)
+{
+    for (int i = 0; i < VM_MAP_ENTRIES_MAX; i++) {
+        if (!map->entry_used[i]) {
+            map->entry_used[i] = 1;
+            struct vm_map_entry *e = &map->entries[i];
+            e->prev = NULL;
+            e->next = NULL;
+            e->vme_start = 0;
+            e->vme_end = 0;
+            e->protection = 0;
+            e->max_protection = 0;
+            e->inheritance = VM_INHERIT_DEFAULT;
+            e->is_shared = 0;
+            e->needs_copy = 0;
+            e->wired = 0;
+            e->_pad_bits = 0;
+            e->backing_fd = -1;
+            e->file_offset = 0;
+            e->backing_vnode = NULL;
+            return e;
+        }
+    }
+    return NULL;  /* Pool exhausted */
+}
+
+/*
+ * vm_map_free_entry - Return an entry to the map's static pool
+ */
+static void vm_map_free_entry(struct vm_map *map, struct vm_map_entry *entry)
+{
+    /* Calculate index from pointer arithmetic */
+    int idx = (int)(entry - map->entries);
+    if (idx >= 0 && idx < VM_MAP_ENTRIES_MAX) {
+        map->entry_used[idx] = 0;
+    }
+}
+
+/*
+ * vm_map_entry_link - Insert entry into the list after the given predecessor
+ */
+static void vm_map_entry_link(struct vm_map_entry *after,
+                              struct vm_map_entry *entry)
+{
+    entry->prev = after;
+    entry->next = after->next;
+    after->next->prev = entry;
+    after->next = entry;
+}
+
+/*
+ * vm_map_entry_unlink - Remove entry from the list
+ */
+static void vm_map_entry_unlink(struct vm_map_entry *entry)
+{
+    entry->prev->next = entry->next;
+    entry->next->prev = entry->prev;
+    entry->prev = NULL;
+    entry->next = NULL;
+}
+
+/* --- Public VM Map API --- */
+
+struct vm_map *vm_map_create(uint64_t min_offset, uint64_t max_offset)
+{
+    /*
+     * Allocate a vm_map from physical pages. The struct is large due to
+     * the static entry pool, so we allocate enough contiguous pages.
+     */
+    uint64_t map_size = sizeof(struct vm_map);
+    uint64_t pages_needed = (map_size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    /* Use the buddy allocator for multi-page allocation */
+    uint32_t order = 0;
+    while ((1UL << order) < pages_needed)
+        order++;
+
+    uint64_t pa = pmm_alloc_pages(order);
+    if (!pa)
+        return NULL;
+
+    struct vm_map *map = (struct vm_map *)pa;
+
+    /* Zero the entire allocation */
+    uint8_t *p = (uint8_t *)pa;
+    for (uint64_t i = 0; i < (1UL << order) * PAGE_SIZE; i++)
+        p[i] = 0;
+
+    /* Initialise sentinel — points to itself (empty list) */
+    map->header.prev = &map->header;
+    map->header.next = &map->header;
+    map->header.vme_start = min_offset;
+    map->header.vme_end = max_offset;
+
+    map->nentries = 0;
+    map->min_offset = min_offset;
+    map->max_offset = max_offset;
+    /*
+     * hint_addr controls where vm_map_find_space starts searching for
+     * free gaps. Setting it to USER_MMAP_BASE (0x300000000) ensures
+     * that the first anonymous mmap does not return VA 0, which
+     * userspace (dyld, libSystem) interprets as NULL / failure.
+     *
+     * Fixed mappings (MAP_FIXED) bypass the hint entirely, so Mach-O
+     * load addresses at 0x100000000 and dyld at 0x200000000 still work.
+     */
+    map->hint_addr = (min_offset < USER_MMAP_BASE && max_offset > USER_MMAP_BASE)
+                     ? USER_MMAP_BASE : min_offset;
+    map->lock = (spinlock_t)SPINLOCK_INIT;
+
+    return map;
+}
+
+void vm_map_destroy(struct vm_map *map)
+{
+    if (!map)
+        return;
+
+    /* Free the allocation. Calculate order from struct size. */
+    uint64_t map_size = sizeof(struct vm_map);
+    uint64_t pages_needed = (map_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint32_t order = 0;
+    while ((1UL << order) < pages_needed)
+        order++;
+
+    pmm_free_pages((uint64_t)map, order);
+}
+
+bool vm_map_lookup_entry(struct vm_map *map, uint64_t addr,
+                         struct vm_map_entry **entry)
+{
+    /*
+     * Walk the sorted list to find the entry containing addr, or the
+     * entry just before the gap where addr falls.
+     *
+     * XNU checks a hint cache first, then falls through to RB-tree.
+     * We do a simple linear scan — sufficient for ~100 entries.
+     */
+    struct vm_map_entry *cur = map->header.next;
+    struct vm_map_entry *prev = &map->header;
+
+    while (cur != &map->header) {
+        if (addr < cur->vme_start) {
+            /* addr is in the gap before cur */
+            *entry = prev;
+            return false;
+        }
+        if (addr < cur->vme_end) {
+            /* addr is within cur */
+            *entry = cur;
+            return true;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+
+    /* addr is past all entries */
+    *entry = prev;
+    return false;
+}
+
+/*
+ * vm_map_find_space - Find a free gap of at least 'size' bytes
+ *
+ * Searches from hint_addr forward, wrapping once if needed.
+ * Returns the start address of the gap, or 0 on failure.
+ */
+static uint64_t vm_map_find_space(struct vm_map *map, uint64_t size)
+{
+    uint64_t start = ALIGN_UP(map->hint_addr, PAGE_SIZE);
+
+    /* Walk entries to find a gap */
+    struct vm_map_entry *cur = map->header.next;
+
+    /* Skip entries that end before our search start */
+    while (cur != &map->header && cur->vme_end <= start)
+        cur = cur->next;
+
+    /* Try to fit in gaps */
+    while (cur != &map->header) {
+        /* Gap is [start, cur->vme_start) */
+        if (start + size <= cur->vme_start && start + size <= map->max_offset) {
+            map->hint_addr = start + size;
+            return start;
+        }
+        /* Move past this entry */
+        start = ALIGN_UP(cur->vme_end, PAGE_SIZE);
+        cur = cur->next;
+    }
+
+    /* Gap after last entry: [start, max_offset) */
+    if (start + size <= map->max_offset) {
+        map->hint_addr = start + size;
+        return start;
+    }
+
+    /* Wrap: try from min_offset if hint was past the start */
+    if (map->hint_addr > map->min_offset) {
+        start = ALIGN_UP(map->min_offset, PAGE_SIZE);
+        cur = map->header.next;
+
+        while (cur != &map->header) {
+            if (start + size <= cur->vme_start && start + size <= map->max_offset) {
+                map->hint_addr = start + size;
+                return start;
+            }
+            start = ALIGN_UP(cur->vme_end, PAGE_SIZE);
+            cur = cur->next;
+        }
+        if (start + size <= map->max_offset) {
+            map->hint_addr = start + size;
+            return start;
+        }
+    }
+
+    return 0;  /* No space found */
+}
+
+int vm_map_enter(struct vm_map *map, uint64_t *addr, uint64_t size,
+                 uint8_t protection, uint8_t max_protection,
+                 uint8_t inheritance, bool is_shared,
+                 int fd, uint64_t file_offset, struct vnode *vnode)
+{
+    if (size == 0 || (size & (PAGE_SIZE - 1)))
+        return -EINVAL;
+
+    uint64_t irq_flags;
+    spin_lock_irqsave(&map->lock, &irq_flags);
+
+    uint64_t map_addr;
+    bool fixed = (*addr != 0);
+
+    if (fixed) {
+        /* MAP_FIXED — use the exact address. Check for overlap. */
+        map_addr = *addr;
+        if (map_addr < map->min_offset || map_addr + size > map->max_offset) {
+            spin_unlock_irqrestore(&map->lock, irq_flags);
+            return -EINVAL;
+        }
+
+        /* Check that the range doesn't overlap existing entries */
+        struct vm_map_entry *cur = map->header.next;
+        while (cur != &map->header) {
+            if (cur->vme_start < map_addr + size &&
+                cur->vme_end > map_addr) {
+                /*
+                 * Overlap detected. XNU's MAP_FIXED with vmf_overwrite
+                 * removes existing entries. We do the same.
+                 */
+                spin_unlock_irqrestore(&map->lock, irq_flags);
+                vm_map_remove(map, map_addr, map_addr + size);
+                spin_lock_irqsave(&map->lock, &irq_flags);
+                break;
+            }
+            cur = cur->next;
+        }
+    } else {
+        /* Find free space */
+        map_addr = vm_map_find_space(map, size);
+        if (map_addr == 0) {
+            spin_unlock_irqrestore(&map->lock, irq_flags);
+            return -ENOMEM;
+        }
+    }
+
+    /* Allocate an entry */
+    struct vm_map_entry *new_entry = vm_map_alloc_entry(map);
+    if (!new_entry) {
+        spin_unlock_irqrestore(&map->lock, irq_flags);
+        return -ENOMEM;
+    }
+
+    new_entry->vme_start = map_addr;
+    new_entry->vme_end = map_addr + size;
+    new_entry->protection = protection;
+    new_entry->max_protection = max_protection;
+    new_entry->inheritance = inheritance;
+    new_entry->is_shared = is_shared ? 1 : 0;
+    new_entry->needs_copy = 0;
+    new_entry->backing_fd = fd;
+    new_entry->file_offset = file_offset;
+    new_entry->backing_vnode = vnode;
+
+    /* Find insertion point — after the last entry with vme_start <= map_addr */
+    struct vm_map_entry *after = &map->header;
+    struct vm_map_entry *cur = map->header.next;
+    while (cur != &map->header && cur->vme_start <= map_addr) {
+        after = cur;
+        cur = cur->next;
+    }
+
+    vm_map_entry_link(after, new_entry);
+    map->nentries++;
+
+    *addr = map_addr;
+    spin_unlock_irqrestore(&map->lock, irq_flags);
+    return 0;
+}
+
+/*
+ * vm_map_clip_start - Split an entry at 'start'
+ *
+ * If start is within the entry (not at the beginning), splits the entry
+ * into two: [vme_start, start) and [start, vme_end).
+ */
+static int vm_map_clip_start(struct vm_map *map, struct vm_map_entry *entry,
+                             uint64_t start)
+{
+    if (start <= entry->vme_start)
+        return 0;  /* Nothing to clip */
+    if (start >= entry->vme_end)
+        return 0;
+
+    /* Allocate a new entry for the left portion */
+    struct vm_map_entry *left = vm_map_alloc_entry(map);
+    if (!left)
+        return -ENOMEM;
+
+    /* Left gets [vme_start, start) */
+    left->vme_start = entry->vme_start;
+    left->vme_end = start;
+    left->protection = entry->protection;
+    left->max_protection = entry->max_protection;
+    left->inheritance = entry->inheritance;
+    left->is_shared = entry->is_shared;
+    left->needs_copy = entry->needs_copy;
+    left->wired = entry->wired;
+    left->backing_fd = entry->backing_fd;
+    left->file_offset = entry->file_offset;
+    left->backing_vnode = entry->backing_vnode;
+
+    /* Original entry shrinks to [start, vme_end) */
+    uint64_t removed_size = start - entry->vme_start;
+    entry->vme_start = start;
+    if (entry->backing_vnode)
+        entry->file_offset += removed_size;
+
+    /* Insert left before entry */
+    vm_map_entry_link(entry->prev, left);
+    map->nentries++;
+
+    return 0;
+}
+
+/*
+ * vm_map_clip_end - Split an entry at 'end'
+ *
+ * If end is within the entry (not at the end), splits the entry
+ * into two: [vme_start, end) and [end, vme_end).
+ */
+static int vm_map_clip_end(struct vm_map *map, struct vm_map_entry *entry,
+                           uint64_t end)
+{
+    if (end >= entry->vme_end)
+        return 0;
+    if (end <= entry->vme_start)
+        return 0;
+
+    /* Allocate a new entry for the right portion */
+    struct vm_map_entry *right = vm_map_alloc_entry(map);
+    if (!right)
+        return -ENOMEM;
+
+    /* Right gets [end, vme_end) */
+    right->vme_start = end;
+    right->vme_end = entry->vme_end;
+    right->protection = entry->protection;
+    right->max_protection = entry->max_protection;
+    right->inheritance = entry->inheritance;
+    right->is_shared = entry->is_shared;
+    right->needs_copy = entry->needs_copy;
+    right->wired = entry->wired;
+    right->backing_fd = entry->backing_fd;
+    if (entry->backing_vnode)
+        right->file_offset = entry->file_offset + (end - entry->vme_start);
+    else
+        right->file_offset = 0;
+    right->backing_vnode = entry->backing_vnode;
+
+    /* Original entry shrinks to [vme_start, end) */
+    entry->vme_end = end;
+
+    /* Insert right after entry */
+    vm_map_entry_link(entry, right);
+    map->nentries++;
+
+    return 0;
+}
+
+int vm_map_remove(struct vm_map *map, uint64_t start, uint64_t end)
+{
+    uint64_t irq_flags;
+    spin_lock_irqsave(&map->lock, &irq_flags);
+
+    /* Find the first entry that could overlap [start, end) */
+    struct vm_map_entry *cur = map->header.next;
+    while (cur != &map->header && cur->vme_end <= start)
+        cur = cur->next;
+
+    if (cur == &map->header || cur->vme_start >= end) {
+        /* No overlap */
+        spin_unlock_irqrestore(&map->lock, irq_flags);
+        return 0;
+    }
+
+    /* Clip the first overlapping entry at 'start' */
+    int ret = vm_map_clip_start(map, cur, start);
+    if (ret != 0) {
+        spin_unlock_irqrestore(&map->lock, irq_flags);
+        return ret;
+    }
+
+    /* Re-find after potential clip */
+    cur = map->header.next;
+    while (cur != &map->header && cur->vme_end <= start)
+        cur = cur->next;
+
+    /* Clip the last overlapping entry at 'end' */
+    struct vm_map_entry *last = cur;
+    while (last != &map->header && last->vme_start < end) {
+        if (last->vme_end > end) {
+            ret = vm_map_clip_end(map, last, end);
+            if (ret != 0) {
+                spin_unlock_irqrestore(&map->lock, irq_flags);
+                return ret;
+            }
+            break;
+        }
+        last = last->next;
+    }
+
+    /* Remove all entries fully within [start, end) */
+    cur = map->header.next;
+    while (cur != &map->header && cur->vme_end <= start)
+        cur = cur->next;
+
+    while (cur != &map->header && cur->vme_start < end) {
+        struct vm_map_entry *next = cur->next;
+        vm_map_entry_unlink(cur);
+        vm_map_free_entry(map, cur);
+        map->nentries--;
+        cur = next;
+    }
+
+    spin_unlock_irqrestore(&map->lock, irq_flags);
+    return 0;
+}
+
+int vm_map_protect(struct vm_map *map, uint64_t start, uint64_t end,
+                   uint8_t new_prot)
+{
+    uint64_t irq_flags;
+    spin_lock_irqsave(&map->lock, &irq_flags);
+
+    /* Find first overlapping entry */
+    struct vm_map_entry *cur = map->header.next;
+    while (cur != &map->header && cur->vme_end <= start)
+        cur = cur->next;
+
+    if (cur == &map->header || cur->vme_start >= end) {
+        spin_unlock_irqrestore(&map->lock, irq_flags);
+        return -ENOMEM;  /* No entries in range */
+    }
+
+    /* Clip at boundaries */
+    int ret = vm_map_clip_start(map, cur, start);
+    if (ret != 0) {
+        spin_unlock_irqrestore(&map->lock, irq_flags);
+        return ret;
+    }
+
+    /* Re-find after clip */
+    cur = map->header.next;
+    while (cur != &map->header && cur->vme_end <= start)
+        cur = cur->next;
+
+    /* Walk entries in range and update protection */
+    while (cur != &map->header && cur->vme_start < end) {
+        /* Clip end if this entry extends past our range */
+        ret = vm_map_clip_end(map, cur, end);
+        if (ret != 0) {
+            spin_unlock_irqrestore(&map->lock, irq_flags);
+            return ret;
+        }
+
+        /* Check max_protection allows the new protection */
+        if ((new_prot & ~cur->max_protection) != 0) {
+            spin_unlock_irqrestore(&map->lock, irq_flags);
+            return -EACCES;
+        }
+
+        cur->protection = new_prot;
+        cur = cur->next;
+    }
+
+    spin_unlock_irqrestore(&map->lock, irq_flags);
+    return 0;
+}
+
+int vm_map_fork(struct vm_map *dst, struct vm_map *src)
+{
+    uint64_t irq_flags;
+    spin_lock_irqsave(&src->lock, &irq_flags);
+
+    struct vm_map_entry *cur = src->header.next;
+
+    while (cur != &src->header) {
+        switch (cur->inheritance) {
+        case VM_INHERIT_NONE:
+            /* Child does not get this region */
+            break;
+
+        case VM_INHERIT_SHARE:
+        case VM_INHERIT_COPY: {
+            /* Allocate a corresponding entry in dst */
+            struct vm_map_entry *new_entry = vm_map_alloc_entry(dst);
+            if (!new_entry) {
+                spin_unlock_irqrestore(&src->lock, irq_flags);
+                return -ENOMEM;
+            }
+
+            new_entry->vme_start = cur->vme_start;
+            new_entry->vme_end = cur->vme_end;
+            new_entry->protection = cur->protection;
+            new_entry->max_protection = cur->max_protection;
+            new_entry->inheritance = cur->inheritance;
+            new_entry->is_shared = cur->is_shared;
+            new_entry->needs_copy = (cur->inheritance == VM_INHERIT_COPY) ? 1 : 0;
+            new_entry->wired = 0;
+            new_entry->backing_fd = cur->backing_fd;
+            new_entry->file_offset = cur->file_offset;
+            new_entry->backing_vnode = cur->backing_vnode;
+
+            /* Insert at end of dst list (entries are already sorted) */
+            vm_map_entry_link(dst->header.prev, new_entry);
+            dst->nentries++;
+            break;
+        }
+        }
+
+        cur = cur->next;
+    }
+
+    spin_unlock_irqrestore(&src->lock, irq_flags);
+    return 0;
 }
 
 /*
@@ -853,6 +1461,20 @@ int vmm_copy_space(struct vm_space *dst, struct vm_space *src)
 #endif
 
     spin_unlock_irqrestore(&vmm_lock, irq_flags);
+
+    /*
+     * Fork the vm_map: copy region metadata from parent to child.
+     * This must happen after the page-table-level COW setup above,
+     * because vm_map_fork only copies the region descriptors — it
+     * doesn't touch the pmap.
+     */
+    if (src->map && dst->map) {
+        int map_ret = vm_map_fork(dst->map, src->map);
+        if (map_ret != 0) {
+            kprintf("[vmm] vm_map_fork failed: %d\n", map_ret);
+            return map_ret;
+        }
+    }
 
     return 0;
 }

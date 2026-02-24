@@ -168,6 +168,7 @@ int fd_dup_table(struct filedesc *dst, struct filedesc *src)
 
     for (uint32_t i = 0; i < PROC_FD_MAX; i++) {
         dst->fd_ofiles[i] = src->fd_ofiles[i];
+        dst->fd_oflags[i] = src->fd_oflags[i];
         if (dst->fd_ofiles[i] != NULL) {
             /*
              * Increment the file's reference count.
@@ -189,14 +190,34 @@ int fd_dup_table(struct filedesc *dst, struct filedesc *src)
 void fd_close_all(struct proc *p)
 {
     for (uint32_t i = 0; i < PROC_FD_MAX; i++) {
-        if (p->p_fd.fd_ofiles[i] != NULL) {
-            /*
-             * Decrement refcount. If it drops to zero, the VFS layer
-             * will release the underlying vnode. We go through vfs_close
-             * which handles this.
-             */
-            vfs_close((int)i);
+        struct file *fp = p->p_fd.fd_ofiles[i];
+        if (fp != NULL) {
             p->p_fd.fd_ofiles[i] = NULL;
+            p->p_fd.fd_oflags[i] = 0;
+
+            /*
+             * Decrement refcount. If it drops to zero, release the
+             * underlying vnode. This directly manipulates the file
+             * struct rather than going through vfs_close (which
+             * looks up via proc_current() and may not match p).
+             */
+            struct vnode *vp = fp->f_vnode;
+
+            spin_lock(&fp->f_lock);
+            if (fp->f_refcount > 0)
+                fp->f_refcount--;
+            if (fp->f_refcount == 0) {
+                fp->f_vnode = NULL;
+                fp->f_pipe = NULL;
+                fp->f_pty = NULL;
+                fp->f_sockidx = -1;
+                spin_unlock(&fp->f_lock);
+
+                if (vp != NULL)
+                    vnode_release(vp);
+            } else {
+                spin_unlock(&fp->f_lock);
+            }
         }
     }
 }
@@ -252,7 +273,7 @@ static void setup_stdio(struct proc *p)
 
 void proc_init(void)
 {
-    kprintf("[proc] Initializing process subsystem...\n");
+    kprintf("[proc] Initialising process subsystem...\n");
 
     /* Zero the process table */
     memset_p(proc_table, 0, sizeof(proc_table));
@@ -363,8 +384,23 @@ struct proc *proc_create(const char *name, struct proc *parent)
         p->p_cwd_path[1] = '\0';
     }
 
-    /* Set up stdin/stdout/stderr pointing to console */
-    setup_stdio(p);
+    /*
+     * Set up stdin/stdout/stderr pointing to console — but ONLY for
+     * processes created without a parent (i.e., init).
+     *
+     * For fork children, the fd table will be populated by
+     * fd_dup_table() in sys_fork_impl(), which copies the parent's
+     * fds and bumps refcounts properly. Calling setup_stdio() here
+     * for forked children would install console stubs that are
+     * immediately overwritten by fd_dup_table(), leaking refcounts.
+     *
+     * This matches XNU: fork children inherit the parent's fd table
+     * via fdcopy() in fork1(). Only the very first user process
+     * (init/launchd) needs kernel-provided console descriptors.
+     */
+    if (parent == NULL || parent->p_pid == PID_KERNEL) {
+        setup_stdio(p);
+    }
 
     /* Link into parent's child list */
     p->p_parent = parent;
@@ -1103,7 +1139,6 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
             return ENOEXEC;
         return ENOENT;
     }
-
     /* Store exec info in the proc */
     p->p_entry_point = result->entry_point;
     p->p_needs_dyld = result->needs_dynlinker;
@@ -1287,6 +1322,47 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
      */
     extern void commpage_map(struct vm_space *space);
     commpage_map(p->p_vmspace);
+
+    /*
+     * Close-on-exec: close all file descriptors that have FD_CLOEXEC set.
+     * This matches POSIX/XNU exec semantics. The fd table itself is preserved
+     * across exec; only FD_CLOEXEC fds are closed.
+     */
+    {
+        struct filedesc *fdp = &p->p_fd;
+        uint64_t fdflags;
+        spin_lock_irqsave(&fdp->fd_lock, &fdflags);
+        for (uint32_t i = 0; i < PROC_FD_MAX; i++) {
+            if (fdp->fd_ofiles[i] != NULL &&
+                (fdp->fd_oflags[i] & FD_CLOEXEC)) {
+                struct file *cefp = fdp->fd_ofiles[i];
+                fdp->fd_ofiles[i] = NULL;
+                fdp->fd_oflags[i] = 0;
+
+                /* Decrement refcount outside the fd_lock */
+                spin_unlock_irqrestore(&fdp->fd_lock, fdflags);
+
+                struct vnode *cevp = cefp->f_vnode;
+                spin_lock(&cefp->f_lock);
+                if (cefp->f_refcount > 0)
+                    cefp->f_refcount--;
+                if (cefp->f_refcount == 0) {
+                    cefp->f_vnode = NULL;
+                    cefp->f_pipe = NULL;
+                    cefp->f_pty = NULL;
+                    cefp->f_sockidx = -1;
+                    spin_unlock(&cefp->f_lock);
+                    if (cevp != NULL)
+                        vnode_release(cevp);
+                } else {
+                    spin_unlock(&cefp->f_lock);
+                }
+
+                spin_lock_irqsave(&fdp->fd_lock, &fdflags);
+            }
+        }
+        spin_unlock_irqrestore(&fdp->fd_lock, fdflags);
+    }
 
     /* Update process state */
     strncpy_p(p->p_comm, k_path, PROC_NAME_MAX - 1);

@@ -92,7 +92,7 @@ int blkdev_init(void)
     }
     num_devices = 0;
 
-    kprintf("[blkdev] initializing block device subsystem\n");
+    kprintf("[blkdev] Initialising block device subsystem\n");
 
     int ret;
 

@@ -230,9 +230,61 @@ void net_init(void)
  * Socket API Implementation
  * ============================================================================ */
 
+/* Static pool of unpcb for AF_UNIX sockets */
+#define UNIX_PCB_MAX    NET_MAX_SOCKETS
+static struct unpcb unix_pcb_pool[UNIX_PCB_MAX];
+static uint8_t      unix_pcb_used[UNIX_PCB_MAX];
+
+static struct unpcb *unix_pcb_alloc(void)
+{
+    for (int i = 0; i < UNIX_PCB_MAX; i++) {
+        if (!unix_pcb_used[i]) {
+            unix_pcb_used[i] = 1;
+            struct unpcb *up = &unix_pcb_pool[i];
+            up->unp_peer = -1;
+            up->unp_path[0] = '\0';
+            up->unp_bound = false;
+            return up;
+        }
+    }
+    return NULL;
+}
+
+static void unix_pcb_free(struct unpcb *up)
+{
+    int idx = (int)(up - unix_pcb_pool);
+    if (idx >= 0 && idx < UNIX_PCB_MAX)
+        unix_pcb_used[idx] = 0;
+}
+
 int net_socket(int domain, int type, int protocol)
 {
-    /* Validate domain */
+    /* AF_UNIX sockets */
+    if (domain == AF_UNIX) {
+        if (type != SOCK_STREAM && type != SOCK_DGRAM)
+            return -EINVAL;
+
+        int fd = socket_alloc();
+        if (fd < 0)
+            return -ENFILE;
+
+        struct socket *so = &socket_table[fd];
+        so->so_family   = AF_UNIX;
+        so->so_type     = type;
+        so->so_protocol = 0;
+
+        /* Allocate a Unix PCB */
+        struct unpcb *up = unix_pcb_alloc();
+        if (!up) {
+            so->so_active = false;
+            return -ENOMEM;
+        }
+        so->so_pcb = up;
+
+        return fd;
+    }
+
+    /* AF_INET sockets */
     if (domain != AF_INET) {
         kprintf("[net] unsupported address family %d\n", domain);
         return -EINVAL;
@@ -276,6 +328,10 @@ int net_bind(int sockfd, const struct sockaddr_in *addr)
     if (addr == NULL)
         return -EINVAL;
 
+    /* Dispatch AF_UNIX */
+    if (so->so_family == AF_UNIX)
+        return unix_bind(sockfd, (const struct sockaddr_un *)addr);
+
     if (so->so_state != SS_UNCONNECTED)
         return -EINVAL;
 
@@ -298,6 +354,10 @@ int net_listen(int sockfd, int backlog)
     struct socket *so = socket_get(sockfd);
     if (so == NULL)
         return -EBADF;
+
+    /* Dispatch AF_UNIX */
+    if (so->so_family == AF_UNIX)
+        return unix_listen(sockfd, backlog);
 
     if (so->so_type != SOCK_STREAM)
         return -EINVAL;
@@ -337,6 +397,10 @@ int net_accept(int sockfd, struct sockaddr_in *addr)
     struct socket *so = socket_get(sockfd);
     if (so == NULL)
         return -EBADF;
+
+    /* Dispatch AF_UNIX */
+    if (so->so_family == AF_UNIX)
+        return unix_accept(sockfd, (struct sockaddr_un *)addr);
 
     if (so->so_state != SS_LISTENING)
         return -EINVAL;
@@ -399,6 +463,10 @@ int net_connect(int sockfd, const struct sockaddr_in *addr)
 
     if (addr == NULL)
         return -EINVAL;
+
+    /* Dispatch AF_UNIX */
+    if (so->so_family == AF_UNIX)
+        return unix_connect(sockfd, (const struct sockaddr_un *)addr);
 
     if (so->so_state != SS_UNCONNECTED && so->so_state != SS_BOUND)
         return -EISDIR; /* Already connected or invalid state */
@@ -486,6 +554,10 @@ ssize_t net_send(int sockfd, const void *buf, size_t len)
     if (so == NULL)
         return -EBADF;
 
+    /* Dispatch AF_UNIX */
+    if (so->so_family == AF_UNIX)
+        return unix_send(sockfd, buf, len);
+
     if (so->so_state != SS_CONNECTED)
         return -ENOTCONN;
 
@@ -525,6 +597,10 @@ ssize_t net_recv(int sockfd, void *buf, size_t len)
     struct socket *so = socket_get(sockfd);
     if (so == NULL)
         return -EBADF;
+
+    /* Dispatch AF_UNIX */
+    if (so->so_family == AF_UNIX)
+        return unix_recv(sockfd, buf, len);
 
     /* Datagram sockets (UDP, ICMP) can recvfrom() without connect() */
     if (so->so_type == SOCK_STREAM) {
@@ -567,6 +643,10 @@ int net_close(int sockfd)
     if (so == NULL)
         return -EBADF;
 
+    /* AF_UNIX close */
+    if (so->so_family == AF_UNIX)
+        return unix_close(sockfd);
+
     uint64_t flags;
     spin_lock_irqsave(&so->so_lock, &flags);
 
@@ -582,5 +662,360 @@ int net_close(int sockfd)
 
     spin_unlock_irqrestore(&so->so_lock, flags);
 
+    return 0;
+}
+
+/* ============================================================================
+ * AF_UNIX Socket Operations
+ *
+ * Modelled on XNU's bsd/kern/uipc_usrreq.c. AF_UNIX sockets provide
+ * local IPC via the filesystem namespace. Data flows directly between
+ * socket buffers without going through the network stack.
+ *
+ * For SOCK_STREAM:
+ *   - bind() associates a path with the socket
+ *   - listen() marks it passive
+ *   - connect() finds the listening socket by path, creates a connected pair
+ *   - send()/recv() transfer data via the peer's receive buffer
+ *
+ * For SOCK_DGRAM:
+ *   - bind() + sendto()/recvfrom() for connectionless message passing
+ * ============================================================================ */
+
+/* Helper to compare socket paths */
+static bool unix_path_equal(const char *a, const char *b)
+{
+    for (int i = 0; i < UNIX_PATH_MAX; i++) {
+        if (a[i] != b[i])
+            return false;
+        if (a[i] == '\0')
+            return true;
+    }
+    return true;
+}
+
+/* Helper to copy path */
+static void unix_path_copy(char *dst, const char *src)
+{
+    for (int i = 0; i < UNIX_PATH_MAX - 1; i++) {
+        dst[i] = src[i];
+        if (src[i] == '\0')
+            return;
+    }
+    dst[UNIX_PATH_MAX - 1] = '\0';
+}
+
+int unix_bind(int sockfd, const struct sockaddr_un *addr)
+{
+    struct socket *so = socket_get(sockfd);
+    if (!so || so->so_family != AF_UNIX)
+        return -EBADF;
+
+    if (!addr || addr->sun_family != AF_UNIX)
+        return -EINVAL;
+
+    if (so->so_state != SS_UNCONNECTED)
+        return -EINVAL;
+
+    struct unpcb *up = (struct unpcb *)so->so_pcb;
+    if (!up)
+        return -EINVAL;
+
+    /* Check that no other AF_UNIX socket is already bound to this path */
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        struct socket *other = &socket_table[i];
+        if (!other->so_active || other->so_family != AF_UNIX)
+            continue;
+        struct unpcb *oup = (struct unpcb *)other->so_pcb;
+        if (oup && oup->unp_bound &&
+            unix_path_equal(oup->unp_path, addr->sun_path))
+            return -EADDRINUSE;
+    }
+
+    uint64_t flags;
+    spin_lock_irqsave(&so->so_lock, &flags);
+
+    unix_path_copy(up->unp_path, addr->sun_path);
+    up->unp_bound = true;
+    so->so_state = SS_BOUND;
+
+    spin_unlock_irqrestore(&so->so_lock, flags);
+
+    return 0;
+}
+
+int unix_listen(int sockfd, int backlog)
+{
+    struct socket *so = socket_get(sockfd);
+    if (!so || so->so_family != AF_UNIX)
+        return -EBADF;
+
+    if (so->so_type != SOCK_STREAM)
+        return -EOPNOTSUPP;
+
+    if (so->so_state != SS_BOUND)
+        return -EINVAL;
+
+    uint64_t flags;
+    spin_lock_irqsave(&so->so_lock, &flags);
+
+    so->so_state  = SS_LISTENING;
+    so->so_qlimit = (backlog > 0) ? backlog : 5;
+    so->so_qlen   = 0;
+
+    spin_unlock_irqrestore(&so->so_lock, flags);
+    return 0;
+}
+
+int unix_accept(int sockfd, struct sockaddr_un *addr)
+{
+    struct socket *so = socket_get(sockfd);
+    if (!so || so->so_family != AF_UNIX)
+        return -EBADF;
+
+    if (so->so_state != SS_LISTENING)
+        return -EINVAL;
+
+    /*
+     * Block until a connection arrives. In XNU, uipc_accept() sleeps on
+     * the socket's so_rcv wait channel. We poll with yield, matching the
+     * existing TCP accept pattern.
+     */
+    extern void sched_yield(void);
+
+    for (int attempt = 0; attempt < 50000; attempt++) {
+        for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+            struct socket *child = &socket_table[i];
+            if (!child->so_active || child->so_family != AF_UNIX)
+                continue;
+            if (child->so_listener != sockfd)
+                continue;
+            if (child->so_accepted)
+                continue;
+            if (child->so_state != SS_CONNECTED)
+                continue;
+
+            /* Found a connected child — mark accepted */
+            child->so_accepted = true;
+
+            uint64_t flags;
+            spin_lock_irqsave(&so->so_lock, &flags);
+            if (so->so_qlen > 0)
+                so->so_qlen--;
+            spin_unlock_irqrestore(&so->so_lock, flags);
+
+            /* Fill in address from child's peer (the connecter) */
+            if (addr) {
+                struct unpcb *cup = (struct unpcb *)child->so_pcb;
+                addr->sun_family = AF_UNIX;
+                addr->sun_len = sizeof(struct sockaddr_un);
+                if (cup && cup->unp_bound)
+                    unix_path_copy(addr->sun_path, cup->unp_path);
+                else
+                    addr->sun_path[0] = '\0';
+            }
+
+            return i;
+        }
+
+        sched_yield();
+    }
+
+    return -EAGAIN;
+}
+
+int unix_connect(int sockfd, const struct sockaddr_un *addr)
+{
+    struct socket *so = socket_get(sockfd);
+    if (!so || so->so_family != AF_UNIX)
+        return -EBADF;
+
+    if (!addr || addr->sun_family != AF_UNIX)
+        return -EINVAL;
+
+    if (so->so_state != SS_UNCONNECTED && so->so_state != SS_BOUND)
+        return -EISCONN;
+
+    /*
+     * Find the target listening socket by path.
+     * In XNU, unp_connect() does a namei() lookup + vnode comparison.
+     * We match by the bound path in unpcb.
+     */
+    int listener_idx = -1;
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        struct socket *target = &socket_table[i];
+        if (!target->so_active || target->so_family != AF_UNIX)
+            continue;
+        if (target->so_state != SS_LISTENING)
+            continue;
+        struct unpcb *tup = (struct unpcb *)target->so_pcb;
+        if (!tup || !tup->unp_bound)
+            continue;
+        if (unix_path_equal(tup->unp_path, addr->sun_path)) {
+            listener_idx = i;
+            break;
+        }
+    }
+
+    if (listener_idx < 0)
+        return -ECONNREFUSED;
+
+    struct socket *listener = &socket_table[listener_idx];
+
+    /* Check backlog */
+    if (listener->so_qlen >= listener->so_qlimit)
+        return -ECONNREFUSED;
+
+    /*
+     * Create a server-side socket (the "child" of the listener).
+     * This is the socket that accept() will return.
+     */
+    int child_idx = socket_alloc();
+    if (child_idx < 0)
+        return -ENFILE;
+
+    struct socket *child = &socket_table[child_idx];
+    child->so_family   = AF_UNIX;
+    child->so_type     = so->so_type;
+    child->so_protocol = 0;
+
+    /* Allocate PCB for the child */
+    struct unpcb *child_up = unix_pcb_alloc();
+    if (!child_up) {
+        child->so_active = false;
+        return -ENOMEM;
+    }
+    child->so_pcb = child_up;
+
+    /* Link the child to the listener */
+    child->so_listener = listener_idx;
+    child->so_accepted = false;
+
+    /*
+     * Connect the pair: the connecting socket (so) and the child
+     * socket (child) become peers. Data sent by one goes to the
+     * other's receive buffer.
+     */
+    struct unpcb *so_up = (struct unpcb *)so->so_pcb;
+    so_up->unp_peer = child_idx;
+    child_up->unp_peer = sockfd;
+
+    /* Transition both to connected */
+    uint64_t flags;
+    spin_lock_irqsave(&so->so_lock, &flags);
+    so->so_state = SS_CONNECTED;
+    spin_unlock_irqrestore(&so->so_lock, flags);
+
+    spin_lock_irqsave(&child->so_lock, &flags);
+    child->so_state = SS_CONNECTED;
+    spin_unlock_irqrestore(&child->so_lock, flags);
+
+    /* Increment listener's pending count */
+    spin_lock_irqsave(&listener->so_lock, &flags);
+    listener->so_qlen++;
+    spin_unlock_irqrestore(&listener->so_lock, flags);
+
+    return 0;
+}
+
+ssize_t unix_send(int sockfd, const void *buf, size_t len)
+{
+    struct socket *so = socket_get(sockfd);
+    if (!so || so->so_family != AF_UNIX)
+        return -EBADF;
+
+    if (so->so_state != SS_CONNECTED)
+        return -ENOTCONN;
+
+    if (!buf || len == 0)
+        return 0;
+
+    struct unpcb *up = (struct unpcb *)so->so_pcb;
+    if (!up || up->unp_peer < 0)
+        return -ENOTCONN;
+
+    /*
+     * Write data directly into the peer's receive buffer.
+     * This is the core of AF_UNIX data transfer — no network stack
+     * involved, just a memory copy between socket buffers.
+     */
+    struct socket *peer = socket_get(up->unp_peer);
+    if (!peer || !peer->so_active)
+        return -ECONNRESET;
+
+    uint32_t to_send = (len > SOCKBUF_SIZE) ? SOCKBUF_SIZE : (uint32_t)len;
+    uint32_t sent = sockbuf_write(&peer->so_rcv, buf, to_send);
+
+    if (sent == 0)
+        return -EAGAIN;
+
+    return (ssize_t)sent;
+}
+
+ssize_t unix_recv(int sockfd, void *buf, size_t len)
+{
+    struct socket *so = socket_get(sockfd);
+    if (!so || so->so_family != AF_UNIX)
+        return -EBADF;
+
+    if (so->so_state != SS_CONNECTED && so->so_state != SS_DISCONNECTED)
+        return -ENOTCONN;
+
+    if (!buf || len == 0)
+        return 0;
+
+    uint32_t to_recv = (len > SOCKBUF_SIZE) ? SOCKBUF_SIZE : (uint32_t)len;
+    uint32_t recvd = sockbuf_read(&so->so_rcv, buf, to_recv);
+
+    if (recvd == 0) {
+        /* Check if peer has disconnected → EOF */
+        struct unpcb *up = (struct unpcb *)so->so_pcb;
+        if (!up || up->unp_peer < 0)
+            return 0;  /* EOF — peer closed */
+
+        struct socket *peer = socket_get(up->unp_peer);
+        if (!peer || !peer->so_active ||
+            peer->so_state == SS_DISCONNECTED)
+            return 0;  /* EOF — peer closed */
+
+        if (so->so_state == SS_DISCONNECTED)
+            return 0;  /* EOF */
+
+        return -EAGAIN;
+    }
+
+    return (ssize_t)recvd;
+}
+
+int unix_close(int sockfd)
+{
+    struct socket *so = socket_get(sockfd);
+    if (!so || so->so_family != AF_UNIX)
+        return -EBADF;
+
+    uint64_t flags;
+    spin_lock_irqsave(&so->so_lock, &flags);
+
+    struct unpcb *up = (struct unpcb *)so->so_pcb;
+    if (up) {
+        /* Notify the peer that we are closing */
+        if (up->unp_peer >= 0) {
+            struct socket *peer = socket_get(up->unp_peer);
+            if (peer && peer->so_active) {
+                struct unpcb *pup = (struct unpcb *)peer->so_pcb;
+                if (pup)
+                    pup->unp_peer = -1;  /* Peer no longer has us */
+                peer->so_state = SS_DISCONNECTED;
+            }
+        }
+
+        unix_pcb_free(up);
+        so->so_pcb = NULL;
+    }
+
+    so->so_state  = SS_DISCONNECTED;
+    so->so_active = false;
+
+    spin_unlock_irqrestore(&so->so_lock, flags);
     return 0;
 }

@@ -71,7 +71,7 @@ void kmain(uint64_t dtb_addr)
     /* ================================================================
      * Phase 2: Interrupt controller (GICv2)
      * ================================================================ */
-    kprintf("[boot] Initializing GIC...\n");
+    kprintf("[boot] Initialising GIC...\n");
     gic_init();
     gic_init_percpu();
 
@@ -81,26 +81,26 @@ void kmain(uint64_t dtb_addr)
     /* ================================================================
      * Phase 3: Physical memory manager (buddy allocator)
      * ================================================================ */
-    kprintf("[boot] Initializing physical memory manager...\n");
+    kprintf("[boot] Initialising physical memory manager...\n");
     pmm_init((uint64_t)&__heap_start, RAM_BASE + RAM_SIZE);
 
     /* ================================================================
      * Phase 4: Virtual memory + MMU
      * ================================================================ */
-    kprintf("[boot] Initializing virtual memory...\n");
+    kprintf("[boot] Initialising virtual memory...\n");
     vmm_init();
 
     /* ================================================================
      * Phase 5: Threading & MLFQ Scheduler
      * ================================================================ */
-    kprintf("[boot] Initializing threading...\n");
+    kprintf("[boot] Initialising threading...\n");
     thread_init();
     sched_init();
 
     /* ================================================================
      * Phase 6: ARM Generic Timer (100Hz tick)
      * ================================================================ */
-    kprintf("[boot] Initializing timer...\n");
+    kprintf("[boot] Initialising timer...\n");
     timer_init(SCHED_HZ);
 
     /*
@@ -124,7 +124,7 @@ void kmain(uint64_t dtb_addr)
     /* ================================================================
      * Phase 8: Block device subsystem (virtio-blk / eMMC)
      * ================================================================ */
-    kprintf("[boot] Initializing block devices...\n");
+    kprintf("[boot] Initialising block devices...\n");
     int blk_ret = blkdev_init();
     if (blk_ret < 0) {
         kprintf("[boot] WARNING: Block device init failed (%d)\n", blk_ret);
@@ -134,13 +134,13 @@ void kmain(uint64_t dtb_addr)
     /* ================================================================
      * Phase 9: Buffer cache (LRU, 256 x 4KB)
      * ================================================================ */
-    kprintf("[boot] Initializing buffer cache...\n");
+    kprintf("[boot] Initialising buffer cache...\n");
     buf_init();
 
     /* ================================================================
      * Phase 10: Virtual File System
      * ================================================================ */
-    kprintf("[boot] Initializing VFS...\n");
+    kprintf("[boot] Initialising VFS...\n");
     vfs_init();
 
     /* Initialize the console TTY (terminal line discipline) */
@@ -190,26 +190,58 @@ void kmain(uint64_t dtb_addr)
     /* ================================================================
      * Phase 13: Mach IPC subsystem
      * ================================================================ */
-    kprintf("[boot] Initializing Mach IPC...\n");
+    kprintf("[boot] Initialising Mach IPC...\n");
     ipc_init();
 
     /* ================================================================
      * Phase 14: CommPage (user-kernel shared page)
      * ================================================================ */
-    kprintf("[boot] Initializing CommPage...\n");
+    kprintf("[boot] Initialising CommPage...\n");
     commpage_init();
 
     /* ================================================================
      * Phase 15: Process subsystem
      * ================================================================ */
-    kprintf("[boot] Initializing process subsystem...\n");
+    kprintf("[boot] Initialising process subsystem...\n");
     proc_init();
 
     /* ================================================================
      * Phase 16: Networking (TCP/IP stack, BSD sockets)
      * ================================================================ */
-    kprintf("[boot] Initializing networking...\n");
+    kprintf("[boot] Initialising networking...\n");
     net_init();
+
+    /* ================================================================
+     * Phase 16b: VirtIO GPU framebuffer
+     * ================================================================ */
+    kprintf("[boot] Initialising VirtIO GPU...\n");
+    extern int virtio_gpu_init(void);
+    int gpu_ret = virtio_gpu_init();
+    if (gpu_ret < 0) {
+        kprintf("[boot] No VirtIO GPU found (non-fatal)\n");
+    }
+
+    /* ================================================================
+     * Phase 16c: Framebuffer console
+     * ================================================================ */
+    extern int fbconsole_init(void);
+    if (gpu_ret == 0) {
+        kprintf("[boot] Initialising framebuffer console...\n");
+        int fb_ret = fbconsole_init();
+        if (fb_ret < 0) {
+            kprintf("[boot] Framebuffer console init failed (non-fatal)\n");
+        }
+    }
+
+    /* ================================================================
+     * Phase 16d: VirtIO input keyboard
+     * ================================================================ */
+    extern int virtio_input_init(void);
+    kprintf("[boot] Initialising VirtIO input...\n");
+    int input_ret = virtio_input_init();
+    if (input_ret < 0) {
+        kprintf("[boot] No VirtIO input device found (non-fatal)\n");
+    }
 
     /* ================================================================
      * Phase 17: Create bootstrap thread and abandon boot stack

@@ -6790,7 +6790,7 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
 	/* If we supported only ISO C we wouldn't have to accept calling
 	   this on anything than an array size_only==1 (and even then
 	   only on the outermost level, so no recursion would be needed),
-	   because initializing a flex array member isn't supported.
+	   because Initialising a flex array member isn't supported.
 	   But GNU C supports it, so we need to recurse even into
 	   subfields of structs and arrays when size_only is set.  */
         /* just skip expression */

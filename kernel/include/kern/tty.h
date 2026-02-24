@@ -198,6 +198,26 @@ struct tty {
     pid_t           t_session;      /* Session leader PID */
     uint32_t        t_flags;        /* TTY flags */
 
+    /*
+     * Output callback — called for every character the TTY produces
+     * (echo, line editing, tty_write output processing).
+     *
+     * XNU's tty layer uses t_oproc (output procedure) on struct tty
+     * (bsd/sys/tty.h). We use a simpler per-character callback.
+     *
+     * Default: uart_putc (serial console).
+     * Framebuffer console sets this to fbconsole_putc.
+     */
+    void            (*t_putc)(char c);
+
+    /*
+     * Input injection — called by interrupt handlers to feed a character
+     * into this TTY's input path.
+     *
+     * If NULL, the TTY cannot receive input (output-only mirror).
+     */
+    void            *t_devprivate;  /* Opaque device-specific data */
+
     /* Line buffer for canonical mode */
     char            t_linebuf[1024];
     int             t_linepos;      /* Bytes written into line buffer (input side) */
@@ -271,5 +291,25 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count);
  * Returns bytes written, or negative errno.
  */
 int64_t tty_write(struct tty *tp, const void *ubuf, uint64_t count);
+
+/*
+ * tty_input_char - Feed a character into the console TTY's input path.
+ *
+ * Called by UART IRQ handler. Routes to tty_input_char_tp() on
+ * the console TTY.
+ */
+void tty_input_char(char c);
+
+/*
+ * tty_input_char_tp - Feed a character into a specific TTY's input path.
+ *
+ * Handles signal generation (SIGINT, SIGQUIT, SIGTSTP), echo, line
+ * editing, and buffering. Called by any input device (UART, VirtIO
+ * keyboard) that drives a TTY.
+ *
+ * @tp: TTY to receive the character
+ * @c:  Character to inject
+ */
+void tty_input_char_tp(struct tty *tp, char c);
 
 #endif /* _KERN_TTY_H */

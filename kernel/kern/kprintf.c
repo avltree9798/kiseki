@@ -1,12 +1,27 @@
 /*
  * Kiseki OS - Kernel Printf Implementation
  *
- * Minimal printf for kernel debugging. Outputs via UART.
+ * Minimal printf for kernel debugging. Outputs via UART and,
+ * when available, the framebuffer console.
+ *
+ * Like XNU's PE_kputc, print_char() fans out to all registered
+ * console backends. The framebuffer mirror is enabled once
+ * fbconsole_init() completes successfully (checked via
+ * fbconsole_active()).
+ *
+ * IMPORTANT: kprintf output bypasses the TTY line discipline
+ * entirely. It goes directly to the hardware (UART) and to
+ * the framebuffer pixel renderer. This is intentional — kernel
+ * messages must always be visible regardless of TTY state.
+ *
+ * Reference: XNU osfmk/console/serial_console.c (PE_kputc)
+ *
  * No heap allocation, no floating point.
  */
 
 #include <kiseki/types.h>
 #include <kern/kprintf.h>
+#include <kern/fbconsole.h>
 #include <drivers/uart.h>
 
 /* va_list using GCC builtins (freestanding, no libc needed) */
@@ -19,9 +34,29 @@ typedef __builtin_va_list   va_list;
 
 static void print_char(char c)
 {
+    /* Primary output: serial console (UART) */
     if (c == '\n')
         uart_putc('\r');    /* UART convention: \n -> \r\n */
     uart_putc(c);
+
+    /*
+     * Secondary output: framebuffer console (when available).
+     *
+     * Like XNU's PE_kputc which calls both serial_putc and
+     * vc_putchar, we mirror all kernel output to the framebuffer
+     * so boot messages and panics are visible on the graphical
+     * display.
+     *
+     * The VT100 parser in fbconsole treats \n as a pure line feed
+     * (advance row only, no carriage return), matching standard
+     * VT100/ANSI behaviour. kprintf output needs \r before \n to
+     * return the cursor to column 0, just like we do for UART.
+     */
+    if (fbconsole_active()) {
+        if (c == '\n')
+            fbconsole_putc('\r');
+        fbconsole_putc(c);
+    }
 }
 
 static void print_string(const char *s)

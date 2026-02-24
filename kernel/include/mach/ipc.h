@@ -106,10 +106,129 @@ typedef struct {
 
 /*
  * mach_msg_body_t - Follows header in complex messages
+ *
+ * When MACH_MSGH_BITS_COMPLEX is set in msgh_bits, the message body
+ * starts with this structure, followed by msgh_descriptor_count
+ * descriptors, followed by inline data.
  */
 typedef struct {
     uint32_t            msgh_descriptor_count;
 } mach_msg_body_t;
+
+/* ============================================================================
+ * Out-of-Line (OOL) Memory Descriptors
+ *
+ * OOL descriptors allow transferring large memory regions between tasks
+ * via Mach messages. The kernel maps the sender's memory into the
+ * receiver's address space (via COW or physical copy).
+ *
+ * Reference: XNU osfmk/mach/message.h
+ * ============================================================================ */
+
+/* Descriptor type values */
+#define MACH_MSG_PORT_DESCRIPTOR            0
+#define MACH_MSG_OOL_DESCRIPTOR             1
+#define MACH_MSG_OOL_PORTS_DESCRIPTOR       2
+#define MACH_MSG_OOL_VOLATILE_DESCRIPTOR    3
+
+typedef uint32_t    mach_msg_descriptor_type_t;
+typedef uint32_t    mach_msg_copy_options_t;
+
+/* Copy option values */
+#define MACH_MSG_PHYSICAL_COPY      0   /* True physical copy */
+#define MACH_MSG_VIRTUAL_COPY       1   /* COW / virtual copy */
+#define MACH_MSG_ALLOCATE           2   /* Receiver: kernel allocates */
+
+/*
+ * mach_msg_type_descriptor_t - Common header for all descriptor types.
+ *
+ * The 'type' field at a fixed offset allows the kernel to determine
+ * which descriptor variant follows.
+ */
+typedef struct {
+    uint32_t            pad1;
+    uint32_t            pad2;
+    uint32_t            pad3   : 24;
+    mach_msg_descriptor_type_t type : 8;
+} mach_msg_type_descriptor_t;
+
+/*
+ * mach_msg_ool_descriptor_t - Out-of-line memory descriptor (64-bit)
+ *
+ * Layout (16 bytes total, matching XNU 64-bit ABI):
+ *   [0..7]   address   — sender: user VA of OOL data
+ *                         in-kernel: vm_map_copy_t pointer
+ *   [8]      deallocate — unmap from sender after copyin?
+ *   [9]      copy       — PHYSICAL_COPY or VIRTUAL_COPY
+ *   [10]     pad1       — reserved
+ *   [11]     type       — MACH_MSG_OOL_DESCRIPTOR (1)
+ *   [12..15] size       — byte count of OOL data
+ *
+ * The bitfield layout must match the userland mach/message.h exactly:
+ * all four 8-bit fields packed into a single 32-bit bitfield group
+ * to avoid alignment padding between address and size.
+ */
+typedef struct {
+    uint64_t                        address;
+    uint32_t                        deallocate : 8;
+    mach_msg_copy_options_t         copy       : 8;
+    uint32_t                        pad1       : 8;
+    mach_msg_descriptor_type_t      type       : 8;
+    mach_msg_size_t                 size;
+} mach_msg_ool_descriptor_t;
+
+/*
+ * mach_msg_port_descriptor_t - Port right descriptor
+ *
+ * Transfers a port right inline in a complex message descriptor.
+ */
+typedef struct {
+    mach_port_name_t                name;
+    uint32_t                        pad1;
+    uint32_t                        pad2        : 16;
+    mach_msg_type_name_t            disposition  : 8;
+    mach_msg_descriptor_type_t      type         : 8;
+} mach_msg_port_descriptor_t;
+
+/* ============================================================================
+ * vm_map_copy - Kernel object representing copied memory in transit
+ *
+ * Created during mach_msg copyin (send side), consumed during copyout
+ * (receive side). Holds either a physical copy in a kernel buffer or
+ * COW page references.
+ *
+ * Reference: XNU osfmk/vm/vm_map_xnu.h
+ * ============================================================================ */
+
+#define VM_MAP_COPY_NONE            0   /* No copy (NULL equivalent) */
+#define VM_MAP_COPY_ENTRY_LIST      1   /* COW page references (future) */
+#define VM_MAP_COPY_KERNEL_BUFFER   2   /* Physical copy in kalloc'd buffer */
+#define VM_MAP_COPY_PHYS_MAP        3   /* Direct physical page mapping (shared) */
+
+/*
+ * VM_MAP_COPY_PHYS_MAP:
+ *   type   = VM_MAP_COPY_PHYS_MAP
+ *   size   = total byte count of the physical range
+ *   offset = 0
+ *   kdata  = physical base address (contiguous pages)
+ *
+ * Used by kernel servers (e.g., IOFramebuffer) to share device memory
+ * with user processes. During OOL copyout, the kernel maps the physical
+ * pages directly into the receiver's address space using vmm_map_page()
+ * with PTE_USER_RW. The pages are NOT freed when the copy is consumed —
+ * they belong to the device driver.
+ *
+ * Reference: XNU IOMemoryDescriptor::map() -> vm_map_enter()
+ */
+
+struct vm_map_copy {
+    uint16_t    type;           /* VM_MAP_COPY_* */
+    uint64_t    size;           /* Total byte count */
+    uint64_t    offset;         /* Offset into first page/buffer */
+    void        *kdata;         /* Type 2: kernel buffer; Type 3: phys base */
+};
+
+#define VM_MAP_COPY_NULL    ((struct vm_map_copy *)0)
 
 /*
  * mach_msg_trailer_t - Appended to received messages
@@ -166,6 +285,26 @@ typedef struct {
 #define TASK_PORT_TABLE_SIZE        256
 
 /*
+ * Maximum OOL descriptors per message.
+ * XNU supports up to ~16384 descriptors; we limit to 16 for simplicity.
+ */
+#define MACH_MSG_OOL_MAX        16
+
+/*
+ * ipc_kmsg_ool - Kernel-side storage for one OOL descriptor in transit.
+ *
+ * During copyin, the sender's user address is translated into a
+ * vm_map_copy (kernel buffer holding the data). During copyout,
+ * the kernel buffer is mapped into the receiver's address space.
+ */
+struct ipc_kmsg_ool {
+    struct vm_map_copy  *copy;          /* Kernel copy object */
+    uint64_t            size;           /* Byte count */
+    bool                deallocate;     /* Sender requested deallocation */
+    mach_msg_copy_options_t copy_option; /* PHYSICAL or VIRTUAL */
+};
+
+/*
  * ipc_msg - Queued message in a port's ring buffer
  *
  * On XNU, ipc_kmsg stores the message inline and port header fields
@@ -185,12 +324,18 @@ typedef struct {
  * dest_type:   Post-copyin type for the destination port (e.g. PORT_SEND).
  *              Used during copyout to determine how to handle the
  *              destination right for the receiver.
+ *
+ * ool_descs:   Kernel-side OOL descriptor storage. Each entry holds
+ *              a vm_map_copy object that carries the OOL data between
+ *              the sender's copyin and the receiver's copyout.
  */
 struct ipc_msg {
     uint32_t            size;           /* Total message size including header */
     struct ipc_port     *reply_port;    /* Translated reply port (kernel obj) */
     mach_msg_type_name_t reply_type;    /* Post-copyin type: PORT_SEND_ONCE etc */
     mach_msg_type_name_t dest_type;     /* Post-copyin type: PORT_SEND etc */
+    uint32_t            ool_count;      /* Number of OOL descriptors */
+    struct ipc_kmsg_ool ool_descs[MACH_MSG_OOL_MAX];
     uint8_t             data[MACH_MSG_SIZE_MAX];
 };
 
@@ -213,6 +358,19 @@ struct ipc_port {
 
     spinlock_t          lock;
     semaphore_t         msg_available;      /* Signaled when msg enqueued */
+
+    /*
+     * Kernel object (kobject) linkage — for IOKit and other kernel services.
+     *
+     * When a port represents a kernel object (IOKit service, user client,
+     * master port, etc.), these fields identify the object. The IPC
+     * subsystem uses kobject_type to route messages to the appropriate
+     * kernel handler instead of normal user message queuing.
+     *
+     * Reference: XNU osfmk/ipc/ipc_port.h (ip_kobject, ip_kotype)
+     */
+    void                *kobject;           /* Kernel object pointer (or NULL) */
+    uint32_t            kobject_type;       /* IKOT_* type (0 = IKOT_NONE) */
 };
 
 /*
@@ -266,7 +424,7 @@ void ipc_space_init(struct ipc_space *space);
  * On XNU, called from task_create_internal() to give each task its own
  * port name table. Every task must have its own ipc_space.
  *
- * Returns pointer to initialized ipc_space, or NULL on pool exhaustion.
+ * Returns pointer to initialised ipc_space, or NULL on pool exhaustion.
  */
 struct ipc_space *ipc_space_create(void);
 
@@ -319,6 +477,36 @@ kern_return_t ipc_port_lookup(struct ipc_space *space,
 kern_return_t ipc_port_deallocate_name(struct ipc_space *space,
                                        mach_port_name_t name);
 
+/*
+ * ipc_port_send_kernel - Enqueue a message from kernel context
+ *
+ * Used by kernel Mach servers (IOFramebuffer, etc.) to send replies
+ * directly onto a port. Bypasses the user copyin path since the message
+ * is already in kernel memory.
+ *
+ * On XNU, kernel servers use ipc_mqueue_send() or ipc_kmsg_send()
+ * directly. This is our equivalent.
+ *
+ * @port:       Destination port
+ * @msg_data:   Message bytes (header + body + inline data)
+ * @msg_size:   Total message size in bytes
+ * @reply_port: Reply port for the message (NULL if none)
+ * @reply_type: Post-copyin type for reply port
+ * @dest_type:  Post-copyin type for dest port
+ * @ool_descs:  OOL descriptors array (NULL if none)
+ * @ool_count:  Number of OOL descriptors
+ *
+ * Returns MACH_MSG_SUCCESS or error.
+ */
+mach_msg_return_t ipc_port_send_kernel(struct ipc_port *port,
+                                       const void *msg_data,
+                                       uint32_t msg_size,
+                                       struct ipc_port *reply_port,
+                                       mach_msg_type_name_t reply_type,
+                                       mach_msg_type_name_t dest_type,
+                                       struct ipc_kmsg_ool *ool_descs,
+                                       uint32_t ool_count);
+
 /* ============================================================================
  * Mach Trap Entrypoints (called from syscall dispatch)
  * ============================================================================ */
@@ -360,6 +548,21 @@ kern_return_t mach_port_allocate_trap(struct trap_frame *tf);
  * Returns kern_return_t.
  */
 kern_return_t mach_port_deallocate_trap(struct trap_frame *tf);
+
+/*
+ * mach_port_mod_refs_trap - Modify the reference count on a port right
+ *
+ * x0 = target task port
+ * x1 = port name
+ * x2 = right type (MACH_PORT_RIGHT_SEND, MACH_PORT_RIGHT_RECEIVE, etc.)
+ * x3 = delta (positive to add, negative to remove)
+ *
+ * Returns kern_return_t.
+ *
+ * Reference: XNU osfmk/kern/ipc_mig.c _kernelrpc_mach_port_mod_refs_trap
+ *            Trap number -39 (MACH_TRAP_mach_port_mod_refs in sys/syscall.h)
+ */
+kern_return_t mach_port_mod_refs_trap(struct trap_frame *tf);
 
 /*
  * task_self_trap - Return the calling task's self port
@@ -440,5 +643,20 @@ kern_return_t bootstrap_look_up_trap(struct trap_frame *tf);
  * Returns kern_return_t.
  */
 kern_return_t bootstrap_check_in_trap(struct trap_frame *tf);
+
+/*
+ * bootstrap_register_kernel - Register a service port from kernel context
+ *
+ * Unlike bootstrap_register_trap (which reads from user registers),
+ * this function is called directly by kernel servers during boot to
+ * register their service ports before any user process starts.
+ *
+ * @name: Service name string (kernel pointer, not user)
+ * @port: Kernel port object to register
+ *
+ * Returns KERN_SUCCESS or error.
+ */
+kern_return_t bootstrap_register_kernel(const char *name,
+                                        struct ipc_port *port);
 
 #endif /* _MACH_IPC_H */

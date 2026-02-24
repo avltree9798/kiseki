@@ -86,7 +86,7 @@ fi
 USR_BIN_PROGS="find xargs id whoami which env du wc yes tcc file"
 
 # Binaries that go in /sbin (system admin)
-SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd mDNSResponder"
+SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd mDNSResponder WindowServer"
 
 # Test binary
 MACHO_HELLO="${PROJDIR}/build/hello"
@@ -161,6 +161,15 @@ populate_linux() {
     if [ -f "${MACHO_HELLO}" ]; then
         sudo cp "${MACHO_HELLO}" "${MOUNT_DIR}/bin/hello"
         sudo chmod 755 "${MOUNT_DIR}/bin/hello"
+    fi
+
+    # Install IOKit.framework
+    local IOKIT_SRC="${BUILDDIR}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+    if [ -f "${IOKIT_SRC}" ]; then
+        sudo mkdir -p "${MOUNT_DIR}/System/Library/Frameworks/IOKit.framework/Versions/A"
+        sudo cp "${IOKIT_SRC}" "${MOUNT_DIR}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+        sudo chmod 755 "${MOUNT_DIR}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+        echo "  Installed /System/Library/Frameworks/IOKit.framework"
     fi
 
     # Install configuration files
@@ -305,9 +314,21 @@ DIRS
         echo "write ${INCDIR}/servers/bootstrap.h /usr/include/servers/bootstrap.h" >> "${CMDS}"
     fi
 
-    # Create /System/Library/LaunchDaemons directory hierarchy
+    # Create /System/Library hierarchy
     echo "mkdir /System" >> "${CMDS}"
     echo "mkdir /System/Library" >> "${CMDS}"
+
+    # Install IOKit.framework
+    local IOKIT_SRC="${BUILDDIR}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+    if [ -f "${IOKIT_SRC}" ]; then
+        echo "mkdir /System/Library/Frameworks" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/IOKit.framework" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/IOKit.framework/Versions" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/IOKit.framework/Versions/A" >> "${CMDS}"
+        echo "write ${IOKIT_SRC} /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit" >> "${CMDS}"
+    fi
+
+    # Create LaunchDaemons directory
     echo "mkdir /System/Library/LaunchDaemons" >> "${CMDS}"
 
     # Create /Library/LaunchDaemons for third-party daemons

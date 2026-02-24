@@ -194,7 +194,14 @@ void kmain(uint64_t dtb_addr)
     ipc_init();
 
     /* ================================================================
-     * Phase 14: CommPage (user-kernel shared page)
+     * Phase 14: IOKit subsystem
+     * ================================================================ */
+    kprintf("[boot] Initialising IOKit...\n");
+    extern void iokit_init(void);
+    iokit_init();
+
+    /* ================================================================
+     * Phase 15: CommPage (user-kernel shared page)
      * ================================================================ */
     kprintf("[boot] Initialising CommPage...\n");
     commpage_init();
@@ -222,6 +229,20 @@ void kmain(uint64_t dtb_addr)
     }
 
     /* ================================================================
+     * Phase 16b2: IOFramebuffer driver (requires VirtIO GPU)
+     *
+     * The IOKit registry was initialised in Phase 14, but the
+     * IOFramebuffer driver needs the VirtIO GPU to be available.
+     * Now that the GPU is ready, register the IOFramebuffer service
+     * so userland (WindowServer) can find it via IOServiceMatching.
+     * ================================================================ */
+    if (gpu_ret == 0) {
+        kprintf("[boot] Registering IOFramebuffer driver...\n");
+        extern void io_framebuffer_init_driver(void);
+        io_framebuffer_init_driver();
+    }
+
+    /* ================================================================
      * Phase 16c: Framebuffer console
      * ================================================================ */
     extern int fbconsole_init(void);
@@ -234,7 +255,7 @@ void kmain(uint64_t dtb_addr)
     }
 
     /* ================================================================
-     * Phase 16d: VirtIO input keyboard
+     * Phase 16d: VirtIO input (keyboard + tablet)
      * ================================================================ */
     extern int virtio_input_init(void);
     kprintf("[boot] Initialising VirtIO input...\n");
@@ -244,10 +265,25 @@ void kmain(uint64_t dtb_addr)
     }
 
     /* ================================================================
+     * Phase 16e: IOHIDSystem driver (requires VirtIO input)
+     *
+     * The IOKit registry was initialised in Phase 14. Now that the
+     * VirtIO input devices are ready and the HID event ring is set up,
+     * register the IOHIDSystem service so userland (WindowServer) can
+     * find it via IOServiceMatching("IOHIDSystem") and map the event
+     * ring via IOConnectMapMemory.
+     * ================================================================ */
+    if (input_ret == 0) {
+        kprintf("[boot] Registering IOHIDSystem driver...\n");
+        extern void io_hid_system_init_driver(void);
+        io_hid_system_init_driver();
+    }
+
+    /* ================================================================
      * Phase 17: Create bootstrap thread and abandon boot stack
      * ================================================================ */
     kprintf("\n");
-    kprintf("[boot] *** All subsystems initialized ***\n");
+    kprintf("[boot] *** All subsystems initialised ***\n");
     kprintf("[boot] Creating bootstrap thread...\n");
     kprintf("\n");
 

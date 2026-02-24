@@ -42,7 +42,7 @@ void tcp_init(void)
         tcpcb_pool[i].t_state  = TCPS_CLOSED;
     }
 
-    kprintf("[tcp] TCP subsystem initialized (%d connections max)\n",
+    kprintf("[tcp] TCP subsystem initialised (%d connections max)\n",
             TCP_MAX_CONNECTIONS);
 }
 

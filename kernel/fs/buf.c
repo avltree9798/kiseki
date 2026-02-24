@@ -189,27 +189,32 @@ void buf_init(void)
 
     spin_unlock_irqrestore(&buf_lock, flags);
 
-    kprintf("[buf] buffer cache initialized: %u buffers, %u bytes each\n",
+    kprintf("[buf] buffer cache initialised: %u buffers, %u bytes each\n",
             BUF_POOL_SIZE, BUF_BLOCK_SIZE);
 }
 
 struct buf *buf_read(uint32_t dev, uint64_t block_no)
 {
     uint64_t flags;
+
+retry:
     spin_lock_irqsave(&buf_lock, &flags);
 
     /* Cache hit? */
     struct buf *bp = hash_lookup(dev, block_no);
     if (bp) {
-        /* Wait if busy (simple spin -- in production, sleep on condvar) */
+        /*
+         * Wait if busy — another CPU is currently performing I/O on this
+         * buffer. We sleep on the buffer address as a wait channel. When
+         * buf_release() clears B_BUSY, it wakes all sleepers.
+         *
+         * This is the standard BSD buffer cache sleep/wakeup pattern:
+         * XNU biodone()/biowait(), FreeBSD bufwait()/bufdone().
+         */
         if (bp->flags & B_BUSY) {
-            /*
-             * For a single-threaded polling driver this shouldn't happen.
-             * In a full implementation we'd sleep here. For now, fail.
-             */
             spin_unlock_irqrestore(&buf_lock, flags);
-            kprintf("[buf] block %lu busy, cannot acquire\n", block_no);
-            return NULL;
+            thread_sleep_on(bp, "biowait");
+            goto retry;
         }
 
         bp->flags |= B_BUSY;
@@ -283,6 +288,7 @@ struct buf *buf_read(uint32_t dev, uint64_t block_no)
         bp->refcount = 0;
         hash_remove(bp);
         spin_unlock_irqrestore(&buf_lock, flags);
+        thread_wakeup_on(bp);   /* Wake anyone waiting on this buffer */
         return NULL;
     }
 
@@ -319,6 +325,12 @@ void buf_release(struct buf *bp)
     }
 
     spin_unlock_irqrestore(&buf_lock, flags);
+
+    /*
+     * Wake any threads sleeping on this buffer (waiting for B_BUSY
+     * to clear in buf_read). This is the BSD biodone() wakeup pattern.
+     */
+    thread_wakeup_on(bp);
 }
 
 /*
@@ -353,6 +365,7 @@ static uint32_t buf_sync_internal(bool quiet)
             spin_lock_irqsave(&buf_lock, &flags);
             bp->flags &= ~B_BUSY;
             spin_unlock_irqrestore(&buf_lock, flags);
+            thread_wakeup_on(bp);
         } else {
             spin_unlock_irqrestore(&buf_lock, flags);
         }

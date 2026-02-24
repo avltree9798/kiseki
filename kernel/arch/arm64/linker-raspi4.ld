@@ -56,7 +56,7 @@ SECTIONS
         __data_end = .;
     } > RAM
 
-    /* --- BSS (Zero-initialized) --- */
+    /* --- BSS (Zero-initialised) --- */
     .bss : ALIGN(4096)
     {
         __bss_start = .;

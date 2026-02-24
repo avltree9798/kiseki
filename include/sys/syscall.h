@@ -142,6 +142,7 @@
 #define MACH_TRAP_mach_msg_overwrite_trap   (-32)
 #define MACH_TRAP_mach_port_allocate        (-36)
 #define MACH_TRAP_mach_port_deallocate      (-37)
+#define MACH_TRAP_mach_port_mod_refs        (-39)
 
 /* Bootstrap service registry (Kiseki kernel-managed, launchd-style semantics) */
 #define MACH_TRAP_bootstrap_register        (-40)

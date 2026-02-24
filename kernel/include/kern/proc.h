@@ -280,7 +280,7 @@ int sys_wait4_impl(struct trap_frame *tf);
 /*
  * kernel_init_process - Launch the first user process
  *
- * Called from kernel_bootstrap_thread after all subsystems are initialized.
+ * Called from kernel_bootstrap_thread after all subsystems are initialised.
  * Tries to load /sbin/init, then /bin/sh as fallback.
  * Creates PID 1, sets up its thread with a trap frame, and enqueues it
  * on the run queue for the scheduler to dispatch.

@@ -1,10 +1,11 @@
 /*
  * Kiseki OS - VirtIO Input Device Driver
  *
- * Implements the VirtIO input specification for keyboard input.
- * The driver receives Linux input events from QEMU's virtio-keyboard-device,
- * converts scancodes to ASCII characters, and injects them into the
- * framebuffer console TTY via tty_input_char_tp().
+ * Implements the VirtIO input specification for keyboard and tablet input.
+ * The driver receives Linux input events from QEMU's virtio-keyboard-device
+ * and virtio-tablet-device, converts scancodes to ASCII characters, tracks
+ * absolute cursor position, and pushes HID events into a shared ring buffer
+ * for userland consumption (WindowServer).
  *
  * VirtIO input uses two virtqueues:
  *   - Queue 0 (eventq): device -> driver, delivers input events
@@ -147,6 +148,36 @@
 #define KEY_DELETE          111
 
 /* ============================================================================
+ * Absolute Axis Codes (for EV_ABS events)
+ *
+ * Used by virtio-tablet-device for cursor position.
+ * Reference: Linux include/uapi/linux/input-event-codes.h
+ * ============================================================================ */
+
+#define ABS_X               0x00
+#define ABS_Y               0x01
+
+/* ============================================================================
+ * Mouse Button Codes (for EV_KEY events from pointing devices)
+ *
+ * Reference: Linux include/uapi/linux/input-event-codes.h
+ * ============================================================================ */
+
+#define BTN_LEFT            0x110
+#define BTN_RIGHT           0x111
+#define BTN_MIDDLE          0x112
+
+/* ============================================================================
+ * Relative Axis Codes (for EV_REL events, future use)
+ *
+ * Reference: Linux include/uapi/linux/input-event-codes.h
+ * ============================================================================ */
+
+#define REL_X               0x00
+#define REL_Y               0x01
+#define REL_WHEEL           0x08
+
+/* ============================================================================
  * VirtIO Input Event Structure
  *
  * This is the structure placed in the eventq buffers. The device fills
@@ -178,33 +209,51 @@ struct virtio_input_event {
  * ============================================================================ */
 
 /*
- * virtio_input_init - Scan for and initialise a VirtIO input keyboard.
+ * virtio_input_init - Scan for and initialise VirtIO input devices.
  *
- * Scans all 32 MMIO slots for a VirtIO input device (type 18).
+ * Scans all 32 MMIO slots for VirtIO input devices (type 18).
+ * Identifies keyboard vs tablet by querying config space EV_BITS.
  * Sets up the eventq with pre-posted receive buffers and enables
- * the GIC interrupt for event delivery.
+ * the GIC interrupt for event delivery on each device found.
  *
  * Must be called after fbconsole_init() so keyboard input has a
  * TTY to feed into.
  *
- * Returns 0 on success, -1 if no keyboard found.
+ * Returns 0 on success, -1 if no input devices found.
  */
 int virtio_input_init(void);
 
 /*
- * virtio_input_irq_handler - Handle a VirtIO input interrupt.
+ * virtio_input_irq_handler - Handle a VirtIO keyboard interrupt.
  *
- * Called from irq_dispatch() when the input device's IRQ fires.
+ * Called from irq_dispatch() when the keyboard device's IRQ fires.
  * Processes all completed event buffers, converts keycodes to
  * ASCII, and injects characters into the fbconsole TTY.
+ * Also pushes HID events into the shared ring buffer.
  */
 void virtio_input_irq_handler(void);
 
 /*
- * virtio_input_get_irq - Return the GIC IRQ number for the input device.
+ * virtio_input_get_irq - Return the GIC IRQ number for the keyboard.
  *
- * Returns 0 if no input device has been initialised.
+ * Returns 0 if no keyboard has been initialised.
  */
 uint32_t virtio_input_get_irq(void);
+
+/*
+ * virtio_input_tablet_irq_handler - Handle a VirtIO tablet interrupt.
+ *
+ * Called from irq_dispatch() when the tablet device's IRQ fires.
+ * Processes absolute position events and mouse button events,
+ * and pushes HID events into the shared ring buffer.
+ */
+void virtio_input_tablet_irq_handler(void);
+
+/*
+ * virtio_input_tablet_get_irq - Return the GIC IRQ number for the tablet.
+ *
+ * Returns 0 if no tablet has been initialised.
+ */
+uint32_t virtio_input_tablet_get_irq(void);
 
 #endif /* _DRIVERS_VIRTIO_INPUT_H */

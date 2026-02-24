@@ -2167,7 +2167,7 @@ static const int _c_mapupper[256] = {
 static _RuneLocale _c_locale = {
     .__magic = "RuneMagA",
     .__encoding = "NONE",
-    .__runetype = {0},  /* Will be initialized */
+    .__runetype = {0},  /* Will be initialised */
     .__maplower = {0},
     .__mapupper = {0},
 };
@@ -6916,6 +6916,26 @@ EXPORT int mach_port_deallocate(unsigned int task, unsigned int name)
     return (int)mach_trap2(TRAP_mach_port_deallocate, task, name);
 }
 
+/*
+ * mach_port_mod_refs - Modify reference count on a port right
+ *
+ * Invokes _kernelrpc_mach_port_mod_refs_trap (trap -39).
+ *
+ * On macOS, this adjusts the user-reference count for a specific right
+ * type on a port name. Common usage:
+ *   mach_port_mod_refs(task, name, MACH_PORT_RIGHT_SEND, 1)  — add ref
+ *   mach_port_mod_refs(task, name, MACH_PORT_RIGHT_SEND, -1) — release
+ *
+ * Reference: XNU osfmk/kern/ipc_mig.c
+ */
+#define TRAP_mach_port_mod_refs     (-39)
+EXPORT int mach_port_mod_refs(unsigned int task, unsigned int name,
+                              unsigned int right, int delta)
+{
+    return (int)mach_trap4(TRAP_mach_port_mod_refs, task, name, right,
+                           (unsigned long)delta);
+}
+
 /* ============================================================================
  * Bootstrap Service Registry — register / look_up
  *
@@ -7061,7 +7081,7 @@ struct _mdns_reply {
     unsigned int    trailer_size;
 };
 
-/* Cached mDNSResponder service port (lazily initialized) */
+/* Cached mDNSResponder service port (lazily initialised) */
 static unsigned int _mdns_port = 0;
 
 /*

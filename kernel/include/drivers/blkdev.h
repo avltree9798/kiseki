@@ -71,7 +71,7 @@ struct blkdev {
     uint32_t            sector_size;/* Sector size in bytes (typically 512) */
     uint64_t            capacity;   /* Total sectors */
     struct blkdev_ops   *ops;       /* I/O operations */
-    bool                active;     /* Device is initialized and usable */
+    bool                active;     /* Device is initialised and usable */
 };
 
 /* ============================================================================
@@ -85,7 +85,7 @@ struct blkdev {
  *   - PLATFORM_QEMU:   calls virtio_blk_init()
  *   - PLATFORM_RASPI4: calls emmc_init()
  *
- * Returns 0 on success, -1 if no block device could be initialized.
+ * Returns 0 on success, -1 if no block device could be initialised.
  */
 int blkdev_init(void);
 

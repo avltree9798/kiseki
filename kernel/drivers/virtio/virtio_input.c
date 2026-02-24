@@ -1,18 +1,20 @@
 /*
- * Kiseki OS - VirtIO Input Keyboard Driver
+ * Kiseki OS - VirtIO Input Driver (Keyboard + Tablet)
  *
  * Receives keyboard events from QEMU's virtio-keyboard-device and
- * injects characters into the framebuffer console TTY. This allows
- * the OS to be operated from a QEMU graphical display window like
- * a physical machine with a monitor and keyboard.
+ * absolute pointer events from QEMU's virtio-tablet-device. Supports
+ * TWO simultaneous VirtIO input devices by distinguishing them via
+ * config space queries (EV_BITS for EV_ABS vs EV_KEY).
  *
  * Architecture:
- *   1. Scan MMIO slots for VirtIO input device (type 18)
- *   2. Set up eventq (queue 0) with pre-posted receive buffers
- *   3. On IRQ, process completed event buffers from the used ring
- *   4. Convert Linux keycodes to ASCII (with shift/ctrl/capslock)
- *   5. Inject resulting characters into fbcon_tty via tty_input_char_tp()
- *   6. Re-post consumed buffers to keep the eventq fed
+ *   1. Scan MMIO slots for VirtIO input devices (type 18)
+ *   2. Query config space to identify keyboard vs tablet
+ *   3. Set up separate eventq (queue 0) for each device
+ *   4. On IRQ, process completed event buffers from the used ring
+ *   5. Keyboard: convert keycodes to ASCII, inject into fbcon TTY
+ *   6. Tablet: track absolute cursor position and button state
+ *   7. Both: push HID events into shared ring buffer for userland
+ *   8. Re-post consumed buffers to keep the eventqs fed
  *
  * The driver maintains modifier state (shift, ctrl, alt, capslock)
  * and uses a standard US QWERTY keymap for scancode-to-ASCII conversion.
@@ -27,6 +29,7 @@
 #include <kern/kprintf.h>
 #include <kern/tty.h>
 #include <kern/fbconsole.h>
+#include <kern/hid_event.h>
 #include <drivers/virtio.h>
 #include <drivers/virtio_input.h>
 #include <drivers/gic.h>
@@ -45,20 +48,60 @@ static inline uint32_t mmio_read32(uint64_t addr)
     return *(volatile uint32_t *)addr;
 }
 
+static inline uint8_t mmio_read8(uint64_t addr)
+{
+    return *(volatile uint8_t *)addr;
+}
+
+static inline void mmio_write8(uint64_t addr, uint8_t val)
+{
+    *(volatile uint8_t *)addr = val;
+}
+
 static inline void dsb(void)
 {
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
 /* ============================================================================
- * Driver State
+ * VirtIO Input Config Space Offsets (from MMIO base + 0x100)
+ *
+ * struct virtio_input_config {
+ *     u8 select;      // +0x100
+ *     u8 subsel;      // +0x101
+ *     u8 size;        // +0x102
+ *     u8 reserved[5]; // +0x103..0x107
+ *     u8 data[128];   // +0x108..0x187
+ * };
  * ============================================================================ */
 
-static struct virtio_device inputdev;
-static bool inputdev_found = false;
+#define VIRTIO_INPUT_CONFIG_SELECT  0x100
+#define VIRTIO_INPUT_CONFIG_SUBSEL  0x101
+#define VIRTIO_INPUT_CONFIG_SIZE    0x102
+#define VIRTIO_INPUT_CONFIG_DATA    0x108
 
-/* The input device's GIC IRQ number */
-static uint32_t input_irq_num = 0;
+/* ============================================================================
+ * Driver State — Keyboard
+ * ============================================================================ */
+
+static struct virtio_device kbd_dev;
+static bool kbd_found = false;
+static uint32_t kbd_irq_num = 0;
+
+/* ============================================================================
+ * Driver State — Tablet
+ * ============================================================================ */
+
+static struct virtio_device tablet_dev;
+static bool tablet_found = false;
+static uint32_t tablet_irq_num = 0;
+
+/* Tablet cursor state (accumulated between SYN events) */
+static uint32_t tablet_abs_x = 0;
+static uint32_t tablet_abs_y = 0;
+static uint32_t tablet_buttons = 0;     /* Bitmask: bit0=left, bit1=right, bit2=middle */
+static bool tablet_abs_x_dirty = false;
+static bool tablet_abs_y_dirty = false;
 
 /* ============================================================================
  * Keyboard Modifier State
@@ -66,38 +109,97 @@ static uint32_t input_irq_num = 0;
 
 static bool shift_held = false;     /* Either shift key pressed */
 static bool ctrl_held = false;      /* Either ctrl key pressed */
+static bool alt_held = false;       /* Either alt key pressed */
 static bool capslock_on = false;    /* Caps lock toggled on */
 
 /* ============================================================================
- * DMA Pages for Eventq (Queue 0)
+ * HID Event Ring Buffer
  *
- * Same pattern as the GPU controlq. We need physically contiguous
- * memory for the descriptor table, available ring, and used ring.
+ * Statically allocated in BSS. The physical address is used by
+ * IOHIDSystem to create an IOMemoryDescriptor for userland mapping.
  * ============================================================================ */
 
-static uint8_t eventq_pages[3 * PAGE_SIZE] __aligned(PAGE_SIZE);
+static struct hid_event_ring g_hid_ring __aligned(PAGE_SIZE);
+
+struct hid_event_ring *hid_event_ring_get(void)
+{
+    return &g_hid_ring;
+}
+
+uint64_t hid_event_ring_get_phys(void)
+{
+    return (uint64_t)&g_hid_ring;
+}
+
+uint64_t hid_event_ring_get_size(void)
+{
+    return (uint64_t)sizeof(struct hid_event_ring);
+}
+
+/*
+ * hid_ring_push - Push an event into the HID ring buffer.
+ *
+ * Called from IRQ context. Single-producer so no locking needed.
+ * If the ring is full (consumer not keeping up), the event is dropped.
+ */
+static void hid_ring_push(const struct hid_event *ev)
+{
+    struct hid_event_ring *ring = &g_hid_ring;
+    uint32_t widx = ring->write_idx;
+    uint32_t ridx = ring->read_idx;
+
+    /* Check if ring is full */
+    if ((widx - ridx) >= ring->size)
+        return;     /* Drop event — consumer not keeping up */
+
+    uint32_t slot = widx % ring->size;
+    ring->events[slot] = *ev;
+
+    __asm__ volatile("dmb ish" ::: "memory");
+    ring->write_idx = widx + 1;
+}
+
+/*
+ * hid_get_modifier_flags - Return current modifier bitmask for HID events.
+ */
+static uint32_t hid_get_modifier_flags(void)
+{
+    uint32_t flags = 0;
+    if (shift_held)     flags |= HID_FLAG_SHIFT;
+    if (ctrl_held)      flags |= HID_FLAG_CTRL;
+    if (alt_held)       flags |= HID_FLAG_ALT;
+    if (capslock_on)    flags |= HID_FLAG_CAPSLOCK;
+    return flags;
+}
 
 /* ============================================================================
- * Event Buffers
- *
- * The VirtIO input device writes events into device-writable buffers
- * that the driver posts to the eventq. We pre-post a pool of buffers
- * at init time. When the device delivers an event, we process it and
- * re-post the buffer.
- *
- * Each buffer holds one struct virtio_input_event (8 bytes).
- * We allocate a static array of event buffers.
+ * DMA Pages for Eventq — Keyboard (Queue 0)
+ * ============================================================================ */
+
+static uint8_t kbd_eventq_pages[3 * PAGE_SIZE] __aligned(PAGE_SIZE);
+
+/* ============================================================================
+ * DMA Pages for Eventq — Tablet (Queue 0)
+ * ============================================================================ */
+
+static uint8_t tablet_eventq_pages[3 * PAGE_SIZE] __aligned(PAGE_SIZE);
+
+/* ============================================================================
+ * Event Buffers — separate pools for keyboard and tablet
  * ============================================================================ */
 
 #define NUM_EVENT_BUFS  64
 
-static struct virtio_input_event event_bufs[NUM_EVENT_BUFS] __aligned(16);
+static struct virtio_input_event kbd_event_bufs[NUM_EVENT_BUFS] __aligned(16);
+static struct virtio_input_event tablet_event_bufs[NUM_EVENT_BUFS] __aligned(16);
 
 /* ============================================================================
- * Eventq Setup
+ * Eventq Setup (parameterised for both devices)
  * ============================================================================ */
 
-static int input_setup_eventq(struct virtio_device *dev)
+static int input_setup_eventq(struct virtio_device *dev,
+                               uint8_t *dma_pages, uint64_t dma_size,
+                               const char *label)
 {
     uint64_t base = dev->base;
 
@@ -107,7 +209,7 @@ static int input_setup_eventq(struct virtio_device *dev)
 
     uint32_t max_size = mmio_read32(base + VIRTIO_MMIO_QUEUE_NUM_MAX);
     if (max_size == 0) {
-        kprintf("[virtio-input] eventq not available\n");
+        kprintf("[%s] eventq not available\n", label);
         return -1;
     }
 
@@ -119,15 +221,14 @@ static int input_setup_eventq(struct virtio_device *dev)
     vq->num = num;
 
     /* Zero the DMA region */
-    uint8_t *mem = eventq_pages;
-    for (uint64_t i = 0; i < sizeof(eventq_pages); i++)
-        mem[i] = 0;
+    for (uint64_t i = 0; i < dma_size; i++)
+        dma_pages[i] = 0;
 
     /* Layout: desc | avail | (padding) | used */
-    vq->desc  = (struct virtq_desc *)mem;
-    vq->avail = (struct virtq_avail *)(mem + num * sizeof(struct virtq_desc));
+    vq->desc  = (struct virtq_desc *)dma_pages;
+    vq->avail = (struct virtq_avail *)(dma_pages + num * sizeof(struct virtq_desc));
     vq->used  = (struct virtq_used *)
-                    (mem + ALIGN_UP(num * sizeof(struct virtq_desc)
+                    (dma_pages + ALIGN_UP(num * sizeof(struct virtq_desc)
                                     + sizeof(struct virtq_avail)
                                     + num * sizeof(uint16_t),
                                     PAGE_SIZE));
@@ -151,7 +252,7 @@ static int input_setup_eventq(struct virtio_device *dev)
         mmio_write32(base + VIRTIO_MMIO_GUEST_PAGE_SIZE, PAGE_SIZE);
         dsb();
         mmio_write32(base + VIRTIO_MMIO_QUEUE_PFN,
-                     (uint32_t)((uint64_t)mem / PAGE_SIZE));
+                     (uint32_t)((uint64_t)dma_pages / PAGE_SIZE));
     } else {
         /* Modern interface */
         uint64_t desc_pa  = (uint64_t)vq->desc;
@@ -175,12 +276,12 @@ static int input_setup_eventq(struct virtio_device *dev)
     }
 
     dsb();
-    kprintf("[virtio-input] eventq: %u descriptors\n", num);
+    kprintf("[%s] eventq: %u descriptors\n", label, num);
     return 0;
 }
 
 /* ============================================================================
- * Virtqueue Helpers
+ * Virtqueue Helpers (parameterised)
  * ============================================================================ */
 
 static int input_alloc_desc(struct virtqueue *vq)
@@ -205,13 +306,15 @@ static void input_free_desc(struct virtqueue *vq, uint32_t idx)
  * input_post_event_buf - Post a single event buffer to the eventq.
  *
  * The buffer is device-writable (the device fills it with an event).
- * We use the buffer index as the descriptor index for simplicity.
  */
-static void input_post_event_buf(struct virtqueue *vq, uint32_t buf_idx)
+static void input_post_event_buf(struct virtio_device *dev,
+                                  struct virtqueue *vq,
+                                  struct virtio_input_event *event_bufs,
+                                  uint32_t buf_idx)
 {
     int desc = input_alloc_desc(vq);
     if (desc < 0)
-        return;     /* Out of descriptors — shouldn't happen */
+        return;     /* Out of descriptors */
 
     vq->desc[desc].addr  = (uint64_t)&event_bufs[buf_idx];
     vq->desc[desc].len   = sizeof(struct virtio_input_event);
@@ -226,7 +329,44 @@ static void input_post_event_buf(struct virtqueue *vq, uint32_t buf_idx)
     __asm__ volatile("dmb ish" ::: "memory");
 
     /* Notify device */
-    mmio_write32(inputdev.base + VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+    mmio_write32(dev->base + VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+}
+
+/* ============================================================================
+ * Config Space Query
+ *
+ * Query the VirtIO input config space to determine device capabilities.
+ * Returns the size of data returned (0 = not supported).
+ * ============================================================================ */
+
+static uint8_t input_query_config(uint64_t base, uint8_t select,
+                                   uint8_t subsel)
+{
+    mmio_write8(base + VIRTIO_INPUT_CONFIG_SELECT, select);
+    mmio_write8(base + VIRTIO_INPUT_CONFIG_SUBSEL, subsel);
+    dsb();
+    return mmio_read8(base + VIRTIO_INPUT_CONFIG_SIZE);
+}
+
+/*
+ * input_device_supports_abs - Check if device supports EV_ABS events.
+ *
+ * Queries VIRTIO_INPUT_CFG_EV_BITS with subsel=EV_ABS. If size > 0,
+ * the device supports absolute axis events (tablet/touchscreen).
+ */
+static bool input_device_supports_abs(uint64_t base)
+{
+    return input_query_config(base, VIRTIO_INPUT_CFG_EV_BITS, EV_ABS) > 0;
+}
+
+/*
+ * input_device_supports_key - Check if device supports EV_KEY events.
+ *
+ * Queries VIRTIO_INPUT_CFG_EV_BITS with subsel=EV_KEY.
+ */
+static bool input_device_supports_key(uint64_t base)
+{
+    return input_query_config(base, VIRTIO_INPUT_CFG_EV_BITS, EV_KEY) > 0;
 }
 
 /* ============================================================================
@@ -234,8 +374,6 @@ static void input_post_event_buf(struct virtqueue *vq, uint32_t buf_idx)
  *
  * Standard US QWERTY keymap. Two tables: normal and shifted.
  * Covers keycodes 0--127. Entries of 0 mean "no printable character".
- *
- * This matches the standard PC keyboard layout that QEMU emulates.
  * ============================================================================ */
 
 /* Normal (unshifted) keymap */
@@ -329,23 +467,40 @@ static char keycode_to_char(uint16_t code)
 }
 
 /* ============================================================================
- * Event Processing
+ * Keyboard Event Processing
  * ============================================================================ */
 
 /*
- * input_process_event - Process a single VirtIO input event.
+ * kbd_process_event - Process a single VirtIO keyboard event.
  *
  * Handles EV_KEY events: updates modifier state for shift/ctrl/capslock,
  * converts keycodes to ASCII for key-press and key-repeat events,
- * and injects the resulting character into the fbconsole TTY.
+ * injects the resulting character into the fbconsole TTY, and pushes
+ * HID events into the shared ring buffer.
  */
-static void input_process_event(const struct virtio_input_event *ev)
+static void kbd_process_event(const struct virtio_input_event *ev)
 {
     if (ev->type != EV_KEY)
-        return;     /* We only care about key events */
+        return;     /* We only care about key events for keyboard */
 
     uint16_t code = ev->code;
     uint32_t value = ev->value;
+
+    /*
+     * Push HID event for key down/up (before modifier handling,
+     * so userland gets raw keycode events for all keys including modifiers).
+     */
+    {
+        struct hid_event hev;
+        hev.type = (value == KEY_RELEASED) ? HID_EVENT_KEY_UP : HID_EVENT_KEY_DOWN;
+        hev.keycode = code;
+        hev.abs_x = 0;
+        hev.abs_y = 0;
+        hev.buttons = 0;
+        hev.flags = hid_get_modifier_flags();
+        hev.timestamp = 0;     /* TODO: kernel timestamp */
+        hid_ring_push(&hev);
+    }
 
     /*
      * Update modifier key state.
@@ -362,7 +517,7 @@ static void input_process_event(const struct virtio_input_event *ev)
         return;
     case KEY_LEFTALT:
     case KEY_RIGHTALT:
-        /* Alt is tracked but not used for ASCII conversion yet */
+        alt_held = (value != KEY_RELEASED);
         return;
     case KEY_CAPSLOCK:
         /* Toggle on key press only (not release or repeat) */
@@ -374,7 +529,7 @@ static void input_process_event(const struct virtio_input_event *ev)
     }
 
     /*
-     * Only process key-press and key-repeat events.
+     * Only process key-press and key-repeat events for TTY injection.
      * Key-release events don't generate characters.
      */
     if (value == KEY_RELEASED)
@@ -456,36 +611,108 @@ static void input_process_event(const struct virtio_input_event *ev)
 }
 
 /* ============================================================================
- * IRQ Handler
+ * Tablet Event Processing
  * ============================================================================ */
 
-void virtio_input_irq_handler(void)
+/*
+ * tablet_process_event - Process a single VirtIO tablet event.
+ *
+ * Handles:
+ *   EV_ABS with ABS_X/ABS_Y: update accumulated cursor position
+ *   EV_KEY with BTN_LEFT/RIGHT/MIDDLE: update button state, push HID event
+ *   EV_SYN (type=0, code=0): batch complete, push mouse move HID event
+ */
+static void tablet_process_event(const struct virtio_input_event *ev)
 {
-    if (!inputdev_found)
-        return;
+    switch (ev->type) {
+    case EV_ABS:
+        if (ev->code == ABS_X) {
+            tablet_abs_x = ev->value;
+            tablet_abs_x_dirty = true;
+        } else if (ev->code == ABS_Y) {
+            tablet_abs_y = ev->value;
+            tablet_abs_y_dirty = true;
+        }
+        break;
 
+    case EV_KEY: {
+        /* Mouse button press/release */
+        uint32_t btn_bit = 0;
+        uint16_t btn_code = ev->code;
+
+        if (btn_code == BTN_LEFT)
+            btn_bit = (1 << 0);
+        else if (btn_code == BTN_RIGHT)
+            btn_bit = (1 << 1);
+        else if (btn_code == BTN_MIDDLE)
+            btn_bit = (1 << 2);
+        else
+            break;  /* Unknown button */
+
+        if (ev->value != KEY_RELEASED)
+            tablet_buttons |= btn_bit;
+        else
+            tablet_buttons &= ~btn_bit;
+
+        /* Push HID mouse button event */
+        struct hid_event hev;
+        hev.type = (ev->value != KEY_RELEASED) ?
+                   HID_EVENT_MOUSE_DOWN : HID_EVENT_MOUSE_UP;
+        hev.keycode = btn_code;
+        hev.abs_x = tablet_abs_x;
+        hev.abs_y = tablet_abs_y;
+        hev.buttons = tablet_buttons;
+        hev.flags = hid_get_modifier_flags();
+        hev.timestamp = 0;     /* TODO: kernel timestamp */
+        hid_ring_push(&hev);
+        break;
+    }
+
+    case EV_SYN:
+        if (ev->code == 0 && (tablet_abs_x_dirty || tablet_abs_y_dirty)) {
+            /* SYN_REPORT: push accumulated mouse move */
+            struct hid_event hev;
+            hev.type = HID_EVENT_MOUSE_MOVE;
+            hev.keycode = 0;
+            hev.abs_x = tablet_abs_x;
+            hev.abs_y = tablet_abs_y;
+            hev.buttons = tablet_buttons;
+            hev.flags = hid_get_modifier_flags();
+            hev.timestamp = 0;     /* TODO: kernel timestamp */
+            hid_ring_push(&hev);
+
+            tablet_abs_x_dirty = false;
+            tablet_abs_y_dirty = false;
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/* ============================================================================
+ * Generic IRQ Handler (processes used ring for a given device)
+ * ============================================================================ */
+
+static void input_handle_irq(struct virtio_device *dev,
+                              struct virtio_input_event *event_bufs,
+                              void (*process_fn)(const struct virtio_input_event *))
+{
     /* ACK the interrupt */
-    uint32_t isr = mmio_read32(inputdev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
+    uint32_t isr = mmio_read32(dev->base + VIRTIO_MMIO_INTERRUPT_STATUS);
     if (isr)
-        mmio_write32(inputdev.base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
+        mmio_write32(dev->base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
-    struct virtqueue *vq = &inputdev.vq[0];
+    struct virtqueue *vq = &dev->vq[0];
 
-    /*
-     * Process all completed event buffers from the used ring.
-     *
-     * The device places completed descriptors in the used ring.
-     * We compare our last_used_idx against the device's used->idx
-     * to find new entries.
-     */
     __asm__ volatile("dmb ish" ::: "memory");
 
     while (vq->last_used_idx != vq->used->idx) {
         uint32_t used_slot = vq->last_used_idx % vq->num;
         uint32_t desc_idx = vq->used->ring[used_slot].id;
 
-        /* The descriptor points to one of our event_bufs entries.
-         * Recover the buffer index from the descriptor's address. */
+        /* Recover buffer index from descriptor's address */
         uint64_t buf_addr = vq->desc[desc_idx].addr;
         uint32_t buf_idx = (uint32_t)(
             (buf_addr - (uint64_t)&event_bufs[0]) /
@@ -493,7 +720,7 @@ void virtio_input_irq_handler(void)
 
         if (buf_idx < NUM_EVENT_BUFS) {
             __asm__ volatile("dmb ish" ::: "memory");
-            input_process_event(&event_bufs[buf_idx]);
+            process_fn(&event_bufs[buf_idx]);
         }
 
         /* Free the descriptor and re-post the buffer */
@@ -501,8 +728,77 @@ void virtio_input_irq_handler(void)
         vq->last_used_idx++;
 
         if (buf_idx < NUM_EVENT_BUFS)
-            input_post_event_buf(vq, buf_idx);
+            input_post_event_buf(dev, vq, event_bufs, buf_idx);
     }
+}
+
+/* ============================================================================
+ * Public IRQ Handlers
+ * ============================================================================ */
+
+void virtio_input_irq_handler(void)
+{
+    if (!kbd_found)
+        return;
+    input_handle_irq(&kbd_dev, kbd_event_bufs, kbd_process_event);
+}
+
+void virtio_input_tablet_irq_handler(void)
+{
+    if (!tablet_found)
+        return;
+    input_handle_irq(&tablet_dev, tablet_event_bufs, tablet_process_event);
+}
+
+/* ============================================================================
+ * Device Initialisation Helper
+ *
+ * Shared init logic for both keyboard and tablet.
+ * ============================================================================ */
+
+static int input_init_one(struct virtio_device *dev, uint64_t base,
+                           uint32_t irq, uint8_t *dma_pages,
+                           uint64_t dma_size,
+                           struct virtio_input_event *event_bufs,
+                           const char *label)
+{
+    /*
+     * Feature negotiation.
+     * VirtIO input has no device-specific features.
+     * Request VIRTIO_F_VERSION_1 if supported.
+     */
+    uint64_t features = virtio_negotiate_features(dev, VIRTIO_F_VERSION_1);
+    kprintf("[%s] Negotiated features: 0x%lx\n", label, features);
+
+    /* Set up eventq (queue 0) */
+    if (input_setup_eventq(dev, dma_pages, dma_size, label) < 0) {
+        kprintf("[%s] Failed to set up eventq\n", label);
+        mmio_write32(base + VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED);
+        return -1;
+    }
+
+    /* Set DRIVER_OK — device is now live */
+    dev->status |= VIRTIO_STATUS_DRIVER_OK;
+    mmio_write32(base + VIRTIO_MMIO_STATUS, dev->status);
+    dsb();
+
+    /* Enable GIC interrupt */
+    gic_enable_irq(irq);
+
+    /*
+     * Pre-post event buffers to the eventq.
+     */
+    struct virtqueue *vq = &dev->vq[0];
+    uint32_t to_post = NUM_EVENT_BUFS;
+    if (to_post > vq->num)
+        to_post = vq->num;
+
+    for (uint32_t b = 0; b < to_post; b++)
+        input_post_event_buf(dev, vq, event_bufs, b);
+
+    kprintf("[%s] Posted %u event buffers\n", label, to_post);
+
+    return 0;
 }
 
 /* ============================================================================
@@ -511,81 +807,113 @@ void virtio_input_irq_handler(void)
 
 int virtio_input_init(void)
 {
-    kprintf("[virtio-input] Scanning for VirtIO input device...\n");
+    kprintf("[virtio-input] Scanning for VirtIO input devices...\n");
+
+    /* Initialise the HID event ring */
+    g_hid_ring.write_idx = 0;
+    g_hid_ring.read_idx = 0;
+    g_hid_ring.size = HID_EVENT_RING_SIZE;
+    g_hid_ring._pad = 0;
+
+    /* Temporary device struct for probing */
+    struct virtio_device probe_dev;
+    int found_count = 0;
 
     /* Scan all 32 MMIO transport slots */
     for (uint32_t i = 0; i < VIRTIO_MMIO_COUNT; i++) {
         uint64_t base = VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_STRIDE;
         uint32_t irq  = VIRTIO_MMIO_IRQ_BASE + i;
 
-        int ret = virtio_init_device(&inputdev, base, irq);
+        int ret = virtio_init_device(&probe_dev, base, irq);
         if (ret < 0)
             continue;
 
-        if (inputdev.device_id != VIRTIO_DEV_INPUT) {
+        if (probe_dev.device_id != VIRTIO_DEV_INPUT) {
             /* Not an input device -- reset and move on */
             mmio_write32(base + VIRTIO_MMIO_STATUS, 0);
             dsb();
             continue;
         }
 
-        kprintf("[virtio-input] Found input device at MMIO slot %u "
-                "(base=0x%lx, IRQ=%u, version=%u)\n",
-                i, base, irq, inputdev.version);
-        input_irq_num = irq;
-
         /*
-         * Feature negotiation.
-         * VirtIO input has no device-specific features.
-         * Request VIRTIO_F_VERSION_1 if supported.
+         * Found a VirtIO input device. Query config space to determine
+         * whether it's a keyboard or tablet.
+         *
+         * Strategy:
+         *   - If supports EV_ABS: it's a tablet (absolute pointing device)
+         *   - If supports EV_KEY but not EV_ABS: it's a keyboard
          */
-        uint64_t features = virtio_negotiate_features(&inputdev,
-                                                       VIRTIO_F_VERSION_1);
-        kprintf("[virtio-input] Negotiated features: 0x%lx\n", features);
+        bool supports_abs = input_device_supports_abs(base);
+        bool supports_key = input_device_supports_key(base);
 
-        /* Set up eventq (queue 0) */
-        if (input_setup_eventq(&inputdev) < 0) {
-            kprintf("[virtio-input] Failed to set up eventq\n");
-            mmio_write32(base + VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED);
-            return -1;
+        if (supports_abs && !tablet_found) {
+            /* This is the tablet */
+            tablet_dev = probe_dev;
+            tablet_irq_num = irq;
+
+            kprintf("[virtio-tablet] Found tablet at MMIO slot %u "
+                    "(base=0x%lx, IRQ=%u, version=%u)\n",
+                    i, base, irq, probe_dev.version);
+
+            ret = input_init_one(&tablet_dev, base, irq,
+                                  tablet_eventq_pages,
+                                  sizeof(tablet_eventq_pages),
+                                  tablet_event_bufs,
+                                  "virtio-tablet");
+            if (ret == 0) {
+                tablet_found = true;
+                found_count++;
+                kprintf("[virtio-tablet] Tablet ready (absolute coordinates)\n");
+            }
+        } else if (supports_key && !kbd_found) {
+            /* This is the keyboard */
+            kbd_dev = probe_dev;
+            kbd_irq_num = irq;
+
+            kprintf("[virtio-input] Found keyboard at MMIO slot %u "
+                    "(base=0x%lx, IRQ=%u, version=%u)\n",
+                    i, base, irq, probe_dev.version);
+
+            ret = input_init_one(&kbd_dev, base, irq,
+                                  kbd_eventq_pages,
+                                  sizeof(kbd_eventq_pages),
+                                  kbd_event_bufs,
+                                  "virtio-input");
+            if (ret == 0) {
+                kbd_found = true;
+                found_count++;
+                kprintf("[virtio-input] Keyboard ready (US QWERTY layout)\n");
+            }
+        } else {
+            /* Already have this device type, or unrecognised — skip */
+            kprintf("[virtio-input] Skipping input device at slot %u "
+                    "(abs=%u, key=%u, kbd_found=%u, tablet_found=%u)\n",
+                    i, supports_abs, supports_key, kbd_found, tablet_found);
+            mmio_write32(base + VIRTIO_MMIO_STATUS, 0);
+            dsb();
         }
 
-        /* Set DRIVER_OK — device is now live */
-        inputdev.status |= VIRTIO_STATUS_DRIVER_OK;
-        mmio_write32(base + VIRTIO_MMIO_STATUS, inputdev.status);
-        dsb();
-
-        inputdev_found = true;
-
-        /* Enable GIC interrupt */
-        gic_enable_irq(irq);
-
-        /*
-         * Pre-post event buffers to the eventq.
-         *
-         * The device needs buffers available in the eventq before
-         * it can deliver events. We post NUM_EVENT_BUFS buffers
-         * (or as many as fit in the queue).
-         */
-        struct virtqueue *vq = &inputdev.vq[0];
-        uint32_t to_post = NUM_EVENT_BUFS;
-        if (to_post > vq->num)
-            to_post = vq->num;
-
-        for (uint32_t b = 0; b < to_post; b++)
-            input_post_event_buf(vq, b);
-
-        kprintf("[virtio-input] Posted %u event buffers\n", to_post);
-        kprintf("[virtio-input] Keyboard ready (US QWERTY layout)\n");
-
-        return 0;
+        /* Stop scanning once we have both devices */
+        if (kbd_found && tablet_found)
+            break;
     }
 
-    kprintf("[virtio-input] No VirtIO input device found\n");
-    return -1;
+    if (found_count == 0) {
+        kprintf("[virtio-input] No VirtIO input devices found\n");
+        return -1;
+    }
+
+    kprintf("[virtio-input] Initialised %d input device(s) "
+            "(kbd=%u, tablet=%u)\n", found_count, kbd_found, tablet_found);
+    return 0;
 }
 
 uint32_t virtio_input_get_irq(void)
 {
-    return input_irq_num;
+    return kbd_irq_num;
+}
+
+uint32_t virtio_input_tablet_get_irq(void)
+{
+    return tablet_irq_num;
 }

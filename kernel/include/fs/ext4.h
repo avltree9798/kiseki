@@ -494,7 +494,7 @@ struct ext4_extent {
     uint32_t    ee_start_lo;    /* Physical block (low 32 bits) */
 } __packed;
 
-/* Maximum uninitialized extent length (bit 15 set means uninitialized) */
+/* Maximum uninitialised extent length (bit 15 set means uninitialised) */
 #define EXT4_EXT_INIT_MAX_LEN   32768
 #define EXT4_EXT_IS_UNWRITTEN(ext) ((ext)->ee_len > EXT4_EXT_INIT_MAX_LEN)
 #define EXT4_EXT_GET_LEN(ext) \

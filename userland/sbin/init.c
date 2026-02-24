@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <dirent.h>
+#include <time.h>
 #include <mach/mach.h>
 
 /*
@@ -75,6 +76,10 @@ struct launchd_job {
 
     int     keep_alive;                 /* KeepAlive flag */
     int     pid;                        /* Child PID once launched, -1 if not running */
+
+    /* KeepAlive rate limiting (matches macOS launchd ThrottleInterval) */
+    int     crash_count;                /* Consecutive rapid crashes */
+    long    last_exit_time;             /* time() of last exit */
 };
 
 static struct launchd_job jobs[MAX_JOBS];
@@ -817,6 +822,18 @@ static int spawn_getty(void)
  * Daemon Reaping & KeepAlive
  * ============================================================================ */
 
+/*
+ * KEEPALIVE_THROTTLE_SEC - Minimum seconds between relaunches.
+ *
+ * macOS launchd uses a 10-second ThrottleInterval by default. If a daemon
+ * exits within this window it is considered a rapid crash. After
+ * KEEPALIVE_MAX_RAPID_CRASHES consecutive rapid crashes the daemon is
+ * throttled with a sleep before relaunch.
+ */
+#define KEEPALIVE_THROTTLE_SEC      10
+#define KEEPALIVE_MAX_RAPID_CRASHES 5
+#define KEEPALIVE_PENALTY_SEC       10
+
 static void handle_daemon_exit(int pid, int status)
 {
     for (int i = 0; i < num_jobs; i++) {
@@ -828,6 +845,25 @@ static void handle_daemon_exit(int pid, int status)
 
             /* KeepAlive: relaunch if set */
             if (jobs[i].keep_alive) {
+                long now = time(NULL);
+                long elapsed = now - jobs[i].last_exit_time;
+                jobs[i].last_exit_time = now;
+
+                if (elapsed < KEEPALIVE_THROTTLE_SEC) {
+                    jobs[i].crash_count++;
+                } else {
+                    jobs[i].crash_count = 0;
+                }
+
+                if (jobs[i].crash_count >= KEEPALIVE_MAX_RAPID_CRASHES) {
+                    printf("init: '%s' is crash-looping (%d rapid exits), "
+                           "throttling %ds\n",
+                           jobs[i].label, jobs[i].crash_count,
+                           KEEPALIVE_PENALTY_SEC);
+                    sleep(KEEPALIVE_PENALTY_SEC);
+                    jobs[i].crash_count = 0;
+                }
+
                 int new_pid = launch_daemon(&jobs[i]);
                 if (new_pid > 0) {
                     printf("init: relaunched '%s' (pid %d)\n",

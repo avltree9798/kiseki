@@ -562,7 +562,7 @@ int virtio_net_init(void)
         /* Enable interrupt-driven receive via GIC */
         gic_enable_irq(irq);
 
-        kprintf("[virtio-net] device initialized successfully (IRQ %u)\n", irq);
+        kprintf("[virtio-net] device initialised successfully (IRQ %u)\n", irq);
         return 0;
     }
 

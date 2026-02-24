@@ -165,7 +165,7 @@ void thread_init(void)
         thread_pool[i].state = TH_TERM;
     }
 
-    kprintf("[sched] Thread subsystem initialized (%d max threads)\n", MAX_THREADS);
+    kprintf("[sched] Thread subsystem initialised (%d max threads)\n", MAX_THREADS);
 }
 
 struct thread *thread_create(const char *name, void (*entry)(void *), void *arg,
@@ -289,6 +289,51 @@ void thread_sleep_on(void *chan, const char *reason)
 }
 
 /*
+ * thread_sleep_on_locked - Sleep on a wait channel, atomically releasing a
+ *                          spinlock AFTER entering TH_WAIT state.
+ *
+ * XNU equivalent: msleep() / lck_mtx_sleep() / assert_wait() + thread_block()
+ * FreeBSD equivalent: msleep(chan, mtx, pri, wmesg, timo)
+ *
+ * This solves the classic missed-wakeup race condition:
+ *
+ *   Thread A (sleeper)              Thread B (waker)
+ *   ─────────────────               ────────────────
+ *   spin_lock(&lock)
+ *   check condition (false)
+ *     ┌─ set TH_WAIT               wakeup(chan) ← sees TH_WAIT, works!
+ *     └─ spin_unlock(&lock)
+ *   sched_switch()
+ *
+ * Without this function, if the lock is released BEFORE setting TH_WAIT,
+ * the waker can call thread_wakeup_on() in the gap and the wakeup is lost
+ * forever — the sleeper enters TH_WAIT after the wakeup and never runs again.
+ *
+ * The caller MUST hold the spinlock with IRQs saved (via spin_lock_irqsave).
+ * The lock is released after TH_WAIT is set, and IRQs are restored.
+ *
+ * @chan:   Wait channel (any kernel address)
+ * @reason: Debug string for ps/debugging
+ * @lock:  Spinlock to release after entering TH_WAIT
+ * @flags: IRQ flags to restore when releasing the spinlock
+ */
+void thread_sleep_on_locked(void *chan, const char *reason,
+                            spinlock_t *lock, uint64_t flags)
+{
+    struct cpu_data *cd = get_cpu_data();
+    struct thread *th = cd->current_thread;
+
+    th->wait_channel = chan;
+    th->wait_reason = reason;
+    th->state = TH_WAIT;
+
+    /* Now in TH_WAIT — any concurrent thread_wakeup_on(chan) WILL find us */
+    spin_unlock_irqrestore(lock, flags);
+
+    sched_switch();
+}
+
+/*
  * thread_wakeup_on - Wake all threads sleeping on a wait channel.
  *
  * XNU equivalent: thread_wakeup_prim(event, FALSE, THREAD_AWAKENED)
@@ -364,7 +409,7 @@ void sched_init(void)
     /* Initialize per-CPU data for boot CPU */
     struct cpu_data *cd = &cpu_data_array[0];
     cd->cpu_id = 0;
-    cd->online = false;  /* Not online until fully initialized */
+    cd->online = false;  /* Not online until fully initialised */
     spin_init(&cd->run_lock);
     cd->run_count = 0;
     cd->need_resched = false;
@@ -410,7 +455,7 @@ void sched_init(void)
     /* Mark CPU 0 as online now that initialization is complete */
     cd->online = true;
 
-    kprintf("[sched] Scheduler initialized on core 0\n");
+    kprintf("[sched] Scheduler initialised on core 0\n");
 }
 
 void sched_init_percpu(void)
@@ -419,7 +464,7 @@ void sched_init_percpu(void)
     struct cpu_data *cd = &cpu_data_array[cpuid];
 
     cd->cpu_id = cpuid;
-    cd->online = false;  /* Not online until fully initialized */
+    cd->online = false;  /* Not online until fully initialised */
     spin_init(&cd->run_lock);
     cd->run_count = 0;
     cd->need_resched = false;
@@ -1134,7 +1179,7 @@ struct thread *thread_create_user(struct task *task, uint64_t entry,
     user_tf->spsr = 0x0;
 
     /* Zero the remaining trap frame fields (not restored by RESTORE_REGS
-     * but must be initialized so the frame is clean) */
+     * but must be initialised so the frame is clean) */
     user_tf->esr = 0;
     user_tf->far = 0;
 

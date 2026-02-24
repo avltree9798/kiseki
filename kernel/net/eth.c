@@ -539,7 +539,7 @@ void eth_init(void)
     for (int i = 0; i < ARP_CACHE_SIZE; i++)
         arp_cache[i].valid = false;
 
-    kprintf("[eth] Ethernet layer initialized\n");
+    kprintf("[eth] Ethernet layer initialised\n");
 }
 
 /*

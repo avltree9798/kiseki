@@ -243,6 +243,12 @@ static void mach_trap_dispatch(struct trap_frame *tf, int32_t trap_num)
         return;
     }
 
+    case MACH_TRAP_mach_port_mod_refs: {
+        kr = mach_port_mod_refs_trap(tf);
+        syscall_return(tf, (int64_t)kr);
+        return;
+    }
+
     case MACH_TRAP_bootstrap_register: {
         kr = bootstrap_register_trap(tf);
         syscall_return(tf, (int64_t)kr);
@@ -1140,6 +1146,7 @@ struct pipe_data {
     uint32_t    count;      /* bytes available to read */
     bool        write_closed;
     bool        read_closed;
+    spinlock_t  lock;       /* Protects count, read_pos, write_pos, closed flags */
 };
 
 /*
@@ -1188,21 +1195,69 @@ int sys_read(struct trap_frame *tf)
     int pipe_dir;
     struct pipe_data *pipe_r = (struct pipe_data *)vfs_get_pipe(fd, &pipe_dir);
     if (pipe_r != NULL && pipe_dir == 0) {
-        /* Read end of pipe */
+        /*
+         * Read end of pipe — XNU-style locked sleep/wakeup.
+         *
+         * The pipe spinlock protects count, read_pos, write_pos, and
+         * the closed flags. We hold it while checking the condition and
+         * around the sleep call (thread_sleep_on_locked releases it
+         * atomically after entering TH_WAIT, preventing missed wakeups).
+         *
+         * Reference: XNU pipe_read() in bsd/kern/sys_pipe.c
+         */
         uint64_t nread = 0;
         struct proc *pp = proc_current();
+        uint64_t pipe_flags;
+
+        spin_lock_irqsave(&pipe_r->lock, &pipe_flags);
+
         while (nread < count) {
             if (pipe_r->count == 0) {
-                if (pipe_r->write_closed || nread > 0)
+                if (pipe_r->write_closed || nread > 0) {
+                    /* EOF or partial read — done */
                     break;
-                /* Block: yield and retry */
-                extern void sched_yield(void);
-                sched_yield();
+                }
+                /*
+                 * Check for pending signals before blocking. If SIGINT
+                 * (or any non-blocked signal) is pending, return EINTR
+                 * so the syscall completes and signal_check() runs on
+                 * the return-to-user path.
+                 *
+                 * Reference: XNU pipe_read() checks for signals via
+                 * msleep() returning EINTR.
+                 */
+                if (pp) {
+                    sigset_t pending = pp->p_sigacts.pending & ~pp->p_sigacts.blocked;
+                    if (pending) {
+                        spin_unlock_irqrestore(&pipe_r->lock, pipe_flags);
+                        if (nread > 0)
+                            break;      /* Return partial read */
+                        syscall_return(tf, -EINTR);
+                        return 0;
+                    }
+                }
+                /*
+                 * Block: atomically release the pipe lock and enter
+                 * TH_WAIT. This prevents the missed-wakeup race where
+                 * the writer could call thread_wakeup_on() between our
+                 * condition check and sleep entry.
+                 */
+                thread_sleep_on_locked(pipe_r, "pipe_rd",
+                                       &pipe_r->lock, pipe_flags);
+                /* Re-acquire the lock after wakeup */
+                spin_lock_irqsave(&pipe_r->lock, &pipe_flags);
                 continue;
             }
             uint8_t byte = pipe_r->buf[pipe_r->read_pos];
             pipe_r->read_pos = (pipe_r->read_pos + 1) % PIPE_BUF_SIZE;
             pipe_r->count--;
+
+            /*
+             * Must drop the lock while copying to userspace — the
+             * vmm_translate + store could fault or take time, and we
+             * must not hold a spinlock across that.
+             */
+            spin_unlock_irqrestore(&pipe_r->lock, pipe_flags);
 
             if (pp && pp->p_vmspace) {
                 uint64_t pa = vmm_translate(pp->p_vmspace->pgd,
@@ -1210,7 +1265,20 @@ int sys_read(struct trap_frame *tf)
                 if (pa) *(uint8_t *)pa = byte;
             }
             nread++;
+
+            /* Re-acquire for the next iteration */
+            spin_lock_irqsave(&pipe_r->lock, &pipe_flags);
         }
+
+        spin_unlock_irqrestore(&pipe_r->lock, pipe_flags);
+
+        /*
+         * Wake any writer sleeping on a full pipe buffer. Now that we
+         * have consumed data, there is space for the writer.
+         */
+        if (nread > 0)
+            thread_wakeup_on(pipe_r);
+
         ret = (int64_t)nread;
     }
     /* Socket fd: delegate to net_recv */
@@ -1287,33 +1355,77 @@ int sys_write(struct trap_frame *tf)
     int pipe_wdir;
     struct pipe_data *pipe_w = (struct pipe_data *)vfs_get_pipe(fd, &pipe_wdir);
     if (pipe_w != NULL && pipe_wdir == 1) {
-        /* Write end of pipe */
+        /*
+         * Write end of pipe — XNU-style locked sleep/wakeup.
+         *
+         * Same locking protocol as the read side: hold the pipe
+         * spinlock around condition checks and use
+         * thread_sleep_on_locked() when the buffer is full, so we
+         * never miss a wakeup from the reader draining data.
+         *
+         * Reference: XNU pipe_write() in bsd/kern/sys_pipe.c
+         */
+        uint64_t nwritten = 0;
+        struct proc *pp = proc_current();
+        uint64_t pipe_wflags;
+
+        spin_lock_irqsave(&pipe_w->lock, &pipe_wflags);
+
         if (pipe_w->read_closed) {
+            spin_unlock_irqrestore(&pipe_w->lock, pipe_wflags);
             /* Broken pipe — reader closed */
             return EPIPE;
         }
-        uint64_t nwritten = 0;
-        struct proc *pp = proc_current();
+
         while (nwritten < count) {
+            if (pipe_w->read_closed) {
+                /* Reader closed while we were writing */
+                break;
+            }
             if (pipe_w->count >= PIPE_BUF_SIZE) {
                 if (nwritten > 0)
                     break;
-                /* Buffer full — yield and retry */
-                extern void sched_yield(void);
-                sched_yield();
+                /*
+                 * Buffer full — atomically release lock and sleep.
+                 * The reader will wake us after draining data.
+                 */
+                thread_sleep_on_locked(pipe_w, "pipe_wr",
+                                       &pipe_w->lock, pipe_wflags);
+                /* Re-acquire lock after wakeup */
+                spin_lock_irqsave(&pipe_w->lock, &pipe_wflags);
                 continue;
             }
+
+            /*
+             * Drop lock for the userspace copy (vmm_translate may be
+             * slow), then re-acquire to update the ring buffer.
+             */
+            spin_unlock_irqrestore(&pipe_w->lock, pipe_wflags);
+
             uint8_t byte = 0;
             if (pp && pp->p_vmspace) {
                 uint64_t pa = vmm_translate(pp->p_vmspace->pgd,
                                             (uint64_t)buf + nwritten);
                 if (pa) byte = *(const uint8_t *)pa;
             }
+
+            spin_lock_irqsave(&pipe_w->lock, &pipe_wflags);
+
             pipe_w->buf[pipe_w->write_pos] = byte;
             pipe_w->write_pos = (pipe_w->write_pos + 1) % PIPE_BUF_SIZE;
             pipe_w->count++;
             nwritten++;
         }
+
+        spin_unlock_irqrestore(&pipe_w->lock, pipe_wflags);
+
+        /*
+         * Wake any reader sleeping on an empty pipe. Now that we
+         * have written data, there is something to read.
+         */
+        if (nwritten > 0)
+            thread_wakeup_on(pipe_w);
+
         ret = (int64_t)nwritten;
     }
     /* Socket fd: delegate to net_send */
@@ -1553,6 +1665,67 @@ int sys_dup2(struct trap_frame *tf)
 static struct pipe_data pipe_pool[PIPE_MAX];
 static bool pipe_pool_used[PIPE_MAX];
 
+/*
+ * pipe_close_end - Notify a pipe that one end has been closed.
+ *
+ * Called from vfs_close() and fd_close_all() when the last reference
+ * to a pipe fd is released. Sets write_closed or read_closed on the
+ * pipe_data so the other end can detect EOF or broken pipe.
+ *
+ * If both ends are closed, the pipe_data is freed back to the pool.
+ *
+ * @pipe_ptr: The pipe_data pointer (void* from struct file.f_pipe)
+ * @dir:      0 = read end closing, 1 = write end closing
+ */
+void pipe_close_end(void *pipe_ptr, int dir)
+{
+    if (pipe_ptr == NULL)
+        return;
+
+    struct pipe_data *pd = (struct pipe_data *)pipe_ptr;
+    uint64_t flags;
+
+    /*
+     * Hold the pipe spinlock while setting the closed flag.
+     * This ensures the sleeping reader/writer sees the flag
+     * atomically with respect to its condition check — if it
+     * is still holding the lock checking count==0 / count>=BUF_SIZE,
+     * we wait for it to enter TH_WAIT (via thread_sleep_on_locked)
+     * before we set the flag and issue the wakeup.
+     */
+    spin_lock_irqsave(&pd->lock, &flags);
+
+    if (dir == 1)
+        pd->write_closed = true;
+    else
+        pd->read_closed = true;
+
+    /* Check if both ends are now closed */
+    bool both_closed = (pd->write_closed && pd->read_closed);
+
+    spin_unlock_irqrestore(&pd->lock, flags);
+
+    /*
+     * Wake any thread sleeping in the pipe read/write loop.
+     * When the write end closes, the reader needs to see
+     * write_closed=true and return EOF (0 bytes).
+     * When the read end closes, the writer needs to see
+     * read_closed=true and get EPIPE.
+     *
+     * The wakeup is outside the lock — this is safe because
+     * thread_wakeup_on() scans for TH_WAIT threads, and we
+     * have already set the closed flag under the lock.
+     */
+    thread_wakeup_on(pd);
+
+    /* Free the pipe if both ends are closed */
+    if (both_closed) {
+        int idx = (int)(pd - pipe_pool);
+        if (idx >= 0 && idx < PIPE_MAX)
+            pipe_pool_used[idx] = false;
+    }
+}
+
 static struct pipe_data *pipe_alloc_data(void)
 {
     for (int i = 0; i < PIPE_MAX; i++) {
@@ -1564,6 +1737,7 @@ static struct pipe_data *pipe_alloc_data(void)
             pd->count = 0;
             pd->write_closed = false;
             pd->read_closed = false;
+            spin_init(&pd->lock);
             return pd;
         }
     }

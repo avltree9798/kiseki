@@ -485,7 +485,7 @@ int virtio_blk_init(void)
         blkdev = dev;
         blkdev_found = true;
 
-        kprintf("[virtio-blk] device initialized successfully\n");
+        kprintf("[virtio-blk] device initialised successfully\n");
         return 0;
     }
 

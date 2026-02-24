@@ -94,6 +94,20 @@ typedef ledger_t        *ledger_array_t;
 typedef task_t          task_port_t;
 typedef thread_t        thread_port_t;
 
+/* ============================================================================
+ * VM Types (from mach/mach_vm.h, mach/vm_types.h)
+ *
+ * 64-bit virtual memory types for arm64.
+ * ============================================================================ */
+
+typedef unsigned long long  mach_vm_address_t;
+typedef unsigned long long  mach_vm_size_t;
+typedef unsigned long long  mach_vm_offset_t;
+
+typedef unsigned long long  vm_address_t;
+typedef unsigned long long  vm_offset_t;
+typedef unsigned long long  vm_size_t;
+
 /* Natural_t-based types */
 typedef natural_t       ledger_item_t;      /* Deprecated */
 

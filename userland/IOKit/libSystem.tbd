@@ -1,0 +1,14 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _mach_msg, _mach_reply_port, _mach_task_self,
+                   _mach_task_self_, _mach_port_deallocate,
+                   _mach_port_allocate, _mach_port_mod_refs,
+                   _bootstrap_look_up, _bootstrap_register,
+                   _bootstrap_check_in ]
+...

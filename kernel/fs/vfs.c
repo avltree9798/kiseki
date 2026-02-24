@@ -817,7 +817,7 @@ vfs_init(void)
     mount_count = 0;
     root_vnode = NULL;
 
-    kprintf("vfs: initialized (max %d mounts, %d vnodes, %d fds/proc)\n",
+    kprintf("vfs: initialised (max %d mounts, %d vnodes, %d fds/proc)\n",
             VFS_MAX_MOUNTS, VFS_MAX_VNODES, PROC_FD_MAX);
 }
 
@@ -1186,11 +1186,18 @@ vfs_close(int fd)
     if (fp->f_refcount > 0)
         fp->f_refcount--;
     if (fp->f_refcount == 0) {
+        /* Notify pipe that this end has been closed */
+        void *pipe_ptr = fp->f_pipe;
+        int pipe_dir = (int)fp->f_pipe_dir;
+
         fp->f_vnode = NULL;
         fp->f_pipe = NULL;
         fp->f_pty = NULL;
         fp->f_sockidx = -1;
         spin_unlock(&fp->f_lock);
+
+        if (pipe_ptr != NULL)
+            pipe_close_end(pipe_ptr, pipe_dir);
 
         if (vp != NULL)
             vnode_release(vp);

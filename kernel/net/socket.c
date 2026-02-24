@@ -222,7 +222,7 @@ void net_init(void)
         }
     }
 
-    kprintf("[net] networking subsystem initialized (%d sockets)\n",
+    kprintf("[net] networking subsystem initialised (%d sockets)\n",
             NET_MAX_SOCKETS);
 }
 

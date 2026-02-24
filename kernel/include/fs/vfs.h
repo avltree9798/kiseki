@@ -752,6 +752,18 @@ int vfs_alloc_pipefd(void *pipe_data, int dir);
 void *vfs_get_pipe(int fd, int *dir);
 
 /*
+ * pipe_close_end - Notify a pipe that one end has been closed.
+ *
+ * Called when the last reference to a pipe fd is released (refcount
+ * drops to 0). Sets write_closed or read_closed on the pipe_data so
+ * the other end detects EOF or broken pipe.
+ *
+ * @pipe_ptr: The pipe_data pointer (from struct file.f_pipe)
+ * @dir:      0 = read end closing, 1 = write end closing
+ */
+void pipe_close_end(void *pipe_ptr, int dir);
+
+/*
  * vfs_get_pty - Get the PTY pair for a PTY fd.
  *
  * @fd:   File descriptor

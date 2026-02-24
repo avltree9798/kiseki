@@ -74,7 +74,7 @@ endif
 CFLAGS      := -Wall -Wextra -Werror \
                -ffreestanding -fno-builtin -fno-stack-protector \
                -nostdinc -nostdlib \
-               -mcpu=cortex-a72 -mgeneral-regs-only \
+               -mcpu=cortex-a72 -mgeneral-regs-only -mno-outline-atomics \
                -std=gnu11 -O2 -g \
                $(PLATFORM_DEF) \
                $(DEBUG_DEF) \
@@ -129,6 +129,19 @@ BSD_SRCS    := $(SRCDIR)/bsd/syscalls.c \
 # C sources - Mach layer
 MACH_SRCS   := $(SRCDIR)/mach/ipc.c
 
+# C sources - IOKit framework
+IOKIT_SRCS  := $(SRCDIR)/iokit/io_object.c \
+               $(SRCDIR)/iokit/io_property.c \
+               $(SRCDIR)/iokit/io_registry_entry.c \
+               $(SRCDIR)/iokit/io_registry.c \
+               $(SRCDIR)/iokit/io_service.c \
+               $(SRCDIR)/iokit/io_memory_descriptor.c \
+               $(SRCDIR)/iokit/io_work_loop.c \
+               $(SRCDIR)/iokit/io_user_client.c \
+               $(SRCDIR)/iokit/iokit_mach.c \
+               $(SRCDIR)/iokit/io_framebuffer.c \
+               $(SRCDIR)/iokit/io_hid_system.c
+
 # C sources - Filesystem
 FS_SRCS     := $(SRCDIR)/fs/buf.c \
                $(SRCDIR)/fs/vfs.c \
@@ -145,7 +158,7 @@ NET_SRCS    := $(SRCDIR)/net/socket.c \
                $(SRCDIR)/net/dhcp.c
 
 # All sources
-C_SRCS      := $(KERN_SRCS) $(ARCH_SRCS) $(DRV_SRCS) $(BSD_SRCS) $(MACH_SRCS) $(FS_SRCS) $(NET_SRCS)
+C_SRCS      := $(KERN_SRCS) $(ARCH_SRCS) $(DRV_SRCS) $(BSD_SRCS) $(MACH_SRCS) $(IOKIT_SRCS) $(FS_SRCS) $(NET_SRCS)
 
 # --- Object Files ------------------------------------------------------------
 ASM_OBJS    := $(patsubst %.S,$(OBJDIR)/%.o,$(ASM_SRCS))
@@ -233,6 +246,9 @@ QEMU_FLAGS += -device virtio-gpu-device
 
 # Add virtio-keyboard device for framebuffer console input
 QEMU_FLAGS += -device virtio-keyboard-device
+
+# Add virtio-tablet device for absolute pointer (mouse) input
+QEMU_FLAGS += -device virtio-tablet-device
 
 run: all
 	@echo ""

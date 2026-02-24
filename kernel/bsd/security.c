@@ -49,7 +49,7 @@ void security_init(void)
     ucred_free_next[UCRED_POOL_SIZE - 1] = -1;
     ucred_free_head = 0;
 
-    kprintf("[security] credential pool initialized (%d entries)\n",
+    kprintf("[security] credential pool initialised (%d entries)\n",
             UCRED_POOL_SIZE);
 }
 

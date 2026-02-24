@@ -207,11 +207,18 @@ void fd_close_all(struct proc *p)
             if (fp->f_refcount > 0)
                 fp->f_refcount--;
             if (fp->f_refcount == 0) {
+                /* Notify pipe that this end has been closed */
+                void *pipe_ptr = fp->f_pipe;
+                int pipe_dir = (int)fp->f_pipe_dir;
+
                 fp->f_vnode = NULL;
                 fp->f_pipe = NULL;
                 fp->f_pty = NULL;
                 fp->f_sockidx = -1;
                 spin_unlock(&fp->f_lock);
+
+                if (pipe_ptr != NULL)
+                    pipe_close_end(pipe_ptr, pipe_dir);
 
                 if (vp != NULL)
                     vnode_release(vp);
@@ -1425,7 +1432,7 @@ int sys_wait4_impl(struct trap_frame *tf)
 /* ============================================================================
  * kernel_init_process - Launch the first user process
  *
- * Called from kmain after all subsystems are initialized.
+ * Called from kmain after all subsystems are initialised.
  * Creates PID 1, loads a Mach-O binary (with dyld if needed),
  * sets up the stack per XNU conventions, and enters user mode.
  *

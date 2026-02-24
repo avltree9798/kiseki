@@ -17,6 +17,12 @@ BUILDDIR := $(TOPBUILD)/userland
 OBJDIR   := $(BUILDDIR)/obj/sbin
 BINDIR   := $(BUILDDIR)/sbin
 
+# Our custom userland headers - IOKit framework headers directory
+# This directory contains ONLY the IOKit/ subdirectory so that
+# #include <IOKit/IOKitLib.h> resolves here, but other system headers
+# (#include <stdio.h> etc.) still resolve from the macOS SDK sysroot.
+IOKIT_INC := ../IOKit/include
+
 # Compiler flags - arm64 Mach-O
 CFLAGS  := -target arm64-apple-macos11 \
            -isysroot $(SYSROOT) \
@@ -25,11 +31,15 @@ CFLAGS  := -target arm64-apple-macos11 \
            -Wno-unused-parameter \
            -Wno-nullability-completeness
 
+# Extra flags for programs that need our custom IOKit headers
+# -I adds the IOKit include directory (contains only IOKit/ subdir)
+CFLAGS_IOKIT := $(CFLAGS) -I$(IOKIT_INC)
+
 LDFLAGS := -target arm64-apple-macos11 \
            -isysroot $(SYSROOT)
 
 # Programs
-PROGS := init getty login halt reboot shutdown sshd mDNSResponder
+PROGS := init getty login halt reboot shutdown sshd mDNSResponder WindowServer
 
 TARGETS := $(patsubst %,$(BINDIR)/%,$(PROGS))
 
@@ -52,6 +62,19 @@ $(BINDIR)/shutdown: $(OBJDIR)/halt.o
 	@echo "  LD       sbin/shutdown"
 	@mkdir -p $(dir $@)
 	@$(LD) $(LDFLAGS) -o $@ $<
+
+# WindowServer needs our custom IOKit headers
+$(OBJDIR)/WindowServer.o: WindowServer.c
+	@echo "  CC       sbin/WindowServer.c (IOKit)"
+	@mkdir -p $(dir $@)
+	@$(CC) $(CFLAGS_IOKIT) -c $< -o $@
+
+# WindowServer links against IOKit.framework (via TBD stub)
+IOKIT_TBD := ../IOKit/IOKit.tbd
+$(BINDIR)/WindowServer: $(OBJDIR)/WindowServer.o
+	@echo "  LD       sbin/WindowServer (IOKit)"
+	@mkdir -p $(dir $@)
+	@$(LD) $(LDFLAGS) -o $@ $< $(IOKIT_TBD)
 
 $(BINDIR)/%: $(OBJDIR)/%.o
 	@echo "  LD       sbin/$*"

@@ -80,7 +80,7 @@ void uart_init(void)
     mmio_write32(base + UART_LCRH, LCRH_WLEN_8 | LCRH_FEN);
 
     /* NOTE: UART RX interrupts are NOT enabled here because GIC is not
-     * initialized yet. Call uart_enable_irq() after gic_init(). */
+     * initialised yet. Call uart_enable_irq() after gic_init(). */
 
     /* Enable UART, TX, and RX */
     mmio_write32(base + UART_CR, CR_UARTEN | CR_TXE | CR_RXE);

@@ -330,7 +330,7 @@ static const uint32_t stub_sigreturn[] = {
 /*
  * commpage_init - Allocate and populate the CommPage
  *
- * Called once during kernel startup (after PMM and VMM are initialized).
+ * Called once during kernel startup (after PMM and VMM are initialised).
  * Allocates a single physical page, fills in system data and stub code,
  * and stores the physical address for later mapping into user spaces.
  */
@@ -425,7 +425,7 @@ void commpage_init(void)
 void commpage_map(struct vm_space *space)
 {
     if (commpage_phys == 0) {
-        kprintf("commpage: not initialized, skipping map\n");
+        kprintf("commpage: not initialised, skipping map\n");
         return;
     }
 

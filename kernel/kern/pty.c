@@ -36,7 +36,7 @@ void pty_init(void)
         pty_pool[i].pt_active = false;
         pty_pool[i].pt_index  = i;
     }
-    kprintf("[pty] PTY subsystem initialized (%d pairs)\n", PTY_MAX);
+    kprintf("[pty] PTY subsystem initialised (%d pairs)\n", PTY_MAX);
 }
 
 /* ============================================================================

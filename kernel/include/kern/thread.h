@@ -148,7 +148,7 @@ struct cpu_data {
 
     /* Scheduling state */
     bool                need_resched;
-    bool                online;         /* True once CPU is fully initialized */
+    bool                online;         /* True once CPU is fully initialised */
     uint64_t            idle_ticks;
     uint64_t            total_ticks;
 };
@@ -184,6 +184,22 @@ void thread_sleep_ticks(uint64_t ticks);
  */
 void thread_sleep_on(void *chan, const char *reason);
 void thread_wakeup_on(void *chan);
+
+/*
+ * thread_sleep_on_locked - Sleep on wait channel, atomically releasing a
+ *                          spinlock AFTER entering TH_WAIT.
+ *
+ * Solves the missed-wakeup race: the lock ensures no wakeup can fire
+ * between the condition check and the TH_WAIT state transition.
+ *
+ * XNU equivalent: msleep() / lck_mtx_sleep()
+ * FreeBSD equivalent: msleep(chan, mtx, pri, wmesg, timo)
+ *
+ * Caller MUST hold @lock via spin_lock_irqsave(). The lock is released
+ * and IRQs restored after TH_WAIT is set.
+ */
+void thread_sleep_on_locked(void *chan, const char *reason,
+                            spinlock_t *lock, uint64_t flags);
 
 /* Get current thread */
 struct thread *current_thread_get(void);

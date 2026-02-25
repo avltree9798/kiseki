@@ -85,6 +85,10 @@ struct thread {
 
     /* Scheduler queue linkage */
     struct thread       *run_next;          /* Next in run queue */
+    bool                on_runq;            /* True if on a CPU's run queue.
+                                             * XNU equivalent: thread->runq != PROCESSOR_NULL.
+                                             * Prevents double-enqueue when thread_unblock()
+                                             * races with sched_switch() re-enqueue. */
 
     /* Mutex wait queue linkage */
     struct thread       *wait_next;         /* Next in wait queue */
@@ -167,7 +171,18 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg,
 /* Terminate the current thread */
 void thread_exit(void) __noreturn;
 
-/* Block the current thread (sleep) */
+/* Mark current thread as TH_WAIT without context switching.
+ * XNU equivalent: assert_wait().
+ * Caller must call thread_block_check() afterwards to actually block. */
+void thread_set_wait(const char *reason);
+
+/* Context-switch if still TH_WAIT, else return immediately.
+ * XNU equivalent: thread_block() → thread_invoke() early check.
+ * Returns true if thread blocked, false if already woken. */
+bool thread_block_check(void);
+
+/* Block the current thread (sleep): sets TH_WAIT + thread_block_check.
+ * Convenience wrapper combining thread_set_wait + thread_block_check. */
 void thread_block(const char *reason);
 
 /* Unblock a thread (wake up) */

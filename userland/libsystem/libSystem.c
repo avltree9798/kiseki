@@ -756,9 +756,13 @@ typedef struct block_header {
     struct block_header *next;
     uint32_t            magic;
     uint32_t            free;
+    uint64_t            _pad;   /* pad to 32 bytes (multiple of 16) so
+                                   block + HEADER_SIZE is 16-byte aligned */
 } block_header_t;
 
 #define HEADER_SIZE sizeof(block_header_t)
+_Static_assert(HEADER_SIZE % 16 == 0,
+               "HEADER_SIZE must be a multiple of 16 for malloc alignment");
 
 static block_header_t *_heap_head = NULL;
 
@@ -2181,7 +2185,7 @@ static _RuneLocale _c_locale = {
 EXPORT _RuneLocale _DefaultRuneLocale;
 
 /* Initialize the default locale at load time */
-__attribute__((constructor))
+__attribute__((constructor, used))
 static void _init_default_rune_locale(void)
 {
     memcpy(_DefaultRuneLocale.__magic, "RuneMagA", 8);
@@ -7003,6 +7007,20 @@ EXPORT NORETURN void __assert_fail(const char *expr, const char *file, int line,
     abort();
 }
 
+/*
+ * __assert_rtn — Apple/macOS-style assertion failure handler
+ *
+ * On macOS, <assert.h> calls __assert_rtn() instead of __assert_fail().
+ * The parameter order differs: (func, file, line, expr) vs
+ * __assert_fail's (expr, file, line, func).
+ *
+ * libobjc2 and code compiled with Apple headers may reference this symbol.
+ */
+EXPORT NORETURN void __assert_rtn(const char *func, const char *file, int line, const char *expr)
+{
+    __assert_fail(expr, file, line, func);
+}
+
 /* ============================================================================
  * Mach IPC — Userland Wrappers
  *
@@ -7082,6 +7100,18 @@ static inline long __mach_trap(long number, long a0, long a1, long a2,
  * We lazily initialize it on first call.
  */
 EXPORT uint32_t mach_task_self_ = 0;
+
+/*
+ * bootstrap_port - The task's bootstrap port
+ *
+ * On macOS, this is set during libSystem initialisation from the task's
+ * special port 4 (TASK_BOOTSTRAP_PORT).  On Kiseki, bootstrap_register /
+ * bootstrap_look_up / bootstrap_check_in are kernel traps that ignore
+ * the bp argument, so this is effectively unused.  We export it so that
+ * code compiled against the macOS SDK (which declares
+ * `extern mach_port_t bootstrap_port;`) links without error.
+ */
+EXPORT uint32_t bootstrap_port = 0;
 
 /*
  * mach_task_self - Get the calling task's self port
@@ -7644,6 +7674,219 @@ EXPORT int getaddrinfo(const char *hostname, const char *servname,
     *res = ai;
     return 0;
 }
+
+/* ============================================================================
+ * Math library functions
+ * ============================================================================
+ * Minimal implementations of libm functions needed by CoreGraphics and other
+ * frameworks. These use polynomial approximations suitable for a freestanding
+ * environment with no hardware FPU libm.
+ * ============================================================================ */
+
+/* --- Constants --- */
+#define M_PI_CG  3.14159265358979323846
+#define M_PI2_CG 6.28318530717958647692
+
+/* --- fabs --- */
+EXPORT double fabs(double x) {
+    return x < 0.0 ? -x : x;
+}
+
+EXPORT float fabsf(float x) {
+    return x < 0.0f ? -x : x;
+}
+
+/* --- fmod --- */
+EXPORT double fmod(double x, double y) {
+    if (y == 0.0) return x; /* NaN in real libm, but avoid div-by-zero */
+    return x - (double)(long long)(x / y) * y;
+}
+
+/* --- sqrt (Newton-Raphson) --- */
+EXPORT double sqrt(double x) {
+    if (x < 0.0) return __builtin_nan("");
+    if (x == 0.0) return 0.0;
+    double guess = x;
+    /* Initial estimate using bit manipulation */
+    if (x > 1.0) guess = x / 2.0;
+    for (int i = 0; i < 64; i++) {
+        double next = 0.5 * (guess + x / guess);
+        if (next == guess) break;
+        guess = next;
+    }
+    return guess;
+}
+
+EXPORT float sqrtf(float x) {
+    return (float)sqrt((double)x);
+}
+
+/* --- sin (Bhaskara I approximation + range reduction, then Cody-Waite minimax) --- */
+/* Using a 7th-order Taylor series with range reduction to [-pi, pi] */
+static double __reduce_angle(double x) {
+    /* Reduce x to [-pi, pi] */
+    x = fmod(x, M_PI2_CG);
+    if (x > M_PI_CG)  x -= M_PI2_CG;
+    if (x < -M_PI_CG) x += M_PI2_CG;
+    return x;
+}
+
+EXPORT double sin(double x) {
+    x = __reduce_angle(x);
+    /* Taylor series: sin(x) = x - x^3/6 + x^5/120 - x^7/5040 + x^9/362880 */
+    double x2 = x * x;
+    double x3 = x2 * x;
+    double x5 = x3 * x2;
+    double x7 = x5 * x2;
+    double x9 = x7 * x2;
+    double x11 = x9 * x2;
+    return x - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0 - x11 / 39916800.0;
+}
+
+EXPORT float sinf(float x) {
+    return (float)sin((double)x);
+}
+
+/* --- cos --- */
+EXPORT double cos(double x) {
+    return sin(x + M_PI_CG / 2.0);
+}
+
+EXPORT float cosf(float x) {
+    return (float)cos((double)x);
+}
+
+/* --- __sincos_stret --- */
+/* arm64 ABI: returns { double sin, double cos } in a struct via registers */
+typedef struct { double sinval; double cosval; } __double_sincos_result;
+
+EXPORT __double_sincos_result __sincos_stret(double x) {
+    __double_sincos_result r;
+    r.sinval = sin(x);
+    r.cosval = cos(x);
+    return r;
+}
+
+/* --- sincosf_stret --- */
+typedef struct { float sinval; float cosval; } __float_sincos_result;
+
+EXPORT __float_sincos_result __sincosf_stret(float x) {
+    __float_sincos_result r;
+    r.sinval = sinf(x);
+    r.cosval = cosf(x);
+    return r;
+}
+
+/* --- tan --- */
+EXPORT double tan(double x) {
+    double c = cos(x);
+    if (c == 0.0) return __builtin_inf();
+    return sin(x) / c;
+}
+
+EXPORT float tanf(float x) {
+    return (float)tan((double)x);
+}
+
+/* --- atan2 (CORDIC-style) --- */
+EXPORT double atan2(double y, double x) {
+    /* Minimax polynomial for atan on [0,1], then quadrant adjustment */
+    if (x == 0.0 && y == 0.0) return 0.0;
+    if (x == 0.0) return y > 0.0 ? M_PI_CG / 2.0 : -M_PI_CG / 2.0;
+
+    double abs_y = fabs(y) + 1e-300; /* avoid 0/0 */
+    double angle;
+    if (x >= 0.0) {
+        double r = (x - abs_y) / (x + abs_y);
+        angle = 0.1963 * r * r * r - 0.9817 * r + M_PI_CG / 4.0;
+    } else {
+        double r = (x + abs_y) / (abs_y - x);
+        angle = 0.1963 * r * r * r - 0.9817 * r + 3.0 * M_PI_CG / 4.0;
+    }
+    return y < 0.0 ? -angle : angle;
+}
+
+/* --- atan --- */
+EXPORT double atan(double x) {
+    return atan2(x, 1.0);
+}
+
+/* --- ceil / floor / round --- */
+EXPORT double ceil(double x) {
+    long long ix = (long long)x;
+    if (x > 0.0 && (double)ix != x) ix++;
+    return (double)ix;
+}
+
+EXPORT double floor(double x) {
+    long long ix = (long long)x;
+    if (x < 0.0 && (double)ix != x) ix--;
+    return (double)ix;
+}
+
+EXPORT double round(double x) {
+    return x >= 0.0 ? floor(x + 0.5) : ceil(x - 0.5);
+}
+
+EXPORT float ceilf(float x)  { return (float)ceil((double)x); }
+EXPORT float floorf(float x) { return (float)floor((double)x); }
+EXPORT float roundf(float x) { return (float)round((double)x); }
+
+/* --- log / exp (for future use by frameworks) --- */
+EXPORT double log(double x) {
+    if (x <= 0.0) return -__builtin_inf();
+    /* Decompose: x = m * 2^e where 1 <= m < 2 */
+    int e = 0;
+    double m = x;
+    while (m >= 2.0) { m /= 2.0; e++; }
+    while (m < 1.0)  { m *= 2.0; e--; }
+    /* log(x) = e*log(2) + log(m), log(m) via Taylor around m=1 */
+    double t = m - 1.0;
+    double result = t - t*t/2.0 + t*t*t/3.0 - t*t*t*t/4.0 + t*t*t*t*t/5.0;
+    return result + (double)e * 0.6931471805599453;
+}
+
+EXPORT double exp(double x) {
+    if (x > 709.0) return __builtin_inf();
+    if (x < -709.0) return 0.0;
+    /* exp(x) = 2^(x/ln2). Decompose: x = k*ln2 + r */
+    double ln2 = 0.6931471805599453;
+    long long k = (long long)(x / ln2 + (x >= 0.0 ? 0.5 : -0.5));
+    double r = x - (double)k * ln2;
+    /* exp(r) via Taylor for small r */
+    double er = 1.0 + r + r*r/2.0 + r*r*r/6.0 + r*r*r*r/24.0 + r*r*r*r*r/120.0;
+    /* Multiply by 2^k */
+    while (k > 0)  { er *= 2.0; k--; }
+    while (k < 0)  { er /= 2.0; k++; }
+    return er;
+}
+
+EXPORT double pow(double base, double exponent) {
+    if (exponent == 0.0) return 1.0;
+    if (base == 0.0) return 0.0;
+    if (base < 0.0) {
+        /* Integer exponents for negative bases */
+        long long ie = (long long)exponent;
+        if ((double)ie == exponent) {
+            double r = exp(exponent * log(-base));
+            return (ie & 1) ? -r : r;
+        }
+        return __builtin_nan("");
+    }
+    return exp(exponent * log(base));
+}
+
+EXPORT float logf(float x)  { return (float)log((double)x); }
+EXPORT float expf(float x)  { return (float)exp((double)x); }
+EXPORT float powf(float b, float e) { return (float)pow((double)b, (double)e); }
+
+/* --- copysign --- */
+EXPORT double copysign(double x, double y) {
+    double ax = fabs(x);
+    return y < 0.0 ? -ax : ax;
+}
+
+/* ldexp is defined earlier in the file */
 
 /* ============================================================================
  * End of libSystem.B.dylib implementation

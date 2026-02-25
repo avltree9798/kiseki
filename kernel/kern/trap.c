@@ -31,9 +31,19 @@ void trap_sync_el1(struct trap_frame *tf)
 {
     uint32_t ec = (tf->esr >> 26) & 0x3F;
 
+    /* Also read live system registers for comparison (trap frame may be stale
+     * if this is a nested exception or if the exception occurred mid-restore) */
+    uint64_t live_esr, live_elr, live_far, live_spsr;
+    __asm__ volatile("mrs %0, esr_el1"  : "=r"(live_esr));
+    __asm__ volatile("mrs %0, elr_el1"  : "=r"(live_elr));
+    __asm__ volatile("mrs %0, far_el1"  : "=r"(live_far));
+    __asm__ volatile("mrs %0, spsr_el1" : "=r"(live_spsr));
+
     kprintf("\n!!! KERNEL TRAP (sync EL1) !!!\n");
     kprintf("  EC=0x%x  ELR=0x%lx  FAR=0x%lx\n", ec, tf->elr, tf->far);
     kprintf("  ESR=0x%lx  SPSR=0x%lx\n", tf->esr, tf->spsr);
+    kprintf("  LIVE ESR=0x%lx  ELR=0x%lx  FAR=0x%lx  SPSR=0x%lx\n",
+            live_esr, live_elr, live_far, live_spsr);
     kprintf("  x0=0x%lx  x1=0x%lx  x19=0x%lx  x30=0x%lx\n",
             tf->regs[0], tf->regs[1], tf->regs[19], tf->regs[30]);
     kprintf("  SP(from tf)=0x%lx\n", tf->sp);
@@ -168,7 +178,28 @@ void trap_sync_el0(struct trap_frame *tf)
          * Negative x16 -> Mach trap
          * Arguments in x0-x5, return value in x0
          * Error: carry flag set in SPSR, positive errno in x0
+         *
+         * CRITICAL: Enable interrupts during syscall processing.
+         *
+         * ARM64 exception entry from EL0 masks IRQs (PSTATE.I=1).
+         * If we leave IRQs masked for the entire syscall, this CPU
+         * cannot receive timer ticks, which means:
+         *   1. sched_tick() never runs on this CPU
+         *   2. sched_wakeup_sleepers() never runs on this CPU
+         *   3. All deadline-based wakeups depend on OTHER CPUs
+         *
+         * On real XNU, the kernel unmasks IRQs early in the syscall
+         * path (via ml_set_interrupts_enabled() called from the
+         * trap handler). Blocking syscalls like mach_msg must be
+         * able to receive timer ticks for timeout expiry.
+         *
+         * We unmask IRQs here. The trap frame has already been saved,
+         * and the kernel stack is set up, so it's safe to take IRQs.
+         * On return, RESTORE_REGS restores SPSR_EL1 (the EL0 state)
+         * which already has the correct IRQ mask for user mode.
          */
+        __asm__ volatile("msr daifclr, #0x2" ::: "memory");
+
 #if DEBUG
         {
             int64_t scnum = (int64_t)tf->regs[16];
@@ -186,6 +217,15 @@ void trap_sync_el0(struct trap_frame *tf)
         }
 #endif
         syscall_handler(tf);
+
+        /*
+         * Mask IRQs before checking signals and returning to EL0.
+         * signal_check() manipulates the trap frame and must not be
+         * interrupted mid-modification. The RESTORE_REGS + eret path
+         * restores SPSR_EL1 (which has EL0's PSTATE), so masking here
+         * has no effect on the returned-to user mode state.
+         */
+        __asm__ volatile("msr daifset, #0x2" ::: "memory");
 
 #if DEBUG
         {
@@ -286,8 +326,94 @@ void trap_sync_el0(struct trap_frame *tf)
             }
         }
 
-        if (handled)
+         if (handled)
             break;
+
+        /*
+         * Alignment fault (DFSC=0x21) from QEMU TCG:
+         *
+         * QEMU TCG checks alignment BEFORE performing the TLB lookup.
+         * When the faulting address is unaligned AND the page is not in
+         * the TLB, QEMU reports DFSC=0x21 (alignment fault) instead of
+         * a translation fault (DFSC=0x04-0x07).  We handle three cases:
+         *
+         * 1. The faulting page is unmapped → demand-page it.
+         * 2. An unaligned access spans a page boundary and the NEXT page
+         *    is unmapped → demand-page the next page too.
+         * 3. Both pages are already mapped → the fault is spurious
+         *    (SCTLR_EL1.A=0 disables alignment checking).  Simply retry
+         *    the instruction.  This commonly occurs with ObjC runtime
+         *    data structures (SparseArray, dtable nodes) that straddle
+         *    page boundaries.
+         */
+        if ((dfsc & 0x3F) == 0x21) {
+            struct proc *p = proc_current();
+            if (p && p->p_vmspace && p->p_vmspace->pgd) {
+                uint64_t page_va = fault_va & ~(uint64_t)0xFFF;
+                int pages_fixed = 0;
+
+                /*
+                 * Check the page containing the faulting address.
+                 * If unmapped, demand-page it.
+                 */
+                pte_t *pte = vmm_get_pte(p->p_vmspace->pgd, page_va);
+                if (!pte || !(*pte & PTE_VALID)) {
+                    if (page_va < 0xFFFF000000000000ULL && page_va != 0) {
+                        uint64_t new_page = pmm_alloc_pages(0);
+                        if (new_page != 0) {
+                            uint8_t *pp = (uint8_t *)new_page;
+                            for (int zi = 0; zi < 4096; zi++)
+                                pp[zi] = 0;
+                            if (vmm_map_page(p->p_vmspace->pgd,
+                                             page_va, new_page, PTE_USER_RW) == 0) {
+                                pages_fixed++;
+                            } else {
+                                pmm_free_pages(new_page, 0);
+                            }
+                        }
+                    }
+                }
+
+                /*
+                 * For unaligned accesses that span a page boundary, the
+                 * next page may also need to be demand-paged.  An access
+                 * of up to 16 bytes (LDP Q-reg pair) at address A can
+                 * touch page_va and page_va + 0x1000.
+                 */
+                uint64_t next_page_va = page_va + 0x1000;
+                if ((fault_va & 0xFFF) != 0 &&
+                    next_page_va < 0xFFFF000000000000ULL) {
+                    pte_t *pte2 = vmm_get_pte(p->p_vmspace->pgd, next_page_va);
+                    if (!pte2 || !(*pte2 & PTE_VALID)) {
+                        uint64_t new_page = pmm_alloc_pages(0);
+                        if (new_page != 0) {
+                            uint8_t *pp = (uint8_t *)new_page;
+                            for (int zi = 0; zi < 4096; zi++)
+                                pp[zi] = 0;
+                            if (vmm_map_page(p->p_vmspace->pgd,
+                                             next_page_va, new_page,
+                                             PTE_USER_RW) == 0) {
+                                pages_fixed++;
+                            } else {
+                                pmm_free_pages(new_page, 0);
+                            }
+                        }
+                    }
+                }
+
+                /*
+                 * If we mapped any pages, or if both pages were already
+                 * mapped (spurious alignment fault under TCG with
+                 * SCTLR_EL1.A=0), simply retry the instruction.
+                 */
+                pte = vmm_get_pte(p->p_vmspace->pgd, page_va);
+                if (pte && (*pte & PTE_VALID)) {
+                    handled = true;
+                }
+            }
+            if (handled)
+                break;
+        }
 
         /* Could not resolve — deliver SIGSEGV or kill */
         kprintf("\n[trap] User data abort at FAR=0x%lx PC=0x%lx\n",
@@ -296,6 +422,25 @@ void trap_sync_el0(struct trap_frame *tf)
                 tf->esr, dfsc, wnr ? "WRITE" : "READ");
         kprintf("  x0=0x%lx  x1=0x%lx  x30=0x%lx  SP=0x%lx\n",
                 tf->regs[0], tf->regs[1], tf->regs[30], tf->sp);
+
+        /* Dump SCTLR_EL1 and PTE for diagnostic purposes */
+        {
+            uint64_t sctlr_val;
+            __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr_val));
+            kprintf("  SCTLR_EL1=0x%lx (A=%d)\n", sctlr_val,
+                    (int)((sctlr_val >> 1) & 1));
+            struct proc *dp = proc_current();
+            if (dp && dp->p_vmspace && dp->p_vmspace->pgd) {
+                uint64_t fpage = fault_va & ~(uint64_t)0xFFF;
+                pte_t *pte = vmm_get_pte(dp->p_vmspace->pgd, fpage);
+                if (pte)
+                    kprintf("  PTE for 0x%lx: 0x%lx (valid=%d)\n",
+                            fpage, *pte, (int)(*pte & PTE_VALID));
+                else
+                    kprintf("  PTE for 0x%lx: NOT PRESENT (walk returned NULL)\n",
+                            fpage);
+            }
+        }
 
         {
             struct proc *p = proc_current();

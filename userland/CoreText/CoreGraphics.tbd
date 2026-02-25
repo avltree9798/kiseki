@@ -1,0 +1,16 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _CGPointMake, _CGSizeMake, _CGRectMake,
+                   _CGColorCreate, _CGColorRelease, _CGColorGetComponents,
+                   _CGColorSpaceCreateDeviceRGB, _CGColorSpaceRelease,
+                   _CGContextSetFillColorWithColor,
+                   _CGContextFillRect, _CGContextSetRGBFillColor,
+                   _CGPathCreateMutable, _CGPathRelease,
+                   _CGAffineTransformIdentity ]
+...

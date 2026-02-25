@@ -1,0 +1,27 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/Foundation.framework/Versions/A/Foundation'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ ___objc_class_name_NSObject,
+                   ___objc_class_name_NSString,
+                   ___objc_class_name_NSArray,
+                   ___objc_class_name_NSMutableArray,
+                   ___objc_class_name_NSDictionary,
+                   ___objc_class_name_NSMutableDictionary,
+                   ___objc_class_name_NSMutableString,
+                   ___objc_class_name_NSNumber,
+                   ___objc_class_name_NSData,
+                   ___objc_class_name_NSRunLoop,
+                   ___objc_class_name_NSAutoreleasePool,
+                   ___objc_class_name_NSNotificationCenter,
+                   ___objc_class_name_NSProcessInfo,
+                   ___objc_class_name_NSThread,
+                   ___objc_class_name_NSDate,
+                   ___objc_class_name_NSBundle,
+                   ___objc_class_name_NSTimer,
+                   _NSLog ]
+...

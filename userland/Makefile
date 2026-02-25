@@ -28,9 +28,12 @@ COREUTILS := cat cp mv rm ln touch mkdir rmdir \
 # Networking tools
 NETTOOLS := ifconfig ping nc curl ntpdate
 
-.PHONY: all dyld libsystem iokit libobjc bash coreutils nettools sbin tcc tests clean $(COREUTILS) $(NETTOOLS)
+# GUI application bundles (each has a directory under apps/)
+GUI_APPS := Dock Finder SystemUIServer Terminal
 
-all: dyld libsystem iokit libobjc sbin bash coreutils nettools tcc tests
+.PHONY: all dyld libsystem iokit libobjc corefoundation coregraphics coretext foundation appkit bash coreutils nettools sbin tcc tests apps clean $(COREUTILS) $(NETTOOLS) $(GUI_APPS)
+
+all: dyld libsystem iokit libobjc corefoundation coregraphics coretext foundation appkit sbin apps bash coreutils nettools tcc tests
 
 tcc:
 	@echo "=== Building TCC ==="
@@ -52,9 +55,35 @@ libobjc:
 	@echo "=== Building libobjc.A.dylib ==="
 	@$(MAKE) -C libobjc
 
+corefoundation:
+	@echo "=== Building CoreFoundation.framework ==="
+	@$(MAKE) -C CoreFoundation
+
+coregraphics:
+	@echo "=== Building CoreGraphics.framework ==="
+	@$(MAKE) -C CoreGraphics
+
+coretext:
+	@echo "=== Building CoreText.framework ==="
+	@$(MAKE) -C CoreText
+
+foundation:
+	@echo "=== Building Foundation.framework ==="
+	@$(MAKE) -C Foundation
+
+appkit:
+	@echo "=== Building AppKit.framework ==="
+	@$(MAKE) -C AppKit
+
 sbin:
-	@echo "=== Building sbin (init/getty/login) ==="
+	@echo "=== Building sbin (init/getty/login/WindowServer/loginwindow) ==="
 	@$(MAKE) -C sbin
+
+apps: $(GUI_APPS)
+
+$(GUI_APPS):
+	@echo "=== Building $@.app ==="
+	@$(MAKE) -C apps/$@.app
 
 bash:
 	@echo "=== Building bash ==="
@@ -79,7 +108,15 @@ clean:
 	@$(MAKE) -C libSystem clean
 	@$(MAKE) -C IOKit clean
 	@$(MAKE) -C libobjc clean
+	@$(MAKE) -C CoreFoundation clean
+	@$(MAKE) -C CoreGraphics clean
+	@$(MAKE) -C CoreText clean
+	@$(MAKE) -C Foundation clean
+	@$(MAKE) -C AppKit clean
 	@$(MAKE) -C sbin clean
+	@for app in $(GUI_APPS); do \
+		if [ -d apps/$$app.app ]; then $(MAKE) -C apps/$$app.app clean; fi; \
+	done
 	@$(MAKE) -C bin/bash clean
 	@$(MAKE) -C bin/tcc clean
 	@for prog in $(COREUTILS); do \

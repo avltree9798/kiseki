@@ -197,6 +197,11 @@ int vmm_map_range(pte_t *pgd, uint64_t va_start, uint64_t pa_start,
 
 uint64_t vmm_translate(pte_t *pgd, uint64_t va)
 {
+    if (pgd == NULL) {
+        kprintf("[vmm] BUG: vmm_translate called with NULL pgd (VA=0x%lx)\n", va);
+        return 0;
+    }
+
     uint64_t irq_flags;
     spin_lock_irqsave(&vmm_lock, &irq_flags);
 
@@ -315,6 +320,18 @@ void vmm_init(void)
     sctlr |= (1UL << 0);   /* M: MMU enable */
     sctlr |= (1UL << 2);   /* C: Data cache enable */
     sctlr |= (1UL << 12);  /* I: Instruction cache enable */
+    /*
+     * Clear SCTLR_EL1.A (bit 1) — alignment checking.
+     *
+     * ARM64 AArch64 allows unaligned accesses to normal memory by default
+     * when A=0. macOS/XNU always runs with A=0. The Cortex-A72 reset value
+     * has A=1 (alignment checking enabled), so we must explicitly clear it.
+     *
+     * Without this, any unaligned memory access from EL0 or EL1 produces a
+     * Data Abort with DFSC=0x21 (alignment fault). GNUstep libobjc2 and
+     * compiled ObjC code routinely perform unaligned accesses.
+     */
+    sctlr &= ~(1UL << 1);  /* A: Alignment check disable */
     __asm__ volatile("msr sctlr_el1, %0" :: "r"(sctlr));
     __asm__ volatile("isb");
 
@@ -672,12 +689,13 @@ void vmm_init_percpu(void)
     __asm__ volatile("dsb sy");
     __asm__ volatile("isb");
 
-    /* Enable MMU + caches */
+    /* Enable MMU + caches (must match vmm_init exactly) */
     uint64_t sctlr;
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
     sctlr |= (1UL << 0);   /* M: MMU enable */
     sctlr |= (1UL << 2);   /* C: Data cache enable */
     sctlr |= (1UL << 12);  /* I: Instruction cache enable */
+    sctlr &= ~(1UL << 1);  /* A: Alignment check disable */
     __asm__ volatile("msr sctlr_el1, %0" :: "r"(sctlr));
     __asm__ volatile("isb");
 }

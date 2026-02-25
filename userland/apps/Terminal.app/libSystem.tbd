@@ -1,0 +1,17 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _malloc, _calloc, _realloc, _free, _abort,
+                   _memcpy, _memmove, _memset, _memcmp,
+                   _strlen, _strcmp, _strncmp, _strcpy, _strncpy, _strdup,
+                   _snprintf, _fprintf, _fwrite, _printf,
+                   ___stderrp, ___stdoutp,
+                   _openpty, _fork, _execve, __exit, _setsid, _getenv,
+                   _close, _dup2, _read, _write, _fcntl, _waitpid, _ioctl,
+                   ___stack_chk_fail, ___stack_chk_guard ]
+...

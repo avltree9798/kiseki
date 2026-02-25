@@ -1,0 +1,28 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/AppKit.framework/Versions/A/AppKit'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _NSApp, _NSApplicationMain,
+                   _NSApplicationDidFinishLaunchingNotification,
+                   _NSApplicationWillTerminateNotification,
+                   _NSWindowDidBecomeKeyNotification,
+                   _NSWindowDidResignKeyNotification,
+                   ___objc_class_name_NSApplication,
+                   ___objc_class_name_NSWindow,
+                   ___objc_class_name_NSView,
+                   ___objc_class_name_NSEvent,
+                   ___objc_class_name_NSColor,
+                   ___objc_class_name_NSFont,
+                   ___objc_class_name_NSMenu,
+                   ___objc_class_name_NSMenuItem,
+                   ___objc_class_name_NSGraphicsContext,
+                   ___objc_class_name_NSResponder,
+                   ___objc_class_name_NSControl,
+                   ___objc_class_name_NSTextField,
+                   ___objc_class_name_NSButton,
+                   ___objc_class_name_NSCell ]
+...

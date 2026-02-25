@@ -86,7 +86,10 @@ fi
 USR_BIN_PROGS="find xargs id whoami which env du wc yes tcc file"
 
 # Binaries that go in /sbin (system admin)
-SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd mDNSResponder WindowServer"
+SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd mDNSResponder WindowServer loginwindow"
+
+# GUI application bundles (installed to /Applications/Foo.app/Foo)
+GUI_APPS="Dock Finder SystemUIServer Terminal"
 
 # Test binary
 MACHO_HELLO="${PROJDIR}/build/hello"
@@ -178,6 +181,63 @@ populate_linux() {
         sudo chmod 755 "${MOUNT_DIR}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
         echo "  Installed /System/Library/Frameworks/IOKit.framework"
     fi
+
+    # Install CoreFoundation.framework
+    local CF_SRC="${BUILDDIR}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
+    if [ -f "${CF_SRC}" ]; then
+        sudo mkdir -p "${MOUNT_DIR}/System/Library/Frameworks/CoreFoundation.framework/Versions/A"
+        sudo cp "${CF_SRC}" "${MOUNT_DIR}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
+        sudo chmod 755 "${MOUNT_DIR}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
+        echo "  Installed /System/Library/Frameworks/CoreFoundation.framework"
+    fi
+
+    # Install CoreGraphics.framework
+    local CG_SRC="${BUILDDIR}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics"
+    if [ -f "${CG_SRC}" ]; then
+        sudo mkdir -p "${MOUNT_DIR}/System/Library/Frameworks/CoreGraphics.framework/Versions/A"
+        sudo cp "${CG_SRC}" "${MOUNT_DIR}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics"
+        sudo chmod 755 "${MOUNT_DIR}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics"
+        echo "  Installed /System/Library/Frameworks/CoreGraphics.framework"
+    fi
+
+    # Install CoreText.framework
+    local CT_SRC="${BUILDDIR}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText"
+    if [ -f "${CT_SRC}" ]; then
+        sudo mkdir -p "${MOUNT_DIR}/System/Library/Frameworks/CoreText.framework/Versions/A"
+        sudo cp "${CT_SRC}" "${MOUNT_DIR}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText"
+        sudo chmod 755 "${MOUNT_DIR}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText"
+        echo "  Installed /System/Library/Frameworks/CoreText.framework"
+    fi
+
+    # Install Foundation.framework
+    local FN_SRC="${BUILDDIR}/System/Library/Frameworks/Foundation.framework/Versions/A/Foundation"
+    if [ -f "${FN_SRC}" ]; then
+        sudo mkdir -p "${MOUNT_DIR}/System/Library/Frameworks/Foundation.framework/Versions/A"
+        sudo cp "${FN_SRC}" "${MOUNT_DIR}/System/Library/Frameworks/Foundation.framework/Versions/A/Foundation"
+        sudo chmod 755 "${MOUNT_DIR}/System/Library/Frameworks/Foundation.framework/Versions/A/Foundation"
+        echo "  Installed /System/Library/Frameworks/Foundation.framework"
+    fi
+
+    # Install AppKit.framework
+    local AK_SRC="${BUILDDIR}/System/Library/Frameworks/AppKit.framework/Versions/A/AppKit"
+    if [ -f "${AK_SRC}" ]; then
+        sudo mkdir -p "${MOUNT_DIR}/System/Library/Frameworks/AppKit.framework/Versions/A"
+        sudo cp "${AK_SRC}" "${MOUNT_DIR}/System/Library/Frameworks/AppKit.framework/Versions/A/AppKit"
+        sudo chmod 755 "${MOUNT_DIR}/System/Library/Frameworks/AppKit.framework/Versions/A/AppKit"
+        echo "  Installed /System/Library/Frameworks/AppKit.framework"
+    fi
+
+    # Install GUI application bundles to /Applications
+    sudo mkdir -p "${MOUNT_DIR}/Applications"
+    for app in ${GUI_APPS}; do
+        local APP_SRC="${BUILDDIR}/Applications/${app}.app/${app}"
+        if [ -f "${APP_SRC}" ]; then
+            sudo mkdir -p "${MOUNT_DIR}/Applications/${app}.app"
+            sudo cp "${APP_SRC}" "${MOUNT_DIR}/Applications/${app}.app/${app}"
+            sudo chmod 755 "${MOUNT_DIR}/Applications/${app}.app/${app}"
+            echo "  Installed /Applications/${app}.app"
+        fi
+    done
 
     # Install configuration files
     install_config_files "${MOUNT_DIR}"
@@ -339,6 +399,62 @@ DIRS
         echo "mkdir /System/Library/Frameworks/IOKit.framework/Versions/A" >> "${CMDS}"
         echo "write ${IOKIT_SRC} /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit" >> "${CMDS}"
     fi
+
+    # Install CoreFoundation.framework
+    local CF_SRC="${BUILDDIR}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
+    if [ -f "${CF_SRC}" ]; then
+        # Frameworks dir may already exist from IOKit above, debugfs mkdir is idempotent on error
+        echo "mkdir /System/Library/Frameworks/CoreFoundation.framework" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/CoreFoundation.framework/Versions" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/CoreFoundation.framework/Versions/A" >> "${CMDS}"
+        echo "write ${CF_SRC} /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" >> "${CMDS}"
+    fi
+
+    # Install CoreGraphics.framework
+    local CG_SRC="${BUILDDIR}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics"
+    if [ -f "${CG_SRC}" ]; then
+        echo "mkdir /System/Library/Frameworks/CoreGraphics.framework" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/CoreGraphics.framework/Versions" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/CoreGraphics.framework/Versions/A" >> "${CMDS}"
+        echo "write ${CG_SRC} /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" >> "${CMDS}"
+    fi
+
+    # Install CoreText.framework
+    local CT_SRC="${BUILDDIR}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText"
+    if [ -f "${CT_SRC}" ]; then
+        echo "mkdir /System/Library/Frameworks/CoreText.framework" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/CoreText.framework/Versions" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/CoreText.framework/Versions/A" >> "${CMDS}"
+        echo "write ${CT_SRC} /System/Library/Frameworks/CoreText.framework/Versions/A/CoreText" >> "${CMDS}"
+    fi
+
+    # Install Foundation.framework
+    local FN_SRC="${BUILDDIR}/System/Library/Frameworks/Foundation.framework/Versions/A/Foundation"
+    if [ -f "${FN_SRC}" ]; then
+        echo "mkdir /System/Library/Frameworks/Foundation.framework" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/Foundation.framework/Versions" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/Foundation.framework/Versions/A" >> "${CMDS}"
+        echo "write ${FN_SRC} /System/Library/Frameworks/Foundation.framework/Versions/A/Foundation" >> "${CMDS}"
+    fi
+
+    # Install AppKit.framework
+    local AK_SRC="${BUILDDIR}/System/Library/Frameworks/AppKit.framework/Versions/A/AppKit"
+    if [ -f "${AK_SRC}" ]; then
+        echo "mkdir /System/Library/Frameworks/AppKit.framework" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/AppKit.framework/Versions" >> "${CMDS}"
+        echo "mkdir /System/Library/Frameworks/AppKit.framework/Versions/A" >> "${CMDS}"
+        echo "write ${AK_SRC} /System/Library/Frameworks/AppKit.framework/Versions/A/AppKit" >> "${CMDS}"
+    fi
+
+    # Install GUI application bundles to /Applications
+    echo "mkdir /Applications" >> "${CMDS}"
+    for app in ${GUI_APPS}; do
+        local APP_SRC="${BUILDDIR}/Applications/${app}.app/${app}"
+        if [ -f "${APP_SRC}" ]; then
+            echo "mkdir /Applications/${app}.app" >> "${CMDS}"
+            echo "write ${APP_SRC} /Applications/${app}.app/${app}" >> "${CMDS}"
+        fi
+    done
 
     # Create LaunchDaemons directory
     echo "mkdir /System/Library/LaunchDaemons" >> "${CMDS}"

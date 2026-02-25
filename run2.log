@@ -1,0 +1,240 @@
+  TOOLCHAIN aarch64-elf-gcc
+
+=== Kernel Build Complete ===
+   text	   data	    bss	    dec	    hex	filename
+ 200626	    390	64883136	65084152	3e11af8	build/kiseki.elf
+
+  Booting with disk image: build/disk.img
+  Network: vmnet-shared (guest 192.168.64.10, requires sudo)
+
+sudo qemu-system-aarch64 -M virt -accel tcg -cpu cortex-a72 -smp 4 -m 4G -display cocoa -kernel build/kiseki.elf -serial mon:stdio -drive id=hd0,file=build/disk.img,format=raw,if=none -device virtio-blk-device,drive=hd0 -netdev vmnet-shared,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device
+
+========================================
+  Kiseki OS v0.1.0 (QEMU virt)
+  ARM64 Hybrid Kernel (Mach + BSD)
+========================================
+
+[boot] Kernel loaded at 0x40080000 - 0x43e74000
+[boot] BSS:  0x400b3000 - 0x43e739c0
+[boot] Heap starts at 0x43e94000
+[boot] Initialising GIC...
+[gic] GICv2: 288 IRQ lines
+[boot] Initialising physical memory manager...
+[pmm] 246124 pages (961 MB) managed, 246124 pages free
+[boot] Initialising virtual memory...
+[vmm] Kernel L0 table at 0x7fffc000
+[vmm] Identity mapping RAM: 0x40000000 - 0x80000000
+[vmm] MMU enabled
+[boot] Initialising threading...
+[sched] Thread subsystem initialised (256 max threads)
+[sched] Idle thread (tid=1) kstack=[0x7fb30000..0x7fb34000]
+[sched] Scheduler initialised on core 0
+[boot] Initialising timer...
+[timer] Counter freq: 62500000 Hz, interval: 625000 ticks (100 Hz)
+[timer] Timer armed (PPI 27)
+[boot] Starting secondary cores...
+[smp] Bringing up secondary cores...
+[smp] Core 1: started
+[smp] Core 2: started
+[smp] Core 3: started
+[[ss[scche[boohechd] CPUt] Init3 idle thread (tid=ialid]sied] CPUn CP13) g block deviceks iUdl2 s.id..
+tack=[e leth thrrea0x[eadblkde7f d (b3c0v]00ti Ini(td=ti..alising block device su0x7bsys4) id=2temf) ksb4tac0000]
+
+k=[kstac[virtk=io-0x[0blk[sm7fb] px7robin3400g 30fb3p]800 0..0Cor2 MxeM7f 3b3. oIO tnlran.0x7ispone (schefb38druc000]le00rts + 
+ atimet0]r r 0ea
+dy)x[a000000smp]
+ Co[
+[srempsmp] C 2or] C onore 3: ae ba1 ondolinnie ng b(schedooulernlit nes (s + tacctheduler ime+k, timer ju reramping dy to)
+ idl[smpread] Ce thorready)
+e
+ 1:[smp] Co abandre 2: aonibng boot sandoning boot tsack, jtack,u jumpimping tng to ido idle threle thad
+read
+[virtio-blk] slot 27 @ 0xa003600: magic=0x74726976 ver=1 devid=18
+[virtio-blk] slot 28 @ 0xa003800: magic=0x74726976 ver=1 devid=18
+[virtio-blk] slot 29 @ 0xa003a00: magic=0x74726976 ver=1 devid=16
+[virtio-blk] slot 30 @ 0xa003c00: magic=0x74726976 ver=1 devid=1
+[virtio-blk] slot 31 @ 0xa003e00: magic=0x74726976 ver=1 devid=2
+[virtio-blk] found block device at 0xa003e00 (version 1)
+[virtio] queue 0: 256 descriptors
+[virtio-blk] device initialised successfully
+[blkdev] registered 'virtio0' as dev 0 (sector_size=512)
+[blkdev] platform block device registered as dev 0
+[boot] Initialising buffer cache...
+[buf] buffer cache initialised: 256 buffers, 4096 bytes each
+[boot] Initialising VFS...
+vfs: initialised (max 16 mounts, 1024 vnodes, 256 fds/proc)
+[pty] PTY subsystem initialised (16 pairs)
+[boot] Registering Ext4 filesystem...
+vfs: registered filesystem 'ext4'
+[boot] Mounting root filesystem (ext4 on /dev/vda)...
+ext4: block_size=4096, inode_size=256, groups=1, inodes_per_group=16384
+ext4: unsupported incompat features 0x2000
+ext4: read 1 group descriptors (64 bytes)
+ext4: mounted successfully (root inode 2, size 4096)
+vfs: mounted 'ext4' on '/' (dev 0)
+[boot] Root filesystem mounted at /
+[boot] Mounting devfs at /dev...
+vfs: registered filesystem 'devfs'
+[devfs] mounted at /dev (5 devices)
+vfs: mounted 'devfs' on '/dev' (dev 0)
+[boot] Starting buffer cache sync daemon...
+[buf] started background sync daemon
+[boot] Initialising Mach IPC...
+[ipc] Mach IPC initialised (512 port slots)
+[boot] Initialising IOKit...
+IOKit: initialising IOKit subsystem
+IOKit: I/O Registry initialised (root=0x0000000042dade58, entry_id=1)
+[bootstrap] kernel registered service 'uk.co.avltree9798.iokit' -> port 0x0000000040a62d50
+IOKit: master port registered in bootstrap
+IOKit: initialisation complete
+[boot] Initialising CommPage...
+[commpage] Initialising CommPage at VA 0xfffffc000...
+[commpage] CPU capabilities: 0x3f
+[commpage] CommPage ready: phys=0x7fb2f000 freq=62500000 Hz
+[commpage] sigreturn trampoline at CommPage+0x280
+[commpage] gettimeofday stub at CommPage+0x200
+[commpage] nanotime stub at CommPage+0x240
+[boot] Initialising process subsystem...
+[proc] Initialising process subsystem...
+[boot] Initialising networking...
+[tcp] TCP subsystem initialised (64 connections max)
+[eth] Ethernet layer initialised
+[virtio-net] probing 32 MMIO transports at 0xa000000
+[virtio-net] found network device at 0xa003c00 (version 1)
+[virtio-net] MAC: 52:54:00:12:34:56
+[eth] MAC address set to 52:54:00:12:34:56
+[virtio-net] queue 0: 256 descriptors
+[virtio-net] queue 1: 256 descriptors
+[virtio-net] device initialised successfully (IRQ 78)
+[dhcp] requesting IP address...
+[ip] local address set to 0.0.0.0
+[eth] IP address set to 0.0.0.0
+[dhcp] 192.168.2.2/255.255.255.0 gw 192.168.2.1
+[ip] local address set to 192.168.2.2
+[eth] IP address set to 192.168.2.2
+[ip] subnet mask set to 255.255.255.0
+[ip] default gateway set to 192.168.2.1
+[net] networking subsystem initialised (64 sockets)
+[boot] Initialising VirtIO GPU...
+[virtio-gpu] Scanning for VirtIO GPU device...
+[virtio-gpu] Found GPU at MMIO slot 29 (base=0xa003a00, IRQ=77, version=1)
+[virtio-gpu] Negotiated features: 0x0
+[virtio-gpu] controlq: 256 descriptors
+[virtio-gpu] display 0: 1280x800 (enabled)
+[virtio-gpu] Allocating 1024 pages (order 10) for 1280x800 framebuffer (4096000 bytes)
+[virtio-gpu] created 2D resource 1: 1280x800 format=2
+[virtio-gpu] attached 1000 backing pages to resource 1
+[virtio-gpu] scanout 0: resource 1, 1280x800
+[virtio-gpu] Framebuffer ready: 1280x800, 32 bpp, pitch=5120
+[virtio-gpu] Backing memory: PA 0x7f694000 (1000 pages)
+[boot] Registering IOFramebuffer driver...
+[IOFramebuffer] probe: VirtIO GPU found (1280x800)
+[IOFramebuffer] start: 1280x800, 32 bpp, pitch=5120, phys=0x7f694000
+IOKit: registered service 'IOFramebuffer' (entry_id=2)
+[IOFramebuffer] init: registered IOFramebuffer service
+[IOFramebuffer]   1280x800, 32 bpp, format=2
+[boot] Initialising framebuffer console...
+[fbconsole] 160x50 text grid (1280x800 pixels, 32 bpp)
+[boot] Initialising VirtIO input...
+[virtio-input] Scanning for VirtIO input devices...
+[virtio-tablet] Found tablet at MMIO slot 27 (base=0xa003600, IRQ=75, version=1)
+[virtio-tablet] Negotiated features: 0x0
+[virtio-tablet] eventq: 256 descriptors
+[virtio-tablet] Posted 64 event buffers
+[virtio-tablet] Tablet ready (absolute coordinates)
+[virtio-input] Found keyboard at MMIO slot 28 (base=0xa003800, IRQ=76, version=1)
+[virtio-input] Negotiated features: 0x0
+[virtio-input] eventq: 256 descriptors
+[virtio-input] Posted 64 event buffers
+[virtio-input] Keyboard ready (US QWERTY layout)
+[virtio-input] Initialised 2 input device(s) (kbd=1, tablet=1)
+[boot] Registering IOHIDSystem driver...
+[IOHIDSystem] probe: HID event ring available
+[IOHIDSystem] start: ring phys=0x40a08000 size=8208
+IOKit: registered service 'IOHIDSystem' (entry_id=3)
+[IOHIDSystem] init: registered IOHIDSystem service
+
+[boot] *** All subsystems initialised ***
+[boot] Creating bootstrap thread...
+
+[boot] Bootstrap thread created (tid=6)
+[boot] Abandoning boot stack, jumping to bootstrap thread...
+[bootstrap] Running on PMM-allocated stack
+[bootstrap] Launching PID 1...
+
+[init] Bootstrapping first user process...
+[init] Init thread (tid=7) ready: entry=0x200001000 user_sp=0x7ffffffefdf8
+[init]   kstack=[0x7ef94000..0x7ef98000] tf_base=0x7ef97ee0
+[init] Init process (PID 1) enqueued on run queue
+[init] === End of kernel bootstrap ===
+
+[bootstrap] PID 1 enqueued. Bootstrap thread exiting.
+[bufsync] buffer sync daemon started
+dyld: mapped '/usr/lib/libSystem.B.dylib' base=0x000000030002b000 size=0x0000000000040000 slide=0x000000030002b000
+
+Kiseki OS v0.1
+Copyright (c) 2026 Kiseki Project
+
+init: loaded 'uk.co.avltree9798.WindowServer' from /System/Library/LaunchDaemons/uk.co.avltree9798.WindowServer.plist
+init:   MachService: uk.co.avltree9798.WindowServer
+init: loaded 'uk.co.avltree9798.loginwindow' from /System/Library/LaunchDaemons/uk.co.avltree9798.loginwindow.plist
+init: loaded 'uk.co.avltree9798.mDNSResponder' from /System/Library/LaunchDaemons/uk.co.avltree9798.mDNSResponder.plist
+init:   MachService: uk.co.avltree9798.mDNSResponder
+init: 3 job(s) loaded
+[bootstrap] registered service 'uk.co.avltree9798.WindowServer' -> port 0x0000000040a747a8
+init: registered service 'uk.co.avltree9798.WindowServer' (port 1)
+[bootstrap] registered service 'uk.co.avltree9798.mDNSResponder' -> port 0x0000000040a86200
+init: registered service 'uk.co.avltree9798.mDNSResponder' (port 2)
+init: started 'uk.co.avltree9798.WindowServer' (pid 2)
+init: started 'uk.co.avltree9798.loginwindow' (pid 3)
+init: started 'uk.co.avltree9798.mDNSResponder' (pid 4)
+init: GUI mode — fbcon0 getty suppressed (owned by WindowServer)
+init: spawned getty (pid 5)
+dyld: mapped '/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit' base=0x000000030000d000 size=0x0000000000010000 slide=0x000000030000d000
+dyld: mapped '/usr/lib/libSystem.B.dylib' base=0x0000000300048000 size=0x0000000000040000 slide=0x0000000300048000
+dyld: mapped '/usr/lib/libSystem.B.dylib' base=0x000000030002b000 size=d0x0000000yl00d: mapped '0040000/usr/lib/libSyste slidem=.B.0[xW0in0d00o0w00S30e00r2vebr0] 0S0tadylibrting
+ (PID 2)
+' base=0x000000030002b000 size=0x0000000000040000 slide=0x000000030002b000
+[bootstrap] check_in 'uk.co.avltree9798.WindowServer': task 2 claimed receive right (name 1)
+[WindowServer] Claimed service port 1
+[WindowServer] Looking up IOFramebuffer service...
+[iokit_mach] GetMatchingService: mmatDcNhedS R'IOeFraspomndeerb: usftfearrt'i n-g
+> port name 4
+
+   _  ___          _    _    ___  ___
+  | |/ (_)___ ___ | | _(_)  / _ \/ __[Windo|wSe
+ r | 'v er<] Fou|nd  IO(F_r-<a/m ebuffer (-po_r)t| |/ 4)
+m / | | (_) \__ \
+  |_|\_\_/__/\___||_|\_\_|  \___/|___/
+
+  Kiseki OSD [v0.1NIO - AFrRM64 HySbriad RmeKeberneul
+ff
+ser]p neonwUsdeer:r uCpstlreiam eDNnS t: created for task (type=0)
+8.[8iokit_m.kiseki login: a8c.h8]
+ ServiceOpen: t[ybpoeo ts0t r->ap c] check_inon 'unect port name k.co.6avlt
+ree9798.mDNSResponder': task 4 claimed receive right (name 1)
+m[WindowServer] Opened IOFramebuffer connection (port 6)
+DNSResponder: checked in as 'uk.co.avltree9798.mDNSResponder' (port 1)
+[WindowServer] Display: 1280x800, pitch=5120, bpp=32
+IOKit: mapped 0x3e8000 bytes phys 0x7f694000 -> VA 0x300098000 in task '/sbin/WindowServer'
+[iokit_mach] MapMemory: type 0, opts 0x1 -> addr 0x300098000, sz 0x3e8000, ret 0
+[WindowServer] Mapped VRAM at 0x300098000, size 0x3e8000
+[WindowServer] Looking up IOHIDSystem service...
+[iokit_mach] GetMatchingService: matched 'IOHIDSystem' -> port name 10
+[WindowServer] Found IOHIDSystem (port 10)
+[IOHIDSystem] newUserClient: created for task (type=0)
+[iokit_mach] ServiceOpen: type 0 -> connect port name 12
+[WindowServer] Opened IOHIDSystem connection (port 12)
+IOKit: mapped 0x2010 bytes phys 0x40a08000 -> VA 0x300480000 in task '/sbin/WindowServer'
+[iokit_mach] MapMemory: type 0, opts 0x1 -> addr 0x300480000, sz 0x2010, ret 0
+[WindowServer] Mapped HID ring at 0x300480000, size 0x2010 (ring size=256)
+[WindowServer] Desktop drawn, entering event loop
+[WindowServer] First loop iteration starting
+dyld: mapped '/usr/lib/libSystem.B.dylib' base=0x000000030002b000 size=0x0000000000040000 slide=0x000000030002b000
+[loginwindow] Starting (PID 3)
+[WindowServer] loop=1 mach_msg returned 0
+[WindowServer] Client connected: 'loginwindow' (PID 3) → conn 0
+[loginwindow] Connected to WindowServer, conn_id=0
+[WindowServer] loop=2 mach_msg returned 0
+[WindowServer] Created client window 0: 'loginwindow' (360x260) for conn 0
+[loginwindow] Login window created at (460, 230) 360x260

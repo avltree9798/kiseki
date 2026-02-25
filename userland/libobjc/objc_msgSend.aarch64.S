@@ -213,6 +213,78 @@ CDECL(objc_msgSend_stret):
 	MSGSEND objc_msgSend, x0, x1
 
 /*
+ * objc_msgSendSuper2 — Super-class message send
+ *
+ * On Apple's runtime, objc_msgSendSuper2 takes a struct objc_super where
+ * super_class points to the CURRENT class, and the runtime resolves the
+ * actual superclass. On GNUstep, our code passes the actual superclass
+ * directly (matching GNUstep convention).
+ *
+ * Arguments:
+ *   x0 = struct objc_super *super  { id receiver; Class super_class; }
+ *   x1 = SEL _cmd
+ *   x2..x7, q0..q7 = forwarded arguments
+ *
+ * Strategy:
+ *   1. Save all argument registers (x0-x8, q0-q7, fp, lr)
+ *   2. Call objc_msg_lookup_super(super, sel) → IMP in x0
+ *   3. Stash the IMP
+ *   4. Restore argument registers
+ *   5. Replace x0 with super->receiver
+ *   6. Tail-call the IMP
+ */
+.globl CDECL(objc_msgSendSuper2)
+TYPE_DIRECTIVE(CDECL(objc_msgSendSuper2), %function)
+CDECL(objc_msgSendSuper2):
+	.cfi_startproc
+
+	/* Save super pointer for later (we need receiver from it) */
+	mov    x9, x0                          // x9 = super
+
+	/* Spill all argument registers + lr/fp                      */
+	/* Layout: sp+0: x0-x8 (9*8=72), sp+72: fp,lr (16),         */
+	/*         sp+88: pad(8), sp+96: q0-q7 (8*16=128)           */
+	/*         Total: 224 bytes (16-byte aligned)                */
+	stp    x0, x1, [sp, #-224]!
+	.cfi_def_cfa_offset 224
+	stp    x2, x3, [sp, #16]
+	stp    x4, x5, [sp, #32]
+	stp    x6, x7, [sp, #48]
+	str    x8,     [sp, #64]
+	stp    fp, lr, [sp, #72]
+	.cfi_offset fp, -152
+	.cfi_offset lr, -144
+	stp    q0, q1, [sp, #96]
+	stp    q2, q3, [sp, #128]
+	stp    q4, q5, [sp, #160]
+	stp    q6, q7, [sp, #192]
+
+	/* x0 = super, x1 = selector — already in place */
+	bl     CDECL(objc_msg_lookup_super)    // returns IMP in x0
+	mov    x9, x0                          // x9 = IMP
+
+	/* Restore all argument registers */
+	ldp    q6, q7, [sp, #192]
+	ldp    q4, q5, [sp, #160]
+	ldp    q2, q3, [sp, #128]
+	ldp    q0, q1, [sp, #96]
+	ldp    fp, lr, [sp, #72]
+	ldr    x8,     [sp, #64]
+	ldp    x6, x7, [sp, #48]
+	ldp    x4, x5, [sp, #32]
+	ldp    x2, x3, [sp, #16]
+	ldp    x0, x1, [sp], #224             // restore x0 (super), x1 (sel)
+	.cfi_def_cfa_offset 0
+
+	/* Replace x0 with super->receiver (first field of struct objc_super) */
+	ldr    x0, [x0]                        // x0 = super->receiver
+
+	/* Tail-call the IMP */
+	br     x9
+
+	.cfi_endproc
+
+/*
   In AAPCS, an SRet is passed in x8, not x0 like a normal pointer parameter.
   On Windows, this is only the case for POD (plain old data) types. Non trivial
   types with constructors and destructors are passed in x0 on sret.

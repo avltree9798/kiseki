@@ -3596,14 +3596,30 @@ static int sys_select(struct trap_frame *tf)
             else if (vfs_fd_has_vnode(fd)) {
                 ready = true;
             }
-            /* Pipe or console fd — for stdin-like fds */
-            else if (fd <= 2) {
-                if (fd == 0) {
-                    extern bool uart_rx_ready(void);
-                    if (uart_rx_ready())
+            /* PTY fd — check ring buffer occupancy */
+            else {
+                int pty_side = -1;
+                struct pty *pty_sel = (struct pty *)vfs_get_pty(fd, &pty_side);
+                if (pty_sel != NULL) {
+                    if (pty_side == 0) {
+                        /* Master side: readable when slave has written output */
+                        if (pty_sel->pt_s2m_count > 0 || !pty_sel->pt_slave_open)
+                            ready = true;
+                    } else {
+                        /* Slave side: readable when master has written input */
+                        if (pty_sel->pt_m2s_count > 0 || !pty_sel->pt_master_open)
+                            ready = true;
+                    }
+                }
+                /* Pipe or console fd — for stdin-like fds */
+                else if (fd <= 2) {
+                    if (fd == 0) {
+                        extern bool uart_rx_ready(void);
+                        if (uart_rx_ready())
+                            ready = true;
+                    } else {
                         ready = true;
-                } else {
-                    ready = true;
+                    }
                 }
             }
 
@@ -3623,9 +3639,9 @@ static int sys_select(struct trap_frame *tf)
     /* If nothing ready and not polling, do a brief retry loop */
     if (ready_count == 0 && !do_poll) {
         /*
-         * Brief retry for stdin readiness.
-         * TODO: Proper blocking select() for vi - currently causes system hang.
-         * For now, just do a few retries and return.
+         * Retry loop for blocking select().
+         * Re-checks all fd types including PTYs and sockets.
+         * TODO: Replace with proper sleep/wakeup on wait channels.
          */
         extern void sched_yield(void);
         extern bool uart_rx_ready(void);
@@ -3633,11 +3649,37 @@ static int sys_select(struct trap_frame *tf)
         for (int retry = 0; retry < 100 && ready_count == 0; retry++) {
             sched_yield();
             
-            /* Re-check stdin (fd 0) */
-            if (readfds && nfds > 0) {
-                uint32_t bit0 = 1u << 0;
-                if ((rd_in[0] & bit0) && uart_rx_ready()) {
-                    rd_out[0] |= bit0;
+            /* Re-check all requested read fds */
+            for (int fd = 0; fd < nfds && ready_count == 0; fd++) {
+                int word = fd / 32;
+                uint32_t bit = 1u << (fd % 32);
+                if (!(readfds && (rd_in[word] & bit)))
+                    continue;
+
+                bool ready = false;
+                if (fd == 0) {
+                    if (uart_rx_ready()) ready = true;
+                } else if (vfs_get_sockidx(fd) >= 0) {
+                    extern struct socket socket_table[];
+                    int sidx = vfs_get_sockidx(fd);
+                    struct socket *so = &socket_table[sidx];
+                    if (so->so_rcv.sb_len > 0) ready = true;
+                } else {
+                    int pty_side = -1;
+                    struct pty *pty_sel = (struct pty *)vfs_get_pty(fd, &pty_side);
+                    if (pty_sel != NULL) {
+                        if (pty_side == 0) {
+                            if (pty_sel->pt_s2m_count > 0 || !pty_sel->pt_slave_open)
+                                ready = true;
+                        } else {
+                            if (pty_sel->pt_m2s_count > 0 || !pty_sel->pt_master_open)
+                                ready = true;
+                        }
+                    }
+                }
+
+                if (ready) {
+                    rd_out[word] |= bit;
                     ready_count++;
                 }
             }

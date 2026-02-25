@@ -1,0 +1,24 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation'
+current-version: 1153.18
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _CFRetain, _CFRelease, _CFGetTypeID,
+                   _CFStringCreateWithCString, _CFStringGetCStringPtr,
+                   _CFStringGetLength, _CFStringGetCharacterAtIndex,
+                   _CFStringGetCString, _CFStringGetMaximumSizeForEncoding,
+                   ___CFStringMakeConstantString,
+                   _CFArrayCreate, _CFArrayGetCount, _CFArrayGetValueAtIndex,
+                   _CFArrayCreateMutable, _CFArrayAppendValue,
+                   _CFDictionaryCreate, _CFDictionaryGetValue,
+                   _CFDictionaryCreateMutable, _CFDictionarySetValue,
+                   _CFDataCreate, _CFDataGetBytePtr, _CFDataGetLength,
+                   _CFNumberCreate, _CFNumberGetValue,
+                   _CFAttributedStringCreate, _CFAttributedStringGetLength,
+                   _CFAttributedStringGetString, _CFAttributedStringGetAttributes,
+                   _kCFAllocatorDefault, _kCFTypeDictionaryKeyCallBacks,
+                   _kCFTypeDictionaryValueCallBacks ]
+...

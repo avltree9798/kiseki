@@ -1,0 +1,43 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation'
+current-version: 1153.18
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _CFRetain, _CFRelease, _CFGetTypeID,
+                   _CFStringCreateWithCString, _CFStringGetCStringPtr,
+                   _CFStringGetLength, _CFStringGetCharacterAtIndex,
+                   _CFStringGetCString, _CFStringGetMaximumSizeForEncoding,
+                   _CFStringCreateMutable, _CFStringAppendCString,
+                   _CFStringAppend, _CFStringCreateCopy,
+                   ___CFStringMakeConstantString,
+                   _CFArrayCreate, _CFArrayGetCount, _CFArrayGetValueAtIndex,
+                   _CFArrayCreateMutable, _CFArrayAppendValue,
+                   _CFDictionaryCreate, _CFDictionaryGetValue, _CFDictionaryGetCount,
+                   _CFDictionaryCreateMutable, _CFDictionarySetValue,
+                   _CFDictionaryRemoveValue, _CFDictionaryContainsKey,
+                   _CFDataCreate, _CFDataGetBytePtr, _CFDataGetLength,
+                   _CFNumberCreate, _CFNumberGetValue,
+                   _CFRunLoopGetCurrent, _CFRunLoopGetMain,
+                   _CFRunLoopRun, _CFRunLoopRunInMode,
+                   _CFRunLoopStop, _CFRunLoopWakeUp,
+                   _CFRunLoopAddSource, _CFRunLoopRemoveSource,
+                   _CFRunLoopAddTimer, _CFRunLoopRemoveTimer,
+                   _CFRunLoopAddObserver, _CFRunLoopRemoveObserver,
+                   _CFRunLoopSourceCreate, _CFRunLoopSourceSignal,
+                   _CFRunLoopSourceInvalidate,
+                   _CFRunLoopTimerCreate, _CFRunLoopTimerInvalidate,
+                   _CFRunLoopObserverCreate,
+                   _CFAttributedStringCreate, _CFAttributedStringGetLength,
+                   _CFAttributedStringGetString, _CFAttributedStringGetAttributes,
+                   _CFAbsoluteTimeGetCurrent,
+                   _CFDateCreate, _CFDateGetAbsoluteTime,
+                   _kCFAllocatorDefault,
+                   _kCFRunLoopDefaultMode, _kCFRunLoopCommonModes,
+                   _kCFTypeDictionaryKeyCallBacks,
+                   _kCFTypeDictionaryValueCallBacks,
+                   __CFRuntimeRegisterClass, __CFRuntimeCreateInstance,
+                   __CFRuntimeInitStaticInstance ]
+...

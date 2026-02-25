@@ -1,0 +1,12 @@
+targets:
+  main:
+    by: null
+    chapters:
+    - kiseki-internals.md
+    font:
+      default: opensans
+      size: null
+    name: kiseki-internals
+    subtitle: null
+    theme: github
+    title: Kiseki internals

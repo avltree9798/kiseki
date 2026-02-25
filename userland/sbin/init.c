@@ -896,18 +896,27 @@ int main(void)
     start_system_daemons();
 
     /*
-     * Spawn getty on the framebuffer console if /dev/fbcon0 exists.
+     * Spawn getty on the framebuffer console if /dev/fbcon0 exists
+     * AND we're not running a GUI session.
      *
-     * This runs independently from the serial console getty — both
-     * consoles operate in parallel, each with their own session.
-     * Matches how macOS launchd manages multiple console devices.
+     * If WindowServer is loaded as a launch daemon, the framebuffer is
+     * owned by the GUI stack (WindowServer → loginwindow → AppKit apps).
+     * Spawning a text-mode getty on /dev/fbcon0 would conflict with the
+     * graphical display.
      *
-     * The fbcon0 getty is "fire and forget" for now; if it exits,
-     * we re-spawn it below alongside the serial getty.
+     * On macOS, launchd never spawns getty on the graphical console —
+     * that's entirely managed by loginwindow.
      */
     int fbcon_getty_pid = -1;
-    {
-        /* Try to open /dev/fbcon0 to check if it exists and is functional */
+    int gui_active = 0;
+    for (int i = 0; i < num_jobs; i++) {
+        if (strcmp(jobs[i].label, "uk.co.avltree9798.WindowServer") == 0) {
+            gui_active = 1;
+            break;
+        }
+    }
+    if (!gui_active) {
+        /* No GUI — spawn text-mode getty on framebuffer console */
         int testfd = open("/dev/fbcon0", O_RDONLY);
         if (testfd >= 0) {
             close(testfd);
@@ -917,6 +926,8 @@ int main(void)
                        fbcon_getty_pid);
             }
         }
+    } else {
+        printf("init: GUI mode — fbcon0 getty suppressed (owned by WindowServer)\n");
     }
 
     /* Main loop: spawn serial console getty, reap children */

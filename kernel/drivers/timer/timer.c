@@ -27,7 +27,7 @@
 
 /* Per-CPU timer state */
 static uint64_t timer_interval;     /* Counter ticks per scheduler tick */
-static volatile uint64_t tick_count; /* Global tick counter */
+static volatile uint64_t tick_count; /* Global tick counter (atomic via LDXR/STXR) */
 
 /* --- ARM system register accessors --- */
 
@@ -111,7 +111,28 @@ extern void virtio_net_recv(void);
 
 void timer_handler(void)
 {
-    tick_count++;
+    /*
+     * Atomically increment tick_count using ARM64 LDXR/STXR.
+     * Multiple CPUs fire their timer PPIs independently and all
+     * increment this global counter. Without atomicity, two CPUs
+     * doing tick_count++ simultaneously can lose an increment
+     * (both read N, both write N+1). Lost ticks cause deadlines
+     * in sched_wakeup_sleepers to fire late, which can cause
+     * apparent hangs in timed waits (e.g., semaphore_timedwait).
+     */
+    {
+        uint64_t old_val, new_val;
+        uint32_t tmp;
+        __asm__ volatile(
+            "1: ldxr  %0, [%3]\n"
+            "   add   %1, %0, #1\n"
+            "   stxr  %w2, %1, [%3]\n"
+            "   cbnz  %w2, 1b\n"
+            : "=&r"(old_val), "=&r"(new_val), "=&r"(tmp)
+            : "r"(&tick_count)
+            : "memory"
+        );
+    }
 
     /* Rearm: set TVAL for next period */
     write_cntv_tval(timer_interval);

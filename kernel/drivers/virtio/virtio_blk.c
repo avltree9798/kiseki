@@ -408,14 +408,27 @@ static int virtio_blk_rw(uint32_t type, uint64_t sector,
     uint32_t isr = mmio_read32(blkdev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
     mmio_write32(blkdev.base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
+    /*
+     * Read the status byte into a local variable BEFORE releasing the lock.
+     * On SMP, another CPU can acquire the lock immediately after we release
+     * it and overwrite blk_req_status with 0xFF for its own request. Reading
+     * the global after unlock would then see the sentinel instead of the
+     * actual device status, causing spurious "I/O error: status=255" reports.
+     *
+     * A DSB ensures the device's write to the status byte is visible to this
+     * CPU before we read it (VirtIO spec §2.7.14).
+     */
+    dsb();
+    uint8_t status = blk_req_status;
+
     /* Free the descriptor chain */
     free_chain(vq, (uint32_t)d0);
 
     spin_unlock_irqrestore(&blk_lock, flags);
 
-    if (blk_req_status != VIRTIO_BLK_S_OK) {
+    if (status != VIRTIO_BLK_S_OK) {
         kprintf("[virtio-blk] I/O error: status=%u sector=%lu\n",
-                blk_req_status, sector);
+                status, sector);
         return -1;
     }
 

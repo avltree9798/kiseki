@@ -27,9 +27,10 @@ static struct thread thread_pool[MAX_THREADS];
 static uint64_t next_tid = 1;
 static spinlock_t thread_lock = SPINLOCK_INIT;
 
-/* Sleep queue - threads waiting for timed wakeup */
-static struct thread *sleep_queue = NULL;
-static spinlock_t sleep_lock = SPINLOCK_INIT;
+/* Sleep queue - threads waiting for timed wakeup.
+ * Non-static: accessed by sync.c for semaphore_timedwait(). */
+struct thread *sleep_queue = NULL;
+spinlock_t sleep_lock = SPINLOCK_INIT;
 
 /* --- Forward declarations for SMP load balancing --- */
 static uint32_t sched_find_least_loaded_cpu(uint32_t affinity);
@@ -140,13 +141,25 @@ static void thread_trampoline(void)
     struct cpu_data *cd = get_cpu_data();
     struct thread *th = cd->current_thread;
 
+    /*
+     * Read entry point and argument BEFORE enabling interrupts.
+     *
+     * CRITICAL: context_switch saves the current x19/x20 register values
+     * to th->context.x19/x20. On first entry, these contain the entry
+     * function and arg (set by thread_create). But if a timer interrupt
+     * fires after IRQ enable, sched_switch → context_switch will overwrite
+     * th->context.x19/x20 with whatever the compiler has placed in those
+     * registers (likely local variables like 'cd' or 'th'). Reading from
+     * th->context after that point would give us garbage, not the entry
+     * function. So we must capture these values while IRQs are still masked.
+     */
+    void (*entry)(void *) = (void (*)(void *))th->context.x19;
+    void *arg = (void *)th->context.x20;
+
     /* Enable interrupts (new threads start with IRQs masked) */
     __asm__ volatile("msr daifclr, #0x2");
 
-    /* Call the actual thread function.
-     * Entry and arg are stored in x19/x20 (callee-saved, set by thread_create). */
-    void (*entry)(void *) = (void (*)(void *))th->context.x19;
-    void *arg = (void *)th->context.x20;
+    /* Call the actual thread function */
     entry(arg);
 
     /* If the function returns, terminate the thread */
@@ -196,6 +209,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg,
     th->wait_channel = NULL;
     th->wait_reason = NULL;
     th->run_next = NULL;
+    th->on_runq = false;
     th->wait_next = NULL;
     th->continuation = 0;
     th->cpu = -1;
@@ -238,26 +252,133 @@ void thread_exit(void)
     __builtin_unreachable();
 }
 
-void thread_block(const char *reason)
+/*
+ * thread_set_wait - Mark the current thread as TH_WAIT without blocking.
+ *
+ * XNU equivalent: assert_wait() / assert_wait_deadline()
+ *
+ * Sets TH_WAIT atomically under thread_lock. The caller must subsequently
+ * call thread_block() or thread_block_check() to actually context-switch.
+ *
+ * This split is required for semaphore_timedwait() and semaphore_wait():
+ * the thread must be TH_WAIT BEFORE being added to the sleep/wait queue
+ * and BEFORE releasing the semaphore lock. Otherwise, a concurrent waker
+ * (e.g., sched_wakeup_sleepers on another CPU firing the deadline) could
+ * find the thread on the sleep queue, see it's still TH_RUN, skip it,
+ * remove it from the queue — and then the thread enters TH_WAIT with
+ * nobody to wake it: deadlock.
+ *
+ * By setting TH_WAIT first:
+ *   - If sched_wakeup_sleepers sees us, th->state == TH_WAIT,
+ *     so it correctly transitions us to TH_RUN and enqueues us.
+ *   - If semaphore_signal sees us on the wait list, same thing.
+ *   - sched_switch() sees TH_WAIT and does not re-enqueue us.
+ */
+void thread_set_wait(const char *reason)
 {
     struct cpu_data *cd = get_cpu_data();
     struct thread *th = cd->current_thread;
 
+    uint64_t flags;
+    spin_lock_irqsave(&thread_lock, &flags);
     th->state = TH_WAIT;
     th->wait_reason = reason;
+    spin_unlock_irqrestore(&thread_lock, flags);
+}
+
+/*
+ * thread_block_check - Context-switch if still TH_WAIT, else return.
+ *
+ * XNU equivalent: thread_block() → thread_invoke() early check.
+ *
+ * In XNU, thread_invoke() checks the thread state under the thread mutex
+ * right before the switch. If the thread was woken between assert_wait()
+ * and thread_block() (i.e., clear_wait() / thread_wakeup() already set
+ * it to TH_RUN and called sched_enqueue), thread_invoke() returns
+ * immediately — the thread never blocks.
+ *
+ * This prevents a double-enqueue: thread_unblock() already placed the
+ * thread on a run queue, so sched_switch() must not re-enqueue it.
+ *
+ * Returns true if the thread actually blocked (was TH_WAIT at check time).
+ * Returns false if the thread was already woken (spurious; caller should
+ * treat this as if the wakeup event occurred).
+ */
+bool thread_block_check(void)
+{
+    struct cpu_data *cd = get_cpu_data();
+    struct thread *th = cd->current_thread;
+
+    /*
+     * Check state under thread_lock. If TH_WAIT, proceed to sched_switch.
+     * If already TH_RUN (woken by concurrent thread_unblock/
+     * sched_wakeup_sleepers), return immediately — we must NOT call
+     * sched_switch because:
+     *   1. thread_unblock already set TH_RUN and called sched_enqueue
+     *   2. sched_switch would see TH_RUN and re-enqueue → double-enqueue
+     */
+    uint64_t flags;
+    spin_lock_irqsave(&thread_lock, &flags);
+    bool still_waiting = (th->state == TH_WAIT);
+    spin_unlock_irqrestore(&thread_lock, flags);
+
+    if (!still_waiting) {
+        /*
+         * Already woken — do not block.
+         *
+         * thread_unblock() set TH_RUN and called sched_enqueue(),
+         * which put us on a run queue. But we're still the current
+         * thread executing this code path. Remove ourselves from
+         * the run queue to prevent dual execution: we're already
+         * running, we don't need to be picked up by another CPU.
+         *
+         * XNU equivalent: clear_wait() / thread_wakeup() check
+         * if the target is the current thread and skip thread_setrun
+         * if so. We handle it here instead (dequeue after the fact).
+         */
+        if (th->on_runq) {
+            sched_dequeue(th);
+        }
+        return false;
+    }
 
     sched_switch();
+    return true;
+}
+
+void thread_block(const char *reason)
+{
+    thread_set_wait(reason);
+    thread_block_check();
 }
 
 void thread_unblock(struct thread *th)
 {
-    if (th->state != TH_WAIT)
+    /*
+     * Atomically check TH_WAIT and transition to TH_RUN using
+     * the thread_lock to prevent double-enqueue.
+     *
+     * Without this lock, two CPUs could both see TH_WAIT (e.g.,
+     * thread_wakeup_on on CPU 0 and sched_wakeup_sleepers on CPU 1),
+     * both call thread_unblock, both set TH_RUN, and both call
+     * sched_enqueue — putting the thread on two run queues. When
+     * both CPUs subsequently dequeue and execute the same thread,
+     * they share a single kernel stack, corrupting return addresses.
+     */
+    uint64_t flags;
+    spin_lock_irqsave(&thread_lock, &flags);
+
+    if (th->state != TH_WAIT) {
+        spin_unlock_irqrestore(&thread_lock, flags);
         return;
+    }
 
     th->state = TH_RUN;
     th->wait_channel = NULL;
     th->wait_reason = NULL;
     th->wakeup_tick = 0;
+
+    spin_unlock_irqrestore(&thread_lock, flags);
 
     sched_enqueue(th);
 }
@@ -281,11 +402,36 @@ void thread_sleep_on(void *chan, const char *reason)
     struct cpu_data *cd = get_cpu_data();
     struct thread *th = cd->current_thread;
 
+    /*
+     * Set wait channel, reason, and state atomically w.r.t. thread_unblock.
+     *
+     * Without this lock, a waker on another CPU could see TH_WAIT before
+     * we enter sched_switch, call thread_unblock (sets TH_RUN + enqueues),
+     * and then sched_switch would re-enqueue us (since state is now TH_RUN),
+     * putting us on two run queues — leading to dual-execution corruption.
+     *
+     * The lock ensures that once we set TH_WAIT, thread_unblock sees a
+     * consistent state. sched_switch masks IRQs and checks state under
+     * the run_lock, so the handoff is safe.
+     *
+     * NOTE: This is a coarser fix than thread_sleep_on_locked (which takes
+     * a caller-provided lock). For code that has its own lock protecting
+     * the condition variable, use thread_sleep_on_locked instead.
+     */
+    uint64_t flags;
+    spin_lock_irqsave(&thread_lock, &flags);
+
     th->wait_channel = chan;
     th->wait_reason = reason;
     th->state = TH_WAIT;
 
-    sched_switch();
+    spin_unlock_irqrestore(&thread_lock, flags);
+
+    /* XNU pattern: check if still TH_WAIT before switching.
+     * A concurrent thread_wakeup_on(chan) may have already set us
+     * to TH_RUN and called sched_enqueue between the unlock above
+     * and here. thread_block_check avoids double-enqueue. */
+    thread_block_check();
 }
 
 /*
@@ -330,7 +476,8 @@ void thread_sleep_on_locked(void *chan, const char *reason,
     /* Now in TH_WAIT — any concurrent thread_wakeup_on(chan) WILL find us */
     spin_unlock_irqrestore(lock, flags);
 
-    sched_switch();
+    /* XNU pattern: check if still TH_WAIT before switching */
+    thread_block_check();
 }
 
 /*
@@ -375,8 +522,18 @@ void thread_sleep_ticks(uint64_t ticks)
 
     /* Calculate absolute wakeup time */
     th->wakeup_tick = timer_get_ticks() + ticks;
-    th->state = TH_WAIT;
     th->wait_reason = "sleep";
+    th->wait_channel = NULL;  /* Clear stale channel to prevent spurious wakeup */
+
+    /*
+     * Set TH_WAIT under thread_lock to prevent double-enqueue.
+     * Must also add to sleep queue before releasing thread_lock,
+     * or sched_wakeup_sleepers won't find us.
+     */
+    uint64_t tflags;
+    spin_lock_irqsave(&thread_lock, &tflags);
+    th->state = TH_WAIT;
+    spin_unlock_irqrestore(&thread_lock, tflags);
 
     /* Add to sleep queue (sorted by wakeup time for efficiency) */
     spin_lock_irqsave(&sleep_lock, &flags);
@@ -390,8 +547,11 @@ void thread_sleep_ticks(uint64_t ticks)
 
     spin_unlock_irqrestore(&sleep_lock, flags);
 
-    /* Switch to another thread */
-    sched_switch();
+    /* XNU pattern: check if still TH_WAIT before switching.
+     * sched_wakeup_sleepers on another CPU may have already fired
+     * the deadline and set us to TH_RUN between the sleep_unlock
+     * above and here. */
+    thread_block_check();
 }
 
 struct thread *current_thread_get(void)
@@ -569,10 +729,24 @@ static void sched_enqueue_cpu(struct thread *th, uint32_t cpu_id, bool send_ipi)
     __asm__ volatile("dmb ish" ::: "memory");
     
     spin_lock_irqsave(&cd->run_lock, &flags);
+
+    /*
+     * Double-enqueue guard (XNU equivalent: thread->runq check).
+     *
+     * If thread_unblock() already enqueued this thread (e.g., a waker
+     * on another CPU raced with the voluntary block path), on_runq is
+     * already true. Skip the enqueue to prevent the thread appearing
+     * on two run queues simultaneously.
+     */
+    if (th->on_runq) {
+        spin_unlock_irqrestore(&cd->run_lock, flags);
+        return;
+    }
     
     /* Add to tail of priority queue */
     th->run_next = NULL;
     th->cpu = cpu_id;
+    th->on_runq = true;
     
     if (cd->run_queue[pri] == NULL) {
         cd->run_queue[pri] = th;
@@ -657,6 +831,7 @@ static struct thread *sched_steal_work(uint32_t my_cpu)
             /* Remove from victim's run queue */
             cd->run_queue[pri] = th->run_next;
             th->run_next = NULL;
+            th->on_runq = false;
             cd->run_count--;
             victim = th;
             break;
@@ -717,6 +892,7 @@ void sched_dequeue(struct thread *th)
         if (*pp == th) {
             *pp = th->run_next;
             th->run_next = NULL;
+            th->on_runq = false;
             cd->run_count--;
             spin_unlock_irqrestore(&cd->run_lock, flags);
             return;
@@ -760,11 +936,19 @@ void sched_switch(void)
 
     spin_lock(&cd->run_lock);
 
-    /* Put old thread back on run queue if still runnable */
-    if (old && old->state == TH_RUN && old != cd->idle_thread) {
+    /* Put old thread back on run queue if still runnable.
+     *
+     * Skip if on_runq is already true — this means thread_unblock()
+     * on another CPU already placed us on a run queue between
+     * thread_set_wait() and sched_switch(). Re-enqueueing would put
+     * the thread on two queues (XNU: thread->runq != PROCESSOR_NULL).
+     */
+    if (old && old->state == TH_RUN && old != cd->idle_thread
+        && !old->on_runq) {
         /* Re-enqueue on local CPU (no IPI needed, we're local) */
         int pri = old->effective_priority;
         old->run_next = NULL;
+        old->on_runq = true;
         if (cd->run_queue[pri] == NULL) {
             cd->run_queue[pri] = old;
         } else {
@@ -783,6 +967,7 @@ void sched_switch(void)
             new_thread = cd->run_queue[i];
             cd->run_queue[i] = new_thread->run_next;
             new_thread->run_next = NULL;
+            new_thread->on_runq = false;
             cd->run_count--;
             break;
         }
@@ -862,25 +1047,28 @@ void sched_switch(void)
      */
     __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
 
-#if DEBUG
     /*
-     * Validate the sched_switch stack frame BEFORE the compiler's
+     * ALWAYS validate the sched_switch stack frame BEFORE the compiler's
      * epilogue loads x29/x30 from it. The compiler saves x29 at [sp]
      * and x30 at [sp+8] in the prologue (stp x29, x30, [sp, #-N]!).
-     * If these were corrupted while this thread was switched out,
-     * the epilogue's ldp will load bad values and ret will crash.
+     * If these were corrupted while this thread was switched out (e.g.,
+     * by a second CPU executing the same thread due to a double-enqueue
+     * bug), the epilogue's ldp will load bad values and ret will crash.
      *
-     * We read them directly from the stack here.
+     * This validation is unconditional because the crash it prevents
+     * (jumping to a garbage address) is unrecoverable and produces
+     * confusing nested-exception panics that are nearly impossible to
+     * diagnose without this check.
      */
     {
         uint64_t sp_val;
         __asm__ volatile("mov %0, sp" : "=r"(sp_val));
         uint64_t *frame = (uint64_t *)sp_val;
-        uint64_t saved_x29 = frame[0];
         uint64_t saved_x30 = frame[1];
 
         /* x30 (LR) must be a kernel address [0x40000000, 0x80000000) */
         if (saved_x30 < RAM_BASE || saved_x30 >= (RAM_BASE + RAM_SIZE)) {
+            uint64_t saved_x29 = frame[0];
             kprintf("\n!!! SCHED_SWITCH STACK CORRUPTION !!!\n");
             kprintf("  Resumed thread's stack frame at SP=0x%lx has:\n", sp_val);
             kprintf("    [sp+0x00] saved_x29 = 0x%lx (expected kernel FP or 0)\n", saved_x29);
@@ -896,7 +1084,6 @@ void sched_switch(void)
                         (uint64_t)cur->kernel_stack,
                         (uint64_t)cur->kernel_stack + cur->kernel_stack_size);
             }
-            /* Also dump a wider range around the frame to find the corruption source */
             kprintf("  Wider stack dump:\n");
             for (int i = -4; i < 16; i++) {
                 uint64_t addr = sp_val + (int64_t)(i * 8);
@@ -907,6 +1094,7 @@ void sched_switch(void)
         }
     }
 
+#if DEBUG
     /* Validate resumed SP is in our kernel stack (silent unless error) */
     {
         if (old && old->kernel_stack) {
@@ -948,17 +1136,33 @@ static void sched_wakeup_sleepers(void)
         sleep_queue = th->sleep_next;
         th->sleep_next = NULL;
         th->wakeup_tick = 0;
-        th->state = TH_RUN;
-        th->wait_reason = NULL;
 
         spin_unlock_irqrestore(&sleep_lock, flags);
-        
+
         /*
-         * Use SMP-aware enqueue: if thread has never run, place on
-         * least-loaded CPU. Otherwise keep cache affinity.
+         * Use thread_lock to atomically check that the thread is still
+         * TH_WAIT before transitioning to TH_RUN and enqueuing.
+         *
+         * A concurrent thread_wakeup_on(chan) could have already woken
+         * this thread via thread_unblock. Without this check, we'd
+         * set TH_RUN and call sched_enqueue a second time, putting
+         * the thread on two run queues — causing dual-execution and
+         * stack corruption.
          */
-        sched_enqueue(th);
-        
+        uint64_t tflags;
+        spin_lock_irqsave(&thread_lock, &tflags);
+        bool still_waiting = (th->state == TH_WAIT);
+        if (still_waiting) {
+            th->state = TH_RUN;
+            th->wait_channel = NULL;
+            th->wait_reason = NULL;
+        }
+        spin_unlock_irqrestore(&thread_lock, tflags);
+
+        if (still_waiting) {
+            sched_enqueue(th);
+        }
+
         spin_lock_irqsave(&sleep_lock, &flags);
     }
 
@@ -1141,6 +1345,7 @@ struct thread *thread_create_user(struct task *task, uint64_t entry,
     th->wait_channel = NULL;
     th->wait_reason = NULL;
     th->run_next = NULL;
+    th->on_runq = false;
     th->wait_next = NULL;
     th->continuation = 0;
     th->cpu = -1;

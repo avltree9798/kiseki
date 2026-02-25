@@ -1841,6 +1841,16 @@ static struct loaded_image *load_dylib(const char *path)
 
     int64_t slide = (int64_t)((uint64_t)base - min_addr);
 
+    dyld_puts("dyld: mapped '");
+    dyld_puts(path);
+    dyld_puts("' base=");
+    dyld_put_hex((uint64_t)base);
+    dyld_puts(" size=");
+    dyld_put_hex(total_vm_size);
+    dyld_puts(" slide=");
+    dyld_put_hex((uint64_t)slide);
+    dyld_puts("\n");
+
     /*
      * Second pass: copy segment data from the file into the mapped region.
      * For each segment, copy filesize bytes from file_data + fileoff,
@@ -2144,6 +2154,158 @@ void dyld_main(const struct mach_header_64 *main_mh,
             /* Found environ - write envp to it */
             *(const char ***)environ_addr = envp;
             break;
+        }
+    }
+
+    /* ----------------------------------------------------------------
+     * Phase 5.5: Run initialisers (__mod_init_func)
+     *
+     * C/ObjC __attribute__((constructor)) functions and the GNUstep
+     * libobjc2 __objc_load() module loader are compiled into the
+     * __DATA,__mod_init_func section as function pointers. On macOS,
+     * dyld calls these bottom-up (dependencies before dependents)
+     * after binding but before main().
+     *
+     * Without this step, ObjC classes are never registered with the
+     * runtime, CoreFoundation types are never initialised, and every
+     * ObjC app crashes with a NULL isa dereference (FAR=0x40).
+     *
+     * Order: bottom-up — for each image, ensure all its dylib
+     * dependencies have been initialised first, then run its own
+     * constructors. The main binary (image 0) is always last.
+     * This matches XNU dyld's initializeMainExecutable() behaviour.
+     * ---------------------------------------------------------------- */
+    {
+        typedef void (*init_func_t)(void);
+        bool inited[MAX_IMAGES];
+        dyld_memset(inited, 0, sizeof(inited));
+
+        /*
+         * run_inits_for_image: call __mod_init_func for one image,
+         * recursively initialising dependencies first.
+         * We use an iterative deepening approach to avoid deep
+         * recursion (dyld has limited stack).
+         *
+         * Simple approach: iterate images in load order (1..N-1),
+         * then image 0. For each image, first ensure its deps are
+         * initialised. Since deps are loaded before dependents,
+         * iterating in load order is already mostly correct.
+         * We add a dependency-first pass as a safety measure.
+         */
+        for (uint32_t pass_idx = 0; pass_idx < num_images; pass_idx++) {
+            /* Dylibs first (1..num_images-1), then main binary (0) */
+            uint32_t idx;
+            if (pass_idx < num_images - 1)
+                idx = pass_idx + 1;
+            else
+                idx = 0;
+
+            if (idx >= num_images || inited[idx])
+                continue;
+
+            /*
+             * Before initialising this image, ensure all its
+             * direct dependencies are initialised. Since deps
+             * appear earlier in the images[] array (loaded first),
+             * they will already be processed in most cases, but
+             * we check explicitly for correctness.
+             */
+            struct loaded_image *img = &images[idx];
+            for (uint32_t d = 0; d < img->ndylibs; d++) {
+                const char *dep_path = img->dylib_paths[d];
+                if (dep_path == NULL)
+                    continue;
+                for (uint32_t m = 1; m < num_images; m++) {
+                    if (inited[m])
+                        continue;
+                    if (images[m].path != NULL &&
+                        dyld_strcmp(images[m].path, dep_path) == 0) {
+                        /* Initialise this dependency now */
+                        const struct mach_header_64 *dmh = images[m].mh;
+                        if (dmh == NULL)
+                            break;
+                        const uint8_t *dcp =
+                            (const uint8_t *)(dmh + 1);
+                        for (uint32_t c = 0; c < dmh->ncmds; c++) {
+                            const struct load_command *lc =
+                                (const struct load_command *)dcp;
+                            if (lc->cmdsize < sizeof(struct load_command))
+                                break;
+                            if (lc->cmd == LC_SEGMENT_64) {
+                                const struct segment_command_64 *seg =
+                                    (const struct segment_command_64 *)dcp;
+                                const struct section_64 *sect =
+                                    (const struct section_64 *)(dcp +
+                                        sizeof(struct segment_command_64));
+                                for (uint32_t j = 0; j < seg->nsects; j++) {
+                                    if (dyld_strncmp(sect[j].sectname,
+                                                     "__mod_init_func",
+                                                     15) == 0) {
+                                        uint64_t sa =
+                                            sect[j].addr + images[m].slide;
+                                        uint64_t cnt =
+                                            sect[j].size / sizeof(init_func_t);
+                                        init_func_t *fns = (init_func_t *)sa;
+                                        for (uint64_t k = 0; k < cnt; k++) {
+                                            if (fns[k] != NULL)
+                                                fns[k]();
+                                        }
+                                    }
+                                }
+                            }
+                            dcp += lc->cmdsize;
+                        }
+                        inited[m] = true;
+                        break;
+                    }
+                }
+            }
+
+            /* Now initialise this image itself */
+            if (inited[idx])
+                continue;
+
+            const struct mach_header_64 *mh = img->mh;
+            if (mh == NULL) {
+                inited[idx] = true;
+                continue;
+            }
+
+            const uint8_t *cmd_ptr = (const uint8_t *)(mh + 1);
+            for (uint32_t i = 0; i < mh->ncmds; i++) {
+                const struct load_command *lc =
+                    (const struct load_command *)cmd_ptr;
+                if (lc->cmdsize < sizeof(struct load_command))
+                    break;
+
+                if (lc->cmd == LC_SEGMENT_64) {
+                    const struct segment_command_64 *seg =
+                        (const struct segment_command_64 *)cmd_ptr;
+                    const struct section_64 *sect =
+                        (const struct section_64 *)(cmd_ptr +
+                            sizeof(struct segment_command_64));
+
+                    for (uint32_t j = 0; j < seg->nsects; j++) {
+                        if (dyld_strncmp(sect[j].sectname,
+                                         "__mod_init_func", 15) == 0) {
+                            uint64_t sect_addr =
+                                sect[j].addr + img->slide;
+                            uint64_t count =
+                                sect[j].size / sizeof(init_func_t);
+
+                            init_func_t *funcs =
+                                (init_func_t *)sect_addr;
+                            for (uint64_t k = 0; k < count; k++) {
+                                if (funcs[k] != NULL) {
+                                    funcs[k]();
+                                }
+                            }
+                        }
+                    }
+                }
+                cmd_ptr += lc->cmdsize;
+            }
+            inited[idx] = true;
         }
     }
 

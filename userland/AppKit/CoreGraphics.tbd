@@ -1,0 +1,31 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _CGColorSpaceCreateDeviceRGB, _CGColorSpaceRelease,
+                   _CGColorCreateGenericRGB, _CGColorCreateSRGB,
+                   _CGColorRetain, _CGColorRelease,
+                   _CGColorGetComponents, _CGColorGetAlpha,
+                   _CGBitmapContextCreate, _CGBitmapContextCreateWithData,
+                   _CGBitmapContextGetData, _CGBitmapContextGetWidth,
+                   _CGBitmapContextGetHeight, _CGBitmapContextGetBytesPerRow,
+                   _CGBitmapContextCreateImage,
+                   _CGContextRetain, _CGContextRelease,
+                   _CGContextSaveGState, _CGContextRestoreGState,
+                   _CGContextSetRGBFillColor, _CGContextSetRGBStrokeColor,
+                   _CGContextSetFillColorWithColor, _CGContextSetStrokeColorWithColor,
+                   _CGContextSetAlpha, _CGContextSetLineWidth,
+                   _CGContextFillRect, _CGContextStrokeRect, _CGContextClearRect,
+                   _CGContextBeginPath, _CGContextMoveToPoint,
+                   _CGContextAddLineToPoint, _CGContextAddRect,
+                   _CGContextClosePath, _CGContextFillPath, _CGContextStrokePath,
+                   _CGContextSetTextPosition, _CGContextGetTextPosition,
+                   _CGContextShowTextAtPoint,
+                   _CGContextDrawImage, _CGImageRelease,
+                   _CGContextClipToRect, _CGContextFlush,
+                   _CGAffineTransformIdentity ]
+...

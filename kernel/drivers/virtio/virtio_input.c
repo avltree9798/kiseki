@@ -142,6 +142,8 @@ uint64_t hid_event_ring_get_size(void)
  * Called from IRQ context. Single-producer so no locking needed.
  * If the ring is full (consumer not keeping up), the event is dropped.
  */
+static uint32_t hid_push_count = 0;
+
 static void hid_ring_push(const struct hid_event *ev)
 {
     struct hid_event_ring *ring = &g_hid_ring;
@@ -149,14 +151,19 @@ static void hid_ring_push(const struct hid_event *ev)
     uint32_t ridx = ring->read_idx;
 
     /* Check if ring is full */
-    if ((widx - ridx) >= ring->size)
+    if ((widx - ridx) >= ring->size) {
+        kprintf("[HID] ring FULL widx=%u ridx=%u sz=%u type=%u\n",
+                widx, ridx, ring->size, ev->type);
         return;     /* Drop event — consumer not keeping up */
+    }
 
     uint32_t slot = widx % ring->size;
     ring->events[slot] = *ev;
 
     __asm__ volatile("dmb ish" ::: "memory");
     ring->write_idx = widx + 1;
+
+    hid_push_count++;
 }
 
 /*
@@ -695,9 +702,13 @@ static void tablet_process_event(const struct virtio_input_event *ev)
  * Generic IRQ Handler (processes used ring for a given device)
  * ============================================================================ */
 
+static uint32_t tablet_irq_count = 0;
+static uint32_t kbd_irq_count = 0;
+
 static void input_handle_irq(struct virtio_device *dev,
                               struct virtio_input_event *event_bufs,
-                              void (*process_fn)(const struct virtio_input_event *))
+                              void (*process_fn)(const struct virtio_input_event *),
+                              const char *label)
 {
     /* ACK the interrupt */
     uint32_t isr = mmio_read32(dev->base + VIRTIO_MMIO_INTERRUPT_STATUS);
@@ -708,7 +719,10 @@ static void input_handle_irq(struct virtio_device *dev,
 
     __asm__ volatile("dmb ish" ::: "memory");
 
-    while (vq->last_used_idx != vq->used->idx) {
+    uint32_t processed = 0;
+    uint32_t used_idx_snap = vq->used->idx;
+
+    while (vq->last_used_idx != used_idx_snap) {
         uint32_t used_slot = vq->last_used_idx % vq->num;
         uint32_t desc_idx = vq->used->ring[used_slot].id;
 
@@ -726,10 +740,14 @@ static void input_handle_irq(struct virtio_device *dev,
         /* Free the descriptor and re-post the buffer */
         input_free_desc(vq, desc_idx);
         vq->last_used_idx++;
+        processed++;
 
         if (buf_idx < NUM_EVENT_BUFS)
             input_post_event_buf(dev, vq, event_bufs, buf_idx);
     }
+
+    (void)label;
+    (void)isr;
 }
 
 /* ============================================================================
@@ -740,14 +758,16 @@ void virtio_input_irq_handler(void)
 {
     if (!kbd_found)
         return;
-    input_handle_irq(&kbd_dev, kbd_event_bufs, kbd_process_event);
+    kbd_irq_count++;
+    input_handle_irq(&kbd_dev, kbd_event_bufs, kbd_process_event, "kbd");
 }
 
 void virtio_input_tablet_irq_handler(void)
 {
     if (!tablet_found)
         return;
-    input_handle_irq(&tablet_dev, tablet_event_bufs, tablet_process_event);
+    tablet_irq_count++;
+    input_handle_irq(&tablet_dev, tablet_event_bufs, tablet_process_event, "tablet");
 }
 
 /* ============================================================================

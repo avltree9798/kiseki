@@ -1027,10 +1027,20 @@ int fbconsole_init(void)
     saved_fg_idx = DEFAULT_FG_IDX;
     saved_bg_idx = DEFAULT_BG_IDX;
 
-    /* Clear the screen to background colour */
-    uint32_t total_pixels = fb_width * fb_height;
-    for (uint32_t i = 0; i < total_pixels; i++)
-        fb_base[i] = ansi_colours[DEFAULT_BG_IDX];
+    /*
+     * IOK-M1: Clear the screen to background colour using pitch-aware
+     * iteration. When pitch != width * 4 (e.g. padding for alignment),
+     * the old code (fb_width * fb_height linear fill) would miss
+     * padding bytes or write past the actual row data.
+     */
+    {
+        uint32_t bg = ansi_colours[DEFAULT_BG_IDX];
+        for (uint32_t y = 0; y < fb_height; y++) {
+            uint32_t *rowptr = (uint32_t *)((uint8_t *)fb_base + y * fb_pitch);
+            for (uint32_t x = 0; x < fb_width; x++)
+                rowptr[x] = bg;
+        }
+    }
 
     fb_active = true;
 
@@ -1056,4 +1066,35 @@ struct tty *fbconsole_get_tty(void)
 bool fbconsole_active(void)
 {
     return fb_active;
+}
+
+/*
+ * IOK-C1: fbconsole_disable / fbconsole_enable
+ *
+ * Allows WindowServer to take exclusive ownership of the framebuffer.
+ * When disabled, fbconsole_putc() is a no-op (checked via fb_active).
+ * When re-enabled, the console resumes output.
+ */
+void fbconsole_disable(void)
+{
+    uint64_t irqflags;
+    spin_lock_irqsave(&fbconsole_lock, &irqflags);
+    fb_active = false;
+    has_dirty = false;
+    spin_unlock_irqrestore(&fbconsole_lock, irqflags);
+}
+
+void fbconsole_enable(void)
+{
+    uint64_t irqflags;
+    spin_lock_irqsave(&fbconsole_lock, &irqflags);
+
+    /* Only re-enable if we have a valid framebuffer */
+    if (fb_base && fb_width > 0 && fb_height > 0) {
+        fb_active = true;
+        /* Mark entire screen dirty so next flush redraws */
+        mark_all_dirty();
+    }
+
+    spin_unlock_irqrestore(&fbconsole_lock, irqflags);
 }

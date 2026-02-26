@@ -214,6 +214,89 @@ static void kvprintf(const char *fmt, va_list ap)
     }
 }
 
+/* --- UART-only output (bypasses fbconsole, safe under gpu_lock) --- */
+
+static void uart_print_char(char c)
+{
+    if (c == '\n')
+        uart_putc('\r');
+    uart_putc(c);
+}
+
+static void uart_vprintf(const char *fmt, va_list ap)
+{
+    /* Minimal inline formatter — same logic as kvprintf but uses
+     * uart_print_char instead of print_char to avoid fbconsole. */
+    while (*fmt) {
+        if (*fmt != '%') {
+            uart_print_char(*fmt++);
+            continue;
+        }
+        fmt++;
+        char pad = ' ';
+        int width = 0;
+        int is_long = 0;
+        if (*fmt == '0') { pad = '0'; fmt++; }
+        while (*fmt >= '0' && *fmt <= '9') {
+            width = width * 10 + (*fmt - '0');
+            fmt++;
+        }
+        if (*fmt == '.') {
+            fmt++;
+            while (*fmt >= '0' && *fmt <= '9') fmt++;
+        }
+        if (*fmt == 'l') { is_long = 1; fmt++; }
+        switch (*fmt) {
+        case 'd': case 'i': {
+            int64_t v = is_long ? va_arg(ap, int64_t) : va_arg(ap, int32_t);
+            if (v < 0) { uart_print_char('-'); v = -v; }
+            char buf[20]; int i = 0;
+            if (v == 0) buf[i++] = '0';
+            else while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
+            while (i < width) buf[i++] = pad;
+            while (--i >= 0) uart_print_char(buf[i]);
+            break;
+        }
+        case 'u': {
+            uint64_t v = is_long ? va_arg(ap, uint64_t) : va_arg(ap, uint32_t);
+            char buf[20]; int i = 0;
+            if (v == 0) buf[i++] = '0';
+            else while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
+            while (i < width) buf[i++] = pad;
+            while (--i >= 0) uart_print_char(buf[i]);
+            break;
+        }
+        case 'x': case 'X': {
+            uint64_t v = is_long ? va_arg(ap, uint64_t) : va_arg(ap, uint32_t);
+            const char *d = (*fmt == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
+            char buf[16]; int i = 0;
+            if (v == 0) buf[i++] = '0';
+            else while (v > 0) { buf[i++] = d[v & 0xf]; v >>= 4; }
+            while (i < width) buf[i++] = pad;
+            while (--i >= 0) uart_print_char(buf[i]);
+            break;
+        }
+        case 'p': {
+            uint64_t v = va_arg(ap, uint64_t);
+            uart_print_char('0'); uart_print_char('x');
+            const char *d = "0123456789abcdef";
+            for (int i = 60; i >= 0; i -= 4) uart_print_char(d[(v >> i) & 0xf]);
+            break;
+        }
+        case 's': {
+            const char *s = va_arg(ap, const char *);
+            if (!s) s = "(null)";
+            while (*s) uart_print_char(*s++);
+            break;
+        }
+        case 'c': uart_print_char((char)va_arg(ap, int)); break;
+        case '%': uart_print_char('%'); break;
+        default: uart_print_char('%'); uart_print_char(*fmt); break;
+        }
+        fmt++;
+    }
+}
+
 /* --- Public API --- */
 
 void kputc(char c)
@@ -231,6 +314,14 @@ void kprintf(const char *fmt, ...)
     va_list ap;
     va_start(ap, fmt);
     kvprintf(fmt, ap);
+    va_end(ap);
+}
+
+void uart_printf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    uart_vprintf(fmt, ap);
     va_end(ap);
 }
 

@@ -1094,42 +1094,34 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
 
     /*
      * Create a fresh VM space for the new image.
-     *
-     * IMPORTANT: We must not destroy the old VM space until macho_load
-     * succeeds. If exec fails (e.g., I/O error, bad binary), the
-     * process must be able to receive SIGKILL or exit cleanly with the
-     * old address space intact. Destroying before load is a point-of-
-     * no-return bug: the process is left with an empty address space and
-     * any return to userspace causes an instruction abort.
-     *
-     * Approach: switch TTBR0 to kernel PGD temporarily (kernel identity-
-     * mapped pages at 0x40000000–0x80000000 are in TTBR0 range), create
-     * the new space, load the binary. On failure, destroy the new space
-     * and restore the old one. On success, destroy the old space.
-     *
-     * Reference: XNU exec_mach_imgact() creates new_map via vm_map_create()
-     * and only swaps task->map on success (bsd/kern/kern_exec.c).
+     * IMPORTANT: Switch to kernel page tables before destroying the old
+     * space, otherwise kernel VA accesses (e.g., reading kernel_pgd in
+     * vmm_create_space) will fault because the old TTBR0 points to
+     * freed page tables.
      */
-    pte_t *kpgd = vmm_get_kernel_pgd();
-    struct vm_space *old_vmspace = p->p_vmspace;
-
-    /* Switch TTBR0 to kernel PGD so kernel VA accesses work */
-    __asm__ volatile("msr ttbr0_el1, %0; isb" :: "r"((uint64_t)kpgd));
-
-    struct vm_space *new_vmspace = vmm_create_space();
-    if (new_vmspace == NULL) {
+    if (p->p_vmspace) {
+        /* Switch TTBR0 to kernel PGD so kernel VA accesses work */
+        pte_t *kpgd = vmm_get_kernel_pgd();
+        __asm__ volatile("msr ttbr0_el1, %0; isb" :: "r"((uint64_t)kpgd));
+        vmm_destroy_space(p->p_vmspace);
+    }
+    p->p_vmspace = vmm_create_space();
+    if (p->p_vmspace == NULL) {
         kprintf("[exec] Cannot create new VM space\n");
-        /* Restore TTBR0 to old space so process can exit cleanly */
-        if (old_vmspace && old_vmspace->pgd)
-            __asm__ volatile("msr ttbr0_el1, %0; isb" :: "r"((uint64_t)old_vmspace->pgd));
         pmm_free_pages(scratch_pa, 2);
         return ENOMEM;
     }
 
+    /* Keep task->vm_space in sync so the scheduler uses the right TTBR0 */
+    if (p->p_task)
+        p->p_task->vm_space = p->p_vmspace;
+
     /*
-     * Load the Mach-O binary into the NEW space.
+     * Load the Mach-O binary.
      * macho_load handles everything: segment mapping, dyld loading
-     * (recursive), entry point resolution.
+     * (recursive), entry point resolution. If the binary uses LC_MAIN
+     * and has LC_LOAD_DYLINKER, the entry_point will be dyld's entry
+     * and mach_header will be the main binary's __TEXT base.
      */
     /*
      * Allocate load_result_t from PMM instead of the stack.
@@ -1139,40 +1131,21 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
     uint64_t lr_pa = pmm_alloc_pages(3); /* 32KB = 8 pages, order 3 (load_result_t is ~17KB) */
     if (lr_pa == 0) {
         kprintf("[exec] OOM for load_result\n");
-        vmm_destroy_space(new_vmspace);
-        if (old_vmspace && old_vmspace->pgd)
-            __asm__ volatile("msr ttbr0_el1, %0; isb" :: "r"((uint64_t)old_vmspace->pgd));
         pmm_free_pages(scratch_pa, 2);
         return ENOMEM;
     }
     load_result_t *result = (load_result_t *)lr_pa;
 
-    load_return_t lret = macho_load(k_path, new_vmspace, result);
+    load_return_t lret = macho_load(k_path, p->p_vmspace, result);
     if (lret != LOAD_SUCCESS) {
         kprintf("[exec] macho_load failed: %d\n", lret);
         pmm_free_pages(lr_pa, 3);
-        vmm_destroy_space(new_vmspace);
-        /* Restore TTBR0 to old space so process can be killed cleanly */
-        if (old_vmspace && old_vmspace->pgd)
-            __asm__ volatile("msr ttbr0_el1, %0; isb" :: "r"((uint64_t)old_vmspace->pgd));
         pmm_free_pages(scratch_pa, 2);
+        /* Return appropriate errno: ENOEXEC for bad format, ENOENT otherwise */
         if (lret == LOAD_BADMACHO || lret == LOAD_BADARCH)
             return ENOEXEC;
         return ENOENT;
     }
-
-    /*
-     * Point of no return — macho_load succeeded.
-     * Now destroy the old VM space and commit the new one.
-     */
-    if (old_vmspace)
-        vmm_destroy_space(old_vmspace);
-
-    p->p_vmspace = new_vmspace;
-
-    /* Keep task->vm_space in sync so the scheduler uses the right TTBR0 */
-    if (p->p_task)
-        p->p_task->vm_space = new_vmspace;
     /* Store exec info in the proc */
     p->p_entry_point = result->entry_point;
     p->p_needs_dyld = result->needs_dynlinker;
@@ -1400,10 +1373,6 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
 
     /* Update process state */
     strncpy_p(p->p_comm, k_path, PROC_NAME_MAX - 1);
-
-    /* Keep task->name in sync so IOKit/IPC log messages show correct name */
-    if (p->p_task)
-        strncpy_p(p->p_task->name, k_path, sizeof(p->p_task->name) - 1);
 
     /* Switch to the new VM space */
     vmm_switch_space(p->p_vmspace);

@@ -37,6 +37,15 @@ void kputs(const char *s);
 void kputc(char c);
 
 /*
+ * uart_printf - UART-only printf (bypasses framebuffer console)
+ *
+ * Safe to call while holding gpu_lock or any lock that could
+ * recurse into the GPU driver via fbconsole. Output goes to
+ * serial console only.
+ */
+void uart_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+/*
  * panic - Print message and halt the system
  */
 void panic(const char *fmt, ...) __noreturn __attribute__((format(printf, 1, 2)));

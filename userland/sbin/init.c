@@ -896,27 +896,31 @@ int main(void)
     start_system_daemons();
 
     /*
-     * Spawn getty on the framebuffer console if /dev/fbcon0 exists
-     * AND we're not running a GUI session.
+     * Spawn getty on the framebuffer console if /dev/fbcon0 exists,
+     * BUT only if no WindowServer job is configured.
      *
-     * If WindowServer is loaded as a launch daemon, the framebuffer is
-     * owned by the GUI stack (WindowServer → loginwindow → AppKit apps).
-     * Spawning a text-mode getty on /dev/fbcon0 would conflict with the
-     * graphical display.
+     * On macOS, when WindowServer is running it owns the display
+     * exclusively — there is no text console getty on the framebuffer.
+     * The text console only runs if WindowServer is not present
+     * (e.g., single-user mode, or no GPU).
      *
-     * On macOS, launchd never spawns getty on the graphical console —
-     * that's entirely managed by loginwindow.
+     * If a WindowServer launch daemon is loaded, skip fbcon0 getty
+     * to avoid the dual-writer race (both writing pixels to the
+     * same framebuffer).
      */
     int fbcon_getty_pid = -1;
-    int gui_active = 0;
+    int has_windowserver = 0;
     for (int i = 0; i < num_jobs; i++) {
-        if (strcmp(jobs[i].label, "uk.co.avltree9798.WindowServer") == 0) {
-            gui_active = 1;
+        if (strstr(jobs[i].label, "WindowServer") != NULL) {
+            has_windowserver = 1;
             break;
         }
     }
-    if (!gui_active) {
-        /* No GUI — spawn text-mode getty on framebuffer console */
+
+    if (has_windowserver) {
+        printf("init: WindowServer configured — skipping fbcon0 getty\n");
+    } else {
+        /* Try to open /dev/fbcon0 to check if it exists and is functional */
         int testfd = open("/dev/fbcon0", O_RDONLY);
         if (testfd >= 0) {
             close(testfd);
@@ -926,8 +930,6 @@ int main(void)
                        fbcon_getty_pid);
             }
         }
-    } else {
-        printf("init: GUI mode — fbcon0 getty suppressed (owned by WindowServer)\n");
     }
 
     /* Main loop: spawn serial console getty, reap children */

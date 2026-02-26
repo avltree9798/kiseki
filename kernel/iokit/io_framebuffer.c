@@ -28,7 +28,9 @@
 
 #include <kiseki/types.h>
 #include <kern/kprintf.h>
+#include <kern/sync.h>
 #include <kern/thread.h>
+#include <kern/fbconsole.h>
 #include <iokit/io_framebuffer.h>
 #include <iokit/io_registry.h>
 #include <iokit/io_property.h>
@@ -105,44 +107,62 @@ const struct io_class_meta io_framebuffer_uc_meta = {
 
 static struct io_framebuffer fb_pool[IO_FRAMEBUFFER_POOL_SIZE];
 static bool fb_pool_used[IO_FRAMEBUFFER_POOL_SIZE];
+static spinlock_t fb_pool_lock = SPINLOCK_INIT;  /* IOK-H3: protect pool */
 
 static struct io_framebuffer_user_client fb_uc_pool[IO_FRAMEBUFFER_UC_POOL_SIZE];
 static bool fb_uc_pool_used[IO_FRAMEBUFFER_UC_POOL_SIZE];
+static spinlock_t fb_uc_pool_lock = SPINLOCK_INIT;  /* IOK-H3: protect pool */
 
 static struct io_framebuffer *io_framebuffer_alloc(void)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&fb_pool_lock, &flags);
     for (int i = 0; i < IO_FRAMEBUFFER_POOL_SIZE; i++) {
         if (!fb_pool_used[i]) {
             fb_pool_used[i] = true;
+            spin_unlock_irqrestore(&fb_pool_lock, flags);
             return &fb_pool[i];
         }
     }
+    spin_unlock_irqrestore(&fb_pool_lock, flags);
     return NULL;
 }
 
 static void io_framebuffer_free_to_pool(struct io_framebuffer *fb)
 {
     int idx = (int)(fb - fb_pool);
-    if (idx >= 0 && idx < IO_FRAMEBUFFER_POOL_SIZE)
+    if (idx >= 0 && idx < IO_FRAMEBUFFER_POOL_SIZE) {
+        uint64_t flags;
+        spin_lock_irqsave(&fb_pool_lock, &flags);
         fb_pool_used[idx] = false;
+        spin_unlock_irqrestore(&fb_pool_lock, flags);
+    }
 }
 
 static struct io_framebuffer_user_client *io_framebuffer_uc_alloc(void)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&fb_uc_pool_lock, &flags);
     for (int i = 0; i < IO_FRAMEBUFFER_UC_POOL_SIZE; i++) {
         if (!fb_uc_pool_used[i]) {
             fb_uc_pool_used[i] = true;
+            spin_unlock_irqrestore(&fb_uc_pool_lock, flags);
             return &fb_uc_pool[i];
         }
     }
+    spin_unlock_irqrestore(&fb_uc_pool_lock, flags);
     return NULL;
 }
 
 static void io_framebuffer_uc_free_to_pool(struct io_framebuffer_user_client *uc)
 {
     int idx = (int)(uc - fb_uc_pool);
-    if (idx >= 0 && idx < IO_FRAMEBUFFER_UC_POOL_SIZE)
+    if (idx >= 0 && idx < IO_FRAMEBUFFER_UC_POOL_SIZE) {
+        uint64_t flags;
+        spin_lock_irqsave(&fb_uc_pool_lock, &flags);
         fb_uc_pool_used[idx] = false;
+        spin_unlock_irqrestore(&fb_uc_pool_lock, flags);
+    }
 }
 
 /* ============================================================================
@@ -459,7 +479,18 @@ fb_new_user_client(struct io_service *service, struct task *owning_task,
 
     *client_out = &fb_uc->uc;
 
-    kprintf("[IOFramebuffer] newUserClient: created for task (type=%u)\n", type);
+    /*
+     * IOK-C1: Disable fbconsole now that a user client (WindowServer)
+     * has opened the framebuffer. This prevents the dual-writer race
+     * where both fbconsole and WindowServer write pixels and flush.
+     *
+     * On macOS, the boot console is disabled when WindowServer registers
+     * with IOFramebuffer (via vc_progress_set / disableConsoleOutput).
+     */
+    fbconsole_disable();
+
+    kprintf("[IOFramebuffer] newUserClient: created for task (type=%u), "
+            "fbconsole disabled\n", type);
 
     return kIOReturnSuccess;
 }
@@ -535,12 +566,17 @@ fb_method_flush_rect(struct io_user_client *client, void *reference,
     uint32_t width  = (uint32_t)args->scalarInput[2];
     uint32_t height = (uint32_t)args->scalarInput[3];
 
-    /* Clamp to framebuffer bounds */
+    /*
+     * IOK-H6: Clamp to framebuffer bounds using subtraction form
+     * to prevent integer overflow. If x + width overflows uint32_t,
+     * the comparison `x + width > fb_width` would be wrong.
+     * Instead: `width > fb_width - x` is safe since x < fb_width.
+     */
     if (x >= fb->fb_width || y >= fb->fb_height)
         return kIOReturnBadArgument;
-    if (x + width > fb->fb_width)
+    if (width > fb->fb_width - x)
         width = fb->fb_width - x;
-    if (y + height > fb->fb_height)
+    if (height > fb->fb_height - y)
         height = fb->fb_height - y;
 
     if (width == 0 || height == 0)
@@ -640,6 +676,12 @@ fb_uc_client_close(struct io_user_client *client)
     kprintf("[IOFramebuffer] clientClose\n");
 
     fb_uc->framebuffer = NULL;
+
+    /*
+     * Re-enable fbconsole when the last user client disconnects.
+     * This allows the text console to resume if WindowServer crashes.
+     */
+    fbconsole_enable();
 
     return kIOReturnSuccess;
 }

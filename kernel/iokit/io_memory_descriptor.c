@@ -255,7 +255,13 @@ io_memory_descriptor_map(struct io_memory_descriptor *desc,
         if (mret != 0) {
             kprintf("IOKit: io_memory_descriptor_map: vmm_map_page failed "
                     "at offset 0x%lx\n", offset);
-            /* TODO: unmap already-mapped pages on failure */
+            /*
+             * IOK-M3: Clean up on failure — unmap any pages we already
+             * mapped, then release the VA allocation.
+             */
+            for (uint64_t undo = 0; undo < offset; undo += PAGE_SIZE)
+                vmm_unmap_page(task->vm_space->pgd, va + undo);
+            vm_map_remove(task->vm_space->map, va, va + aligned_length);
             return NULL;
         }
     }
@@ -263,7 +269,13 @@ io_memory_descriptor_map(struct io_memory_descriptor *desc,
     /* Create the mapping object */
     struct io_memory_map *map = io_memory_map_alloc();
     if (!map) {
-        /* TODO: unmap pages */
+        /*
+         * IOK-M3: Clean up on allocation failure — unmap all pages
+         * and release the VA range.
+         */
+        for (uint64_t offset = 0; offset < aligned_length; offset += PAGE_SIZE)
+            vmm_unmap_page(task->vm_space->pgd, va + offset);
+        vm_map_remove(task->vm_space->map, va, va + aligned_length);
         return NULL;
     }
 

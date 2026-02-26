@@ -294,6 +294,7 @@ EXPORT unsigned int IOServiceGetMatchingService(unsigned int masterPort,
     int kr = mach_msg(&req, _MACH_SEND_MSG | _MACH_RCV_MSG,
                       sizeof(req), sizeof(struct _iokit_get_matching_reply),
                       reply_port, 0, 0);
+    mach_port_deallocate(mach_task_self(), reply_port);
     if (kr != 0)
         return _IO_OBJECT_NULL;
 
@@ -388,6 +389,7 @@ EXPORT int IOServiceOpen(unsigned int service, unsigned int owningTask,
                       sizeof(msg.req),
                       sizeof(struct _iokit_service_open_reply),
                       reply_port, 0, 0);
+    mach_port_deallocate(mach_task_self(), reply_port);
     if (kr != 0)
         return (int)_kIOReturnIPCError;
 
@@ -472,6 +474,7 @@ EXPORT int IOServiceClose(unsigned int connect)
                       sizeof(msg.req),
                       sizeof(struct _iokit_service_close_reply),
                       reply_port, 0, 0);
+    mach_port_deallocate(mach_task_self(), reply_port);
 
     /*
      * On macOS, IOServiceClose() calls IOObjectRelease(connect) after
@@ -611,6 +614,7 @@ EXPORT int IOConnectCallMethod(
 
     int kr = mach_msg(msg_buf, _MACH_SEND_MSG | _MACH_RCV_MSG,
                       send_size, rcv_size, reply_port, 0, 0);
+    mach_port_deallocate(mach_task_self(), reply_port);
     if (kr != 0)
         return (int)_kIOReturnIPCError;
 
@@ -786,6 +790,7 @@ EXPORT int IOConnectMapMemory64(
                       sizeof(msg.req),
                       sizeof(struct _iokit_map_memory_reply),
                       reply_port, 0, 0);
+    mach_port_deallocate(mach_task_self(), reply_port);
     if (kr != 0)
         return (int)_kIOReturnIPCError;
 
@@ -897,6 +902,7 @@ EXPORT int IORegistryEntryGetProperty(
                       sizeof(msg.req),
                       sizeof(struct _iokit_get_property_reply),
                       reply_port, 0, 0);
+    mach_port_deallocate(mach_task_self(), reply_port);
     if (kr != 0)
         return (int)_kIOReturnIPCError;
 

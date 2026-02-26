@@ -62,4 +62,27 @@ bool fbconsole_active(void);
  */
 void fbconsole_flush(void);
 
+/*
+ * fbconsole_disable - Disable the framebuffer console.
+ *
+ * IOK-C1: Called by WindowServer (via IOKit) when it takes ownership
+ * of the framebuffer. After this call, fbconsole_putc() becomes a
+ * no-op and the console will not write pixels or issue GPU flushes.
+ *
+ * This prevents the dual-writer race where both fbconsole and
+ * WindowServer write pixels and flush the GPU concurrently.
+ *
+ * Analogous to XNU's vc_progress_set(TRUE, 0) which disables the
+ * boot console when the WindowServer registers.
+ */
+void fbconsole_disable(void);
+
+/*
+ * fbconsole_enable - Re-enable the framebuffer console.
+ *
+ * Called when WindowServer exits or crashes, allowing the text
+ * console to resume for diagnostics.
+ */
+void fbconsole_enable(void);
+
 #endif /* _KERN_FBCONSOLE_H */

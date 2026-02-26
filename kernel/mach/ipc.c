@@ -538,12 +538,6 @@ ipc_kmsg_copyin_ool_descriptor(struct vm_space *sender_space,
      * tables to get the physical address, then access via identity mapping.
      * We copy page-by-page since user pages may not be contiguous physically.
      */
-    /* Validate sender_space->pgd before walking page tables */
-    if (sender_space->pgd == NULL) {
-        pmm_free_pages(kbuf_pa, order);
-        return MACH_SEND_INVALID_DEST;
-    }
-
     uint64_t copied = 0;
     while (copied < size) {
         uint64_t src_va = user_addr + copied;
@@ -1054,31 +1048,16 @@ static mach_msg_type_name_t ipc_object_copyin_type(mach_msg_type_name_t type)
  * Returns MACH_MSG_SUCCESS or MACH_SEND_NO_BUFFER.
  */
 static mach_msg_return_t port_enqueue(struct ipc_port *port,
-                                       const void *msg_data,
-                                       uint32_t msg_size,
-                                       struct ipc_port *reply_port,
-                                       mach_msg_type_name_t reply_type,
-                                       mach_msg_type_name_t dest_type,
-                                       struct ipc_kmsg_ool *ool_descs,
-                                       uint32_t ool_count)
+                                      const void *msg_data,
+                                      uint32_t msg_size,
+                                      struct ipc_port *reply_port,
+                                      mach_msg_type_name_t reply_type,
+                                      mach_msg_type_name_t dest_type,
+                                      struct ipc_kmsg_ool *ool_descs,
+                                      uint32_t ool_count)
 {
     uint64_t flags;
     spin_lock_irqsave(&port->lock, &flags);
-
-    /*
-     * Check if the port is still active. A port becomes inactive when
-     * its receiver's IPC space is destroyed (process exit). On XNU,
-     * ipc_kmsg_send() calls ipc_port_check_circularity() which detects
-     * dead ports. We check port->active here — equivalent to XNU's
-     * ip_active() check in ipc_mqueue_send().
-     *
-     * Return MACH_SEND_INVALID_DEST so the sender can detect dead clients
-     * and clean up connection state.
-     */
-    if (!port->active) {
-        spin_unlock_irqrestore(&port->lock, flags);
-        return MACH_SEND_INVALID_DEST;
-    }
 
     if (port->queue_count >= PORT_MSG_QUEUE_SIZE) {
         spin_unlock_irqrestore(&port->lock, flags);
@@ -1119,11 +1098,7 @@ static mach_msg_return_t port_enqueue(struct ipc_port *port,
 /*
  * port_dequeue - Dequeue a message from a port's ring buffer.
  *
- * Blocks if no messages available (via semaphore). Supports timeout:
- *   timeout_ms < 0  → block indefinitely (semaphore_wait)
- *   timeout_ms == 0 → non-blocking (semaphore_trywait)
- *   timeout_ms > 0  → block with timeout (semaphore_timedwait)
- *
+ * Blocks if no messages available (via semaphore).
  * Returns MACH_MSG_SUCCESS or error. Copies raw message bytes into user
  * buffer and returns the kernel port pointers + types for copyout.
  * OOL descriptors are transferred from the queue slot to the caller's
@@ -1137,22 +1112,10 @@ static mach_msg_return_t port_dequeue(struct ipc_port *port,
                                       mach_msg_type_name_t *reply_type_out,
                                       mach_msg_type_name_t *dest_type_out,
                                       struct ipc_kmsg_ool *ool_descs_out,
-                                      uint32_t *ool_count_out,
-                                      int32_t timeout_ms)
+                                      uint32_t *ool_count_out)
 {
-    /* Block until a message is available, with optional timeout */
-    if (timeout_ms < 0) {
-        /* Indefinite wait — original behaviour */
-        semaphore_wait(&port->msg_available);
-    } else if (timeout_ms == 0) {
-        /* Non-blocking */
-        if (!semaphore_trywait(&port->msg_available))
-            return MACH_RCV_TIMED_OUT;
-    } else {
-        /* Timed wait */
-        if (!semaphore_timedwait(&port->msg_available, (uint32_t)timeout_ms))
-            return MACH_RCV_TIMED_OUT;
-    }
+    /* Block until a message is available */
+    semaphore_wait(&port->msg_available);
 
     uint64_t flags;
     spin_lock_irqsave(&port->lock, &flags);
@@ -1220,7 +1183,7 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
     mach_msg_size_t send_size   = (mach_msg_size_t)tf->regs[2];
     mach_msg_size_t rcv_size    = (mach_msg_size_t)tf->regs[3];
     mach_port_name_t rcv_name   = (mach_port_name_t)tf->regs[4];
-    mach_msg_timeout_t timeout = (mach_msg_timeout_t)tf->regs[5];
+    /* timeout in tf->regs[5] - unused for now */
 
     struct thread *cur = current_thread_get();
     if (cur == NULL || cur->task == NULL)
@@ -1535,14 +1498,7 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
         if (!(rcv_type & MACH_PORT_TYPE_RECEIVE))
             return MACH_RCV_INVALID_NAME;
 
-        /* Dequeue — blocks if empty. Returns raw bytes + translated ports + OOL.
-         * If MACH_RCV_TIMEOUT is set, pass the timeout (in ms) to port_dequeue.
-         * Otherwise pass -1 for indefinite blocking (original behaviour). */
-        int32_t dequeue_timeout = -1;  /* default: block forever */
-        if (option & MACH_RCV_TIMEOUT) {
-            dequeue_timeout = (int32_t)timeout;  /* timeout in ms from mach_msg */
-        }
-
+        /* Dequeue — blocks if empty. Returns raw bytes + translated ports + OOL. */
         uint32_t actual = 0;
         struct ipc_port *msg_reply_port = NULL;
         mach_msg_type_name_t msg_reply_type = MACH_MSG_TYPE_PORT_NONE;
@@ -1552,7 +1508,7 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
 
         ret = port_dequeue(rcv_port, (void *)user_msg, rcv_size, &actual,
                            &msg_reply_port, &msg_reply_type, &msg_dest_type,
-                           rcv_ool_descs, &rcv_ool_count, dequeue_timeout);
+                           rcv_ool_descs, &rcv_ool_count);
         if (ret != MACH_MSG_SUCCESS)
             return ret;
 

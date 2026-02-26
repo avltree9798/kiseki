@@ -1983,7 +1983,44 @@ void dyld_main(const struct mach_header_64 *main_mh,
     dyld_memset(main_img, 0, sizeof(*main_img));
     main_img->path  = argv[0]; /* Best guess at the binary's path */
     main_img->mh    = main_mh;
-    main_img->slide = 0; /* Kernel applies ASLR, but mh is at the slid address */
+
+    /*
+     * Compute the kernel's ASLR slide for the main binary.
+     *
+     * The kernel mapped the main binary's segments at their preferred
+     * vmaddrs + aslr_slide. The mach_header pointer (main_mh) passed
+     * to us on the stack is at the slid address. But the vmaddr values
+     * inside LC_SEGMENT_64 load commands are the original un-slid
+     * (linked) addresses — the kernel does NOT patch load command data.
+     *
+     * So: slide = actual_load_address - preferred_load_address
+     *           = (uint64_t)main_mh   - __TEXT.vmaddr
+     *
+     * This is exactly what macOS dyld does in ImageLoaderMachO::
+     * instantiateFromMemory() — it computes the slide by comparing
+     * the actual mach_header address with __TEXT's preferred vmaddr.
+     *
+     * We do a quick pre-scan of load commands to find __TEXT vmaddr
+     * before calling parse_load_commands() (which needs slide set).
+     */
+    main_img->slide = 0;
+    {
+        const uint8_t *cp = (const uint8_t *)(main_mh + 1);
+        for (uint32_t ci = 0; ci < main_mh->ncmds; ci++) {
+            const struct load_command *lc = (const struct load_command *)cp;
+            if (lc->cmdsize < sizeof(struct load_command))
+                break;
+            if (lc->cmd == LC_SEGMENT_64) {
+                const struct segment_command_64 *seg =
+                    (const struct segment_command_64 *)cp;
+                if (dyld_strncmp(seg->segname, "__TEXT", 6) == 0) {
+                    main_img->slide = (int64_t)((uint64_t)main_mh - seg->vmaddr);
+                    break;
+                }
+            }
+            cp += lc->cmdsize;
+        }
+    }
 
     parse_load_commands(main_img);
 

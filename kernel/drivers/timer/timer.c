@@ -27,7 +27,7 @@
 
 /* Per-CPU timer state */
 static uint64_t timer_interval;     /* Counter ticks per scheduler tick */
-static volatile uint64_t tick_count; /* Global tick counter (atomic via LDXR/STXR) */
+static volatile uint64_t tick_count; /* Global tick counter */
 
 /* --- ARM system register accessors --- */
 
@@ -76,6 +76,24 @@ void timer_init(uint32_t hz)
     kprintf("[timer] Counter freq: %lu Hz, interval: %lu ticks (%u Hz)\n",
             freq, timer_interval, hz);
 
+    /*
+     * Enable EL0 access to the virtual counter (CNTVCT_EL0) and the
+     * counter frequency register (CNTFRQ_EL0).
+     *
+     * CNTKCTL_EL1 bit 1 (EL0VCTEN): Allow EL0 to read CNTVCT_EL0/CNTFRQ_EL0
+     * CNTKCTL_EL1 bit 0 (EL0PCTEN): Allow EL0 to read CNTPCT_EL0
+     *
+     * macOS/XNU does the same — userspace reads mach_absolute_time() via
+     * the commpage which uses CNTVCT_EL0 directly.
+     */
+    {
+        uint64_t cntkctl;
+        __asm__ volatile("mrs %0, cntkctl_el1" : "=r"(cntkctl));
+        cntkctl |= (1 << 1) | (1 << 0);  /* EL0VCTEN | EL0PCTEN */
+        __asm__ volatile("msr cntkctl_el1, %0" :: "r"(cntkctl));
+        __asm__ volatile("isb");
+    }
+
     /* Enable the virtual timer interrupt in GIC */
     gic_enable_irq(TIMER_IRQ);
     gic_set_priority(TIMER_IRQ, 0x80);  /* Medium priority */
@@ -92,6 +110,15 @@ void timer_init(uint32_t hz)
  */
 void timer_init_percpu(void)
 {
+    /* Enable EL0 timer access on this core too */
+    {
+        uint64_t cntkctl;
+        __asm__ volatile("mrs %0, cntkctl_el1" : "=r"(cntkctl));
+        cntkctl |= (1 << 1) | (1 << 0);
+        __asm__ volatile("msr cntkctl_el1, %0" :: "r"(cntkctl));
+        __asm__ volatile("isb");
+    }
+
     gic_enable_irq(TIMER_IRQ);
     gic_set_priority(TIMER_IRQ, 0x80);
     write_cntv_tval(timer_interval);
@@ -111,28 +138,7 @@ extern void virtio_net_recv(void);
 
 void timer_handler(void)
 {
-    /*
-     * Atomically increment tick_count using ARM64 LDXR/STXR.
-     * Multiple CPUs fire their timer PPIs independently and all
-     * increment this global counter. Without atomicity, two CPUs
-     * doing tick_count++ simultaneously can lose an increment
-     * (both read N, both write N+1). Lost ticks cause deadlines
-     * in sched_wakeup_sleepers to fire late, which can cause
-     * apparent hangs in timed waits (e.g., semaphore_timedwait).
-     */
-    {
-        uint64_t old_val, new_val;
-        uint32_t tmp;
-        __asm__ volatile(
-            "1: ldxr  %0, [%3]\n"
-            "   add   %1, %0, #1\n"
-            "   stxr  %w2, %1, [%3]\n"
-            "   cbnz  %w2, 1b\n"
-            : "=&r"(old_val), "=&r"(new_val), "=&r"(tmp)
-            : "r"(&tick_count)
-            : "memory"
-        );
-    }
+    tick_count++;
 
     /* Rearm: set TVAL for next period */
     write_cntv_tval(timer_interval);

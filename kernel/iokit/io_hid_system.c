@@ -24,6 +24,7 @@
 
 #include <kiseki/types.h>
 #include <kern/kprintf.h>
+#include <kern/sync.h>
 #include <kern/hid_event.h>
 #include <iokit/io_hid_system.h>
 #include <iokit/io_registry.h>
@@ -81,44 +82,62 @@ const struct io_class_meta io_hid_system_uc_meta = {
 
 static struct io_hid_system hid_pool[IO_HID_SYSTEM_POOL_SIZE];
 static bool hid_pool_used[IO_HID_SYSTEM_POOL_SIZE];
+static spinlock_t hid_pool_lock = SPINLOCK_INIT;  /* IOK-H3: protect pool */
 
 static struct io_hid_system_user_client hid_uc_pool[IO_HID_SYSTEM_UC_POOL_SIZE];
 static bool hid_uc_pool_used[IO_HID_SYSTEM_UC_POOL_SIZE];
+static spinlock_t hid_uc_pool_lock = SPINLOCK_INIT;  /* IOK-H3: protect pool */
 
 static struct io_hid_system *io_hid_system_alloc(void)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&hid_pool_lock, &flags);
     for (int i = 0; i < IO_HID_SYSTEM_POOL_SIZE; i++) {
         if (!hid_pool_used[i]) {
             hid_pool_used[i] = true;
+            spin_unlock_irqrestore(&hid_pool_lock, flags);
             return &hid_pool[i];
         }
     }
+    spin_unlock_irqrestore(&hid_pool_lock, flags);
     return NULL;
 }
 
 static void io_hid_system_free_to_pool(struct io_hid_system *hid)
 {
     int idx = (int)(hid - hid_pool);
-    if (idx >= 0 && idx < IO_HID_SYSTEM_POOL_SIZE)
+    if (idx >= 0 && idx < IO_HID_SYSTEM_POOL_SIZE) {
+        uint64_t flags;
+        spin_lock_irqsave(&hid_pool_lock, &flags);
         hid_pool_used[idx] = false;
+        spin_unlock_irqrestore(&hid_pool_lock, flags);
+    }
 }
 
 static struct io_hid_system_user_client *io_hid_system_uc_alloc(void)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&hid_uc_pool_lock, &flags);
     for (int i = 0; i < IO_HID_SYSTEM_UC_POOL_SIZE; i++) {
         if (!hid_uc_pool_used[i]) {
             hid_uc_pool_used[i] = true;
+            spin_unlock_irqrestore(&hid_uc_pool_lock, flags);
             return &hid_uc_pool[i];
         }
     }
+    spin_unlock_irqrestore(&hid_uc_pool_lock, flags);
     return NULL;
 }
 
 static void io_hid_system_uc_free_to_pool(struct io_hid_system_user_client *uc)
 {
     int idx = (int)(uc - hid_uc_pool);
-    if (idx >= 0 && idx < IO_HID_SYSTEM_UC_POOL_SIZE)
+    if (idx >= 0 && idx < IO_HID_SYSTEM_UC_POOL_SIZE) {
+        uint64_t flags;
+        spin_lock_irqsave(&hid_uc_pool_lock, &flags);
         hid_uc_pool_used[idx] = false;
+        spin_unlock_irqrestore(&hid_uc_pool_lock, flags);
+    }
 }
 
 /* ============================================================================

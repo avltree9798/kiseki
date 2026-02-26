@@ -227,14 +227,23 @@ iokit_handle_get_matching_service(
      */
     io_prop_table_init(match_props);
 
-    if (req->class_name[0] != '\0') {
-        io_prop_set_string(match_props, kIOProviderClassKey, req->class_name);
+    /*
+     * IOK-H1: Ensure class_name is NUL-terminated. The user-provided
+     * buffer may not contain a NUL byte, causing unbounded string reads
+     * in io_prop_set_string and kprintf. Force NUL at the last byte.
+     */
+    char safe_class_name[128];
+    iokit_memcpy(safe_class_name, req->class_name, 127);
+    safe_class_name[127] = '\0';
+
+    if (safe_class_name[0] != '\0') {
+        io_prop_set_string(match_props, kIOProviderClassKey, safe_class_name);
     }
 
     struct io_service *svc = io_service_get_matching_service(match_props);
     if (svc == NULL) {
         kprintf("[iokit_mach] GetMatchingService: no match for '%s'\n",
-                req->class_name);
+                safe_class_name);
         reply->retcode = kIOReturnNotFound;
         reply->service_port = MACH_PORT_NULL;
         return kIOReturnNotFound;
@@ -272,13 +281,14 @@ iokit_handle_get_matching_service(
         return kIOReturnNoResources;
     }
 
-    svc_port->refs++;
+    /* IOK-M6: Use atomic increment for port refcount (SMP safety) */
+    __atomic_fetch_add(&svc_port->refs, 1, __ATOMIC_RELAXED);
 
     reply->retcode = kIOReturnSuccess;
     reply->service_port = name;
 
     kprintf("[iokit_mach] GetMatchingService: matched '%s' -> port name %u\n",
-            req->class_name, name);
+            safe_class_name, name);
 
     return kIOReturnSuccess;
 }
@@ -355,7 +365,8 @@ iokit_handle_service_open(
         return kIOReturnNoResources;
     }
 
-    port->refs++;
+    /* IOK-M6: Use atomic increment for port refcount (SMP safety) */
+    __atomic_fetch_add(&port->refs, 1, __ATOMIC_RELAXED);
 
     reply->retcode = kIOReturnSuccess;
     reply->connect_port = name;
@@ -377,14 +388,21 @@ iokit_handle_service_close(
     struct io_user_client *client,
     struct iokit_service_close_reply *reply)
 {
-    IOReturn ret = io_user_client_close(client);
-
-    /* Invalidate the kobject port */
+    /*
+     * IOK-M4: Save the port pointer BEFORE calling io_user_client_close(),
+     * which may free/invalidate the client structure. Accessing
+     * client->service.entry.obj.iokit_port after close is a use-after-free.
+     */
     struct ipc_port *port = client->service.entry.obj.iokit_port;
+
+    /* Invalidate the kobject port BEFORE close, to prevent
+     * racing messages from being dispatched to a closed client */
     if (port != NULL) {
         port->kobject = NULL;
         port->kobject_type = IKOT_NONE;
     }
+
+    IOReturn ret = io_user_client_close(client);
 
     reply->retcode = ret;
 
@@ -428,9 +446,39 @@ iokit_handle_call_method(
     if (req->struct_output_size > kIOExternalMethodStructureOutputMax)
         return kIOReturnBadArgument;
 
-    uint32_t payload_needed = req->scalar_input_count * sizeof(uint64_t)
-                            + req->struct_input_size;
+    /*
+     * IOK-C3: Use uint64_t for intermediate multiplication to prevent
+     * 32-bit overflow. scalar_input_count is capped at 16, so the max
+     * value is 16*8=128, but being explicit prevents future bugs.
+     *
+     * IOK-M7: Validate struct_output_size fits in the scratch buffer.
+     * Scratch layout: [0..127] scalar_out (128 bytes),
+     *                 [128..4095] struct_out (3968 bytes).
+     * If struct_output_size > 3968, it would overflow the scratch page.
+     */
+    uint64_t scalar_in_bytes = (uint64_t)req->scalar_input_count * sizeof(uint64_t);
+    uint64_t payload_needed64 = scalar_in_bytes + req->struct_input_size;
+    if (payload_needed64 > 0xFFFFFFFFULL)
+        return kIOReturnBadArgument;
+    uint32_t payload_needed = (uint32_t)payload_needed64;
+
     if (msg_size < hdr_size + payload_needed)
+        return kIOReturnBadArgument;
+
+    /* IOK-M7: Validate struct_output_size fits in scratch page remainder */
+    uint32_t scratch_struct_max = PAGE_SIZE
+        - kIOExternalMethodScalarOutputMax * sizeof(uint64_t);  /* 4096 - 128 = 3968 */
+    if (req->struct_output_size > scratch_struct_max)
+        return kIOReturnBadArgument;
+
+    /*
+     * IOK-M8: Validate total reply payload fits in reply buffer (PAGE_SIZE).
+     * Reply layout: iokit_call_method_reply header + scalar_out + struct_out.
+     */
+    uint64_t reply_payload64 = (uint64_t)req->scalar_output_count * sizeof(uint64_t)
+                             + req->struct_output_size;
+    uint64_t reply_total64 = sizeof(struct iokit_call_method_reply) + reply_payload64;
+    if (reply_total64 > MACH_MSG_SIZE_MAX)
         return kIOReturnBadArgument;
 
     /* Set up input pointers into the request payload */
@@ -555,8 +603,17 @@ iokit_handle_get_property(
 {
     struct io_prop_table *props = &service->entry.prop_table;
 
+    /*
+     * IOK-H2: Ensure key is NUL-terminated. The user-provided buffer
+     * may not contain a NUL byte, causing unbounded string reads in
+     * io_prop_get.
+     */
+    char safe_key[IO_PROP_KEY_MAX];
+    iokit_memcpy(safe_key, req->key, IO_PROP_KEY_MAX - 1);
+    safe_key[IO_PROP_KEY_MAX - 1] = '\0';
+
     const struct io_prop_value *val =
-        io_prop_get(props, req->key);
+        io_prop_get(props, safe_key);
 
     if (val == NULL) {
         reply->retcode = kIOReturnNotFound;
@@ -705,6 +762,18 @@ iokit_kobject_server(struct ipc_port *dest_port,
         switch (msg_id) {
         case kIOServiceGetMatchingServiceMsg:
         case kIOServiceGetMatchingServicesMsg: {
+            /*
+             * IOK-C2: Validate send_size before casting user_msg.
+             * Without this check, a short message could cause an
+             * out-of-bounds kernel read when accessing request fields.
+             */
+            if (send_size < sizeof(struct iokit_get_matching_request)) {
+                kprintf("[iokit_mach] GetMatching: msg too short (%u < %u)\n",
+                        send_size,
+                        (uint32_t)sizeof(struct iokit_get_matching_request));
+                handled = false;
+                goto cleanup;
+            }
             struct iokit_get_matching_reply *rep =
                 (struct iokit_get_matching_reply *)reply_buf;
             reply_size = sizeof(struct iokit_get_matching_reply);
@@ -744,6 +813,11 @@ iokit_kobject_server(struct ipc_port *dest_port,
 
         switch (msg_id) {
         case kIOServiceOpenMsg: {
+            /* IOK-C2: Validate send_size */
+            if (send_size < sizeof(struct iokit_service_open_request)) {
+                handled = false;
+                goto cleanup;
+            }
             struct iokit_service_open_reply *rep =
                 (struct iokit_service_open_reply *)reply_buf;
             reply_size = sizeof(struct iokit_service_open_reply);
@@ -762,6 +836,11 @@ iokit_kobject_server(struct ipc_port *dest_port,
             break;
         }
         case kIORegistryEntryGetPropertyMsg: {
+            /* IOK-C2: Validate send_size */
+            if (send_size < sizeof(struct iokit_get_property_request)) {
+                handled = false;
+                goto cleanup;
+            }
             struct iokit_get_property_reply *rep =
                 (struct iokit_get_property_reply *)reply_buf;
             reply_size = sizeof(struct iokit_get_property_reply);
@@ -820,6 +899,11 @@ iokit_kobject_server(struct ipc_port *dest_port,
             break;
         }
         case kIOConnectMapMemoryMsg: {
+            /* IOK-C2: Validate send_size */
+            if (send_size < sizeof(struct iokit_map_memory_request)) {
+                handled = false;
+                goto cleanup;
+            }
             struct iokit_map_memory_reply *rep =
                 (struct iokit_map_memory_reply *)reply_buf;
             reply_size = sizeof(struct iokit_map_memory_reply);

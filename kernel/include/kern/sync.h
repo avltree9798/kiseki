@@ -72,17 +72,6 @@ void semaphore_wait(semaphore_t *sem);
 void semaphore_signal(semaphore_t *sem);
 bool semaphore_trywait(semaphore_t *sem);
 
-/*
- * semaphore_timedwait - Wait on semaphore with timeout.
- *
- * Returns true if the semaphore was acquired, false if the timeout
- * expired. timeout_ms is in milliseconds. At 100 Hz timer resolution,
- * the minimum granularity is 10 ms (1 tick).
- *
- * XNU equivalent: semaphore_timedwait(sem, mach_timespec_t)
- */
-bool semaphore_timedwait(semaphore_t *sem, uint32_t timeout_ms);
-
 /* ============================================================================
  * Condition Variable - Event-based wait queues
  * ============================================================================ */

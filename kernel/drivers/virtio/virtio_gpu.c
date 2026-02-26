@@ -44,6 +44,57 @@ static inline void dsb(void)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+/*
+ * spin_yield - Yield hint for spin-wait loops.
+ *
+ * Uses the ARM YIELD instruction, which is the architecturally correct
+ * hint for spin-wait loops. On hardware with SMT, YIELD lets the other
+ * hardware thread run. On QEMU TCG (single-threaded emulation), YIELD
+ * is a NOP but combined with DSB it provides a memory barrier that
+ * prevents the tight loop from starving the I/O thread.
+ *
+ * We avoid WFE here because QEMU TCG may treat WFE as a blocking wait
+ * that never wakes (the virtio used-ring update doesn't necessarily
+ * generate an SEV), causing the poll loop to hang until timeout.
+ *
+ * Reference: ARM Architecture Reference Manual, YIELD instruction
+ *            Linux: cpu_relax() uses YIELD on arm64
+ */
+static inline void spin_yield(void)
+{
+    __asm__ volatile("yield" ::: "memory");
+}
+
+/*
+ * volatile_load16 - Volatile read of a uint16_t from a struct field.
+ *
+ * Takes the struct base pointer and byte offset, returns the uint16_t
+ * value at that offset. This avoids taking the address of a packed
+ * struct member (which triggers -Waddress-of-packed-member).
+ *
+ * Uses inline asm to prevent the compiler from hoisting the load
+ * out of a poll loop.
+ */
+static inline uint16_t volatile_load16(const void *base, uint64_t offset)
+{
+    uint16_t val;
+    __asm__ volatile("ldrh %w0, [%1, %2]"
+                     : "=r"(val)
+                     : "r"(base), "r"(offset)
+                     : "memory");
+    return val;
+}
+
+/*
+ * Helper to read vq->used->idx with volatile semantics.
+ * Avoids taking the address of a packed member.
+ */
+static inline uint16_t vq_used_idx(struct virtqueue *vq)
+{
+    return volatile_load16(vq->used,
+                           __builtin_offsetof(struct virtq_used, idx));
+}
+
 /* ============================================================================
  * Driver State
  * ============================================================================ */
@@ -51,6 +102,11 @@ static inline void dsb(void)
 static struct virtio_device gpudev;
 static bool gpudev_found = false;
 static spinlock_t gpu_lock = SPINLOCK_INIT;
+
+/* Diagnostic counters (visible via UART when fbconsole is disabled) */
+static uint32_t gpu_cmd_ok = 0;
+static uint32_t gpu_cmd_timeout = 0;
+static uint32_t gpu_cmd_nodesc = 0;
 
 /* The GPU's GIC IRQ number (set during init) */
 static uint32_t gpu_irq_num = 0;
@@ -273,6 +329,85 @@ static void gpu_free_chain(struct virtqueue *vq, uint32_t head)
  * ============================================================================ */
 
 /*
+ * gpu_poll_completion - Poll for virtqueue completion with IRQs briefly enabled.
+ *
+ * On QEMU TCG (single-threaded emulation), virtio-gpu may process commands
+ * asynchronously in QEMU's main event loop. The vCPU must yield (via an
+ * interrupt-enabled halt or exception) to let QEMU's event loop run and
+ * update the used ring.
+ *
+ * If we spin with IRQs disabled (as spin_lock_irqsave does), the vCPU
+ * monopolizes QEMU's thread and the completion never arrives.
+ *
+ * Solution: briefly enable IRQs on each poll iteration. The gpu_lock is
+ * still held, so no other kernel code can touch the virtqueue. The only
+ * thing that can happen with IRQs enabled is the GIC delivering the
+ * virtio-gpu interrupt, which our handler handles via trylock (and will
+ * bail since we hold the lock). The important side-effect is that the
+ * momentary IRQ enable lets QEMU process its event loop.
+ *
+ * Reference: Linux never polls with IRQs disabled; it uses threaded
+ * completion callbacks (complete/wait_for_completion).
+ */
+static int gpu_poll_completion(struct virtqueue *vq, uint32_t head_desc)
+{
+    /*
+     * QEMU TCG processes simple virtio-gpu 2D commands synchronously
+     * inside the MMIO write to QUEUE_NOTIFY. The used ring should
+     * already be updated by the time we get here.
+     *
+     * First, do a quick check — if the command completed synchronously
+     * (the common case), skip the expensive poll loop entirely.
+     */
+    dsb();  /* ensure we see the device's write to used ring */
+
+    if (vq_used_idx(vq) != vq->last_used_idx)
+        goto done;
+
+    /*
+     * Command didn't complete synchronously. Poll with a timeout.
+     * Briefly enable IRQs on each iteration to let QEMU TCG's
+     * event loop process the command. Without this, the vCPU
+     * monopolises QEMU's host thread and the completion never arrives.
+     */
+    {
+        uint32_t timeout = 50000000;
+        while (vq_used_idx(vq) == vq->last_used_idx && timeout > 0) {
+            dsb();
+            /* Briefly enable IRQs so QEMU TCG can process commands */
+            __asm__ volatile("msr daifclr, #0x2" ::: "memory"); /* unmask IRQ */
+            __asm__ volatile("isb" ::: "memory");
+            __asm__ volatile("msr daifset, #0x2" ::: "memory"); /* remask IRQ */
+            timeout--;
+        }
+        if (timeout == 0) {
+            gpu_cmd_timeout++;
+            /* GPU-C1: Use uart_printf, NOT kprintf — we hold gpu_lock.
+             * kprintf → fbconsole → gpu_flush → deadlock on gpu_lock. */
+            uart_printf("[gpu] TIMEOUT ok=%u tout=%u avail=%u used=%u last=%u\n",
+                    gpu_cmd_ok, gpu_cmd_timeout,
+                    vq->avail->idx, vq_used_idx(vq), vq->last_used_idx);
+            /* Leak descriptors on timeout (GPU-M4/M5) */
+            return -1;
+        }
+    }
+
+done:
+    gpu_cmd_ok++;
+    vq->last_used_idx++;
+
+    /* ACK interrupt */
+    uint32_t isr = mmio_read32(gpudev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
+    if (isr)
+        mmio_write32(gpudev.base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
+
+    /* Free descriptor chain */
+    gpu_free_chain(vq, head_desc);
+
+    return 0;
+}
+
+/*
  * gpu_submit_cmd - Submit a command to the controlq and wait for response
  *
  * @req_buf:  Physical address of request buffer
@@ -280,35 +415,20 @@ static void gpu_free_chain(struct virtqueue *vq, uint32_t head)
  * @resp_buf: Physical address of response buffer
  * @resp_len: Length of response buffer in bytes
  *
- * gpu_lock must be held by the caller (with IRQs saved).
- *
- * IMPORTANT: During the polling wait for device completion, this function
- * temporarily releases gpu_lock and re-enables IRQs so that timer ticks,
- * HID interrupts, and other system activity can proceed.  The lock is
- * re-acquired before reading the response and freeing descriptors.
- *
- * This matches the pattern used by real VirtIO drivers on XNU/Linux: the
- * virtqueue submission is serialised by the lock, but the completion wait
- * must not hold a spinlock with IRQs masked — doing so would starve the
- * timer (100 Hz scheduler tick) and make the system appear completely
- * frozen during every GPU flush.
- *
- * @irq_flags: pointer to the caller's saved IRQ flags (from
- *             spin_lock_irqsave) — used to restore/re-save around the
- *             poll loop.
- *
  * Returns the response type (VIRTIO_GPU_RESP_*) or 0 on queue error.
  */
 static uint32_t gpu_submit_cmd(void *req_buf, uint32_t req_len,
-                               void *resp_buf, uint32_t resp_len,
-                               uint64_t *irq_flags)
+                               void *resp_buf, uint32_t resp_len)
 {
     struct virtqueue *vq = &gpudev.vq[0];
 
     int d0 = gpu_alloc_desc(vq);
     int d1 = gpu_alloc_desc(vq);
     if (d0 < 0 || d1 < 0) {
-        kprintf("[virtio-gpu] no free descriptors\n");
+        gpu_cmd_nodesc++;
+        if (gpu_cmd_nodesc <= 5 || (gpu_cmd_nodesc % 100) == 0)
+            kprintf("[virtio-gpu] no desc (ok=%u tout=%u nodesc=%u)\n",
+                    gpu_cmd_ok, gpu_cmd_timeout, gpu_cmd_nodesc);
         if (d0 >= 0) gpu_free_desc(vq, (uint32_t)d0);
         if (d1 >= 0) gpu_free_desc(vq, (uint32_t)d1);
         return 0;
@@ -334,75 +454,15 @@ static uint32_t gpu_submit_cmd(void *req_buf, uint32_t req_len,
 
     /* Notify device (queue 0) */
     mmio_write32(gpudev.base + VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+    dsb();
 
-    /*
-     * Release the lock and re-enable IRQs before polling.
-     *
-     * Under QEMU TCG, the emulated CPU and the VirtIO device backend
-     * share the same host thread (or a small pool).  Spinning with IRQs
-     * disabled prevents the host from servicing the virtqueue — the
-     * device response never appears and the poll loop burns through its
-     * entire timeout budget, blocking the system for ~0.5–1 second per
-     * flush (with two flushes per frame, that is 1–2 s of dead time at
-     * 60 Hz).
-     *
-     * By releasing the lock here we allow:
-     *   • Timer interrupts to fire (scheduler remains responsive)
-     *   • The QEMU host thread to process the virtqueue
-     *   • Other cores to make progress
-     *
-     * The only state we need to protect after this point is the used
-     * ring index and the descriptor chain — we re-acquire the lock
-     * before touching those.
-     */
-    uint16_t saved_last_used = vq->last_used_idx;
-    uint32_t saved_d0 = (uint32_t)d0;
-
-    spin_unlock_irqrestore(&gpu_lock, *irq_flags);
-
-    /* Poll for completion with timeout — IRQs ENABLED */
-    {
-        uint32_t timeout = 10000000;
-        while (*(volatile uint16_t *)&vq->used->idx == saved_last_used &&
-               timeout > 0) {
-            dsb();
-            /*
-             * Yield hint: on ARM64, WFE (Wait For Event) puts the core
-             * into a low-power state until an event (e.g. SEV from
-             * another core, or an interrupt) occurs.  This dramatically
-             * reduces host CPU usage under QEMU TCG and lets the device
-             * backend make progress.
-             */
-            __asm__ volatile("wfe" ::: "memory");
-            timeout--;
-        }
-    }
-
-    /* Re-acquire the lock for response handling and descriptor cleanup */
-    spin_lock_irqsave(&gpu_lock, irq_flags);
-
-    if (*(volatile uint16_t *)&vq->used->idx == saved_last_used) {
-        kprintf("[virtio-gpu] cmd2 TIMEOUT (avail=%u used=%u last=%u)\n",
-                vq->avail->idx, vq->used->idx, vq->last_used_idx);
-        gpu_free_chain(vq, saved_d0);
+    /* Poll for completion with IRQs briefly enabled */
+    if (gpu_poll_completion(vq, (uint32_t)d0) < 0)
         return 0;
-    }
-
-    vq->last_used_idx++;
-
-    /* ACK interrupt */
-    uint32_t isr = mmio_read32(gpudev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (isr)
-        mmio_write32(gpudev.base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
     /* Read response type */
     struct virtio_gpu_ctrl_hdr *resp_hdr = (struct virtio_gpu_ctrl_hdr *)resp_buf;
-    uint32_t resp_type = resp_hdr->type;
-
-    /* Free descriptor chain */
-    gpu_free_chain(vq, saved_d0);
-
-    return resp_type;
+    return resp_hdr->type;
 }
 
 /*
@@ -412,13 +472,10 @@ static uint32_t gpu_submit_cmd(void *req_buf, uint32_t req_len,
  *   desc 0: command header (device-readable)
  *   desc 1: mem_entries array (device-readable)
  *   desc 2: response (device-writable)
- *
- * Same lock-release-during-poll pattern as gpu_submit_cmd.
  */
 static uint32_t gpu_submit_cmd_3desc(void *req_buf, uint32_t req_len,
                                      void *data_buf, uint32_t data_len,
-                                     void *resp_buf, uint32_t resp_len,
-                                     uint64_t *irq_flags)
+                                     void *resp_buf, uint32_t resp_len)
 {
     struct virtqueue *vq = &gpudev.vq[0];
 
@@ -426,7 +483,6 @@ static uint32_t gpu_submit_cmd_3desc(void *req_buf, uint32_t req_len,
     int d1 = gpu_alloc_desc(vq);
     int d2 = gpu_alloc_desc(vq);
     if (d0 < 0 || d1 < 0 || d2 < 0) {
-        kprintf("[virtio-gpu] no free descriptors (3-chain)\n");
         if (d0 >= 0) gpu_free_desc(vq, (uint32_t)d0);
         if (d1 >= 0) gpu_free_desc(vq, (uint32_t)d1);
         if (d2 >= 0) gpu_free_desc(vq, (uint32_t)d2);
@@ -459,48 +515,15 @@ static uint32_t gpu_submit_cmd_3desc(void *req_buf, uint32_t req_len,
 
     /* Notify device (queue 0) */
     mmio_write32(gpudev.base + VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+    dsb();
 
-    /* Release lock during poll (same rationale as gpu_submit_cmd) */
-    uint16_t saved_last_used = vq->last_used_idx;
-    uint32_t saved_d0 = (uint32_t)d0;
-
-    spin_unlock_irqrestore(&gpu_lock, *irq_flags);
-
-    /* Poll for completion with timeout — IRQs ENABLED */
-    {
-        uint32_t timeout = 10000000;
-        while (*(volatile uint16_t *)&vq->used->idx == saved_last_used &&
-               timeout > 0) {
-            dsb();
-            __asm__ volatile("wfe" ::: "memory");
-            timeout--;
-        }
-    }
-
-    spin_lock_irqsave(&gpu_lock, irq_flags);
-
-    if (*(volatile uint16_t *)&vq->used->idx == saved_last_used) {
-        kprintf("[virtio-gpu] cmd3 TIMEOUT (avail=%u used=%u last=%u)\n",
-                vq->avail->idx, vq->used->idx, vq->last_used_idx);
-        gpu_free_chain(vq, saved_d0);
+    /* Poll for completion with IRQs briefly enabled */
+    if (gpu_poll_completion(vq, (uint32_t)d0) < 0)
         return 0;
-    }
-
-    vq->last_used_idx++;
-
-    /* ACK interrupt */
-    uint32_t isr = mmio_read32(gpudev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (isr)
-        mmio_write32(gpudev.base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
     /* Read response type */
     struct virtio_gpu_ctrl_hdr *resp_hdr = (struct virtio_gpu_ctrl_hdr *)resp_buf;
-    uint32_t resp_type = resp_hdr->type;
-
-    /* Free descriptor chain */
-    gpu_free_chain(vq, saved_d0);
-
-    return resp_type;
+    return resp_hdr->type;
 }
 
 /* ============================================================================
@@ -513,8 +536,7 @@ static uint32_t gpu_submit_cmd_3desc(void *req_buf, uint32_t req_len,
  * Returns the preferred width and height of scanout 0.
  * If no display info is available, returns the defaults.
  */
-static void gpu_get_display_info(uint32_t *width, uint32_t *height,
-                                 uint64_t *irq_flags)
+static void gpu_get_display_info(uint32_t *width, uint32_t *height)
 {
     /* Build request */
     struct virtio_gpu_ctrl_hdr *req = (struct virtio_gpu_ctrl_hdr *)gpu_req_buf;
@@ -528,8 +550,7 @@ static void gpu_get_display_info(uint32_t *width, uint32_t *height,
 
     uint32_t resp = gpu_submit_cmd(
         req, sizeof(struct virtio_gpu_ctrl_hdr),
-        gpu_resp_buf, sizeof(struct virtio_gpu_resp_display_info),
-        irq_flags);
+        gpu_resp_buf, sizeof(struct virtio_gpu_resp_display_info));
 
     if (resp == VIRTIO_GPU_RESP_OK_DISPLAY_INFO) {
         struct virtio_gpu_resp_display_info *info =
@@ -560,8 +581,7 @@ static void gpu_get_display_info(uint32_t *width, uint32_t *height,
  * gpu_resource_create_2d - Create a 2D resource
  */
 static int gpu_resource_create_2d(uint32_t resource_id, uint32_t format,
-                                  uint32_t width, uint32_t height,
-                                  uint64_t *irq_flags)
+                                  uint32_t width, uint32_t height)
 {
     struct virtio_gpu_resource_create_2d *req =
         (struct virtio_gpu_resource_create_2d *)gpu_req_buf;
@@ -579,8 +599,7 @@ static int gpu_resource_create_2d(uint32_t resource_id, uint32_t format,
 
     uint32_t resp = gpu_submit_cmd(
         req, sizeof(*req),
-        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr),
-        irq_flags);
+        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
 
     if (resp != VIRTIO_GPU_RESP_OK_NODATA) {
         kprintf("[virtio-gpu] RESOURCE_CREATE_2D failed: resp=0x%x\n", resp);
@@ -596,8 +615,7 @@ static int gpu_resource_create_2d(uint32_t resource_id, uint32_t format,
  * gpu_resource_attach_backing - Attach guest physical pages to a resource
  */
 static int gpu_resource_attach_backing(uint32_t resource_id,
-                                       uint64_t *pages, uint32_t num_pages,
-                                       uint64_t *irq_flags)
+                                       uint64_t *pages, uint32_t num_pages)
 {
     if (num_pages > FB_ATTACH_MAX_ENTRIES) {
         kprintf("[virtio-gpu] too many backing pages (%u > %u)\n",
@@ -634,8 +652,7 @@ static int gpu_resource_attach_backing(uint32_t resource_id,
     uint32_t resp = gpu_submit_cmd_3desc(
         req, sizeof(*req),
         gpu_mem_entries, num_pages * sizeof(struct virtio_gpu_mem_entry),
-        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr),
-        irq_flags);
+        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
 
     if (resp != VIRTIO_GPU_RESP_OK_NODATA) {
         kprintf("[virtio-gpu] RESOURCE_ATTACH_BACKING failed: resp=0x%x\n",
@@ -652,8 +669,7 @@ static int gpu_resource_attach_backing(uint32_t resource_id,
  * gpu_set_scanout - Connect a resource to a display scanout
  */
 static int gpu_set_scanout(uint32_t scanout_id, uint32_t resource_id,
-                           uint32_t width, uint32_t height,
-                           uint64_t *irq_flags)
+                           uint32_t width, uint32_t height)
 {
     struct virtio_gpu_set_scanout *req =
         (struct virtio_gpu_set_scanout *)gpu_req_buf;
@@ -673,8 +689,7 @@ static int gpu_set_scanout(uint32_t scanout_id, uint32_t resource_id,
 
     uint32_t resp = gpu_submit_cmd(
         req, sizeof(*req),
-        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr),
-        irq_flags);
+        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
 
     if (resp != VIRTIO_GPU_RESP_OK_NODATA) {
         kprintf("[virtio-gpu] SET_SCANOUT failed: resp=0x%x\n", resp);
@@ -691,8 +706,7 @@ static int gpu_set_scanout(uint32_t scanout_id, uint32_t resource_id,
  */
 static int gpu_transfer_to_host_2d(uint32_t resource_id,
                                    uint32_t x, uint32_t y,
-                                   uint32_t width, uint32_t height,
-                                   uint64_t *irq_flags)
+                                   uint32_t width, uint32_t height)
 {
     struct virtio_gpu_transfer_to_host_2d *req =
         (struct virtio_gpu_transfer_to_host_2d *)gpu_req_buf;
@@ -721,11 +735,14 @@ static int gpu_transfer_to_host_2d(uint32_t resource_id,
 
     uint32_t resp = gpu_submit_cmd(
         req, sizeof(*req),
-        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr),
-        irq_flags);
+        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
 
     if (resp != VIRTIO_GPU_RESP_OK_NODATA) {
-        kprintf("[virtio-gpu] TRANSFER_TO_HOST_2D failed: resp=0x%x\n", resp);
+        /*
+         * GPU-C1: Do NOT kprintf here — this function is called under
+         * gpu_lock from virtio_gpu_flush().  kprintf → fbconsole →
+         * virtio_gpu_flush() would deadlock.
+         */
         return -1;
     }
 
@@ -737,8 +754,7 @@ static int gpu_transfer_to_host_2d(uint32_t resource_id,
  */
 static int gpu_resource_flush(uint32_t resource_id,
                               uint32_t x, uint32_t y,
-                              uint32_t width, uint32_t height,
-                              uint64_t *irq_flags)
+                              uint32_t width, uint32_t height)
 {
     struct virtio_gpu_resource_flush *req =
         (struct virtio_gpu_resource_flush *)gpu_req_buf;
@@ -757,11 +773,10 @@ static int gpu_resource_flush(uint32_t resource_id,
 
     uint32_t resp = gpu_submit_cmd(
         req, sizeof(*req),
-        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr),
-        irq_flags);
+        gpu_resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
 
     if (resp != VIRTIO_GPU_RESP_OK_NODATA) {
-        kprintf("[virtio-gpu] RESOURCE_FLUSH failed: resp=0x%x\n", resp);
+        /* GPU-C1: No kprintf under gpu_lock (see gpu_transfer_to_host_2d). */
         return -1;
     }
 
@@ -824,29 +839,42 @@ int virtio_gpu_init(void)
 
         /*
          * Step 1: Query display info for preferred resolution
+         *
+         * GPU-C2: gpu_get_display_info uses shared static buffers
+         * (gpu_req_buf/gpu_resp_buf), so it must be called under
+         * gpu_lock to prevent concurrent access.
          */
         uint32_t fb_width = DEFAULT_FB_WIDTH;
         uint32_t fb_height = DEFAULT_FB_HEIGHT;
-
-        /*
-         * Step 1: Query display info (needs gpu_lock for command submission)
-         *
-         * The irq_flags pointer is threaded through all command wrappers →
-         * gpu_submit_cmd so that the poll loop can temporarily release the
-         * lock and re-enable IRQs while waiting for the device.
-         */
         {
-            uint64_t flags;
-            spin_lock_irqsave(&gpu_lock, &flags);
-            gpu_get_display_info(&fb_width, &fb_height, &flags);
-            spin_unlock_irqrestore(&gpu_lock, flags);
+            uint64_t di_flags;
+            spin_lock_irqsave(&gpu_lock, &di_flags);
+            gpu_get_display_info(&fb_width, &fb_height);
+            spin_unlock_irqrestore(&gpu_lock, di_flags);
         }
 
         /*
-         * Step 2: Allocate framebuffer backing pages (outside lock — PMM
-         * may sleep or do significant work)
+         * GPU-H4: Validate device-reported dimensions to prevent
+         * integer overflow in fb_width * fb_height * 4.
+         * Cap at 4096x4096 (67MB) — anything larger is suspect.
          */
-        uint32_t fb_size = fb_width * fb_height * FB_BYTES_PER_PIXEL;
+        if (fb_width == 0 || fb_height == 0 ||
+            fb_width > 4096 || fb_height > 4096) {
+            kprintf("[virtio-gpu] Invalid display dimensions %ux%u, "
+                    "falling back to defaults\n", fb_width, fb_height);
+            fb_width  = DEFAULT_FB_WIDTH;
+            fb_height = DEFAULT_FB_HEIGHT;
+        }
+
+        /*
+         * Step 2: Allocate framebuffer backing pages
+         *
+         * GPU-H4: Use uint64_t for the multiplication to prevent
+         * 32-bit overflow (e.g. 4096 * 4096 * 4 = 64MB > UINT32_MAX is fine,
+         * but catch truly absurd values above).
+         */
+        uint64_t fb_size64 = (uint64_t)fb_width * fb_height * FB_BYTES_PER_PIXEL;
+        uint32_t fb_size = (uint32_t)fb_size64;
         uint32_t pages_needed = (fb_size + PAGE_SIZE - 1) / PAGE_SIZE;
         if (pages_needed > FB_MAX_PAGES) {
             kprintf("[virtio-gpu] Framebuffer too large (%u pages > %u max)\n",
@@ -904,23 +932,18 @@ int virtio_gpu_init(void)
         fb_num_pages = pages_needed;
 
         /*
-         * Steps 3-6: GPU resource setup (needs gpu_lock).
-         * Re-acquire the lock released after display info query.
-         */
-        uint64_t irq_flags;
-        spin_lock_irqsave(&gpu_lock, &irq_flags);
-
-        /*
          * Step 3: Create a 2D resource
          *
          * We use B8G8R8X8_UNORM (format 2) which is the most widely
          * supported format in QEMU's virtio-gpu. This gives us BGRX
          * byte order (common on x86/ARM little-endian).
          */
+        uint64_t irq_flags;
+        spin_lock_irqsave(&gpu_lock, &irq_flags);
+
         if (gpu_resource_create_2d(FB_RESOURCE_ID,
                                    VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
-                                   fb_width, fb_height,
-                                   &irq_flags) < 0) {
+                                   fb_width, fb_height) < 0) {
             spin_unlock_irqrestore(&gpu_lock, irq_flags);
             return -1;
         }
@@ -929,8 +952,7 @@ int virtio_gpu_init(void)
          * Step 4: Attach backing pages to the resource
          */
         if (gpu_resource_attach_backing(FB_RESOURCE_ID,
-                                        fb_pages, fb_num_pages,
-                                        &irq_flags) < 0) {
+                                        fb_pages, fb_num_pages) < 0) {
             spin_unlock_irqrestore(&gpu_lock, irq_flags);
             return -1;
         }
@@ -938,8 +960,7 @@ int virtio_gpu_init(void)
         /*
          * Step 5: Set scanout 0 to display the resource
          */
-        if (gpu_set_scanout(0, FB_RESOURCE_ID, fb_width, fb_height,
-                            &irq_flags) < 0) {
+        if (gpu_set_scanout(0, FB_RESOURCE_ID, fb_width, fb_height) < 0) {
             spin_unlock_irqrestore(&gpu_lock, irq_flags);
             return -1;
         }
@@ -947,21 +968,28 @@ int virtio_gpu_init(void)
         /*
          * Step 6: Initial transfer + flush to show the (blank) framebuffer
          */
-        gpu_transfer_to_host_2d(FB_RESOURCE_ID, 0, 0, fb_width, fb_height,
-                                &irq_flags);
-        gpu_resource_flush(FB_RESOURCE_ID, 0, 0, fb_width, fb_height,
-                           &irq_flags);
+        gpu_transfer_to_host_2d(FB_RESOURCE_ID, 0, 0, fb_width, fb_height);
+        gpu_resource_flush(FB_RESOURCE_ID, 0, 0, fb_width, fb_height);
 
-        spin_unlock_irqrestore(&gpu_lock, irq_flags);
-
-        /* Fill in framebuffer info */
+        /*
+         * GPU-M1: Fill in framebuffer info INSIDE the lock to prevent
+         * torn reads from concurrent readers.
+         *
+         * GPU-M2: Write gpu_fb.active LAST with a barrier to ensure
+         * all other fields are visible before readers see active=true.
+         * Also set gpudev_found with proper ordering.
+         */
         gpu_fb.phys_addr = fb_pages[0];
         gpu_fb.width     = fb_width;
         gpu_fb.height    = fb_height;
         gpu_fb.pitch     = fb_width * FB_BYTES_PER_PIXEL;
         gpu_fb.bpp       = FB_BPP;
         gpu_fb.format    = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
+        dsb();  /* GPU-M2: ensure fields visible before active flag */
         gpu_fb.active    = true;
+        dsb();  /* GPU-M2: ensure active visible before lock release */
+
+        spin_unlock_irqrestore(&gpu_lock, irq_flags);
 
         kprintf("[virtio-gpu] Framebuffer ready: %ux%u, %u bpp, pitch=%u\n",
                 gpu_fb.width, gpu_fb.height, gpu_fb.bpp, gpu_fb.pitch);
@@ -975,18 +1003,43 @@ int virtio_gpu_init(void)
     return -1;
 }
 
+static uint32_t gpu_flush_count = 0;
+
 void virtio_gpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
 {
     if (!gpudev_found || !gpu_fb.active)
         return;
 
+    /*
+     * GPU-M6: Clamp the flush rectangle to the framebuffer dimensions.
+     */
+    uint32_t fb_w = gpu_fb.width;
+    uint32_t fb_h = gpu_fb.height;
+
+    if (x >= fb_w || y >= fb_h)
+        return;
+    if (width > fb_w - x)
+        width = fb_w - x;
+    if (height > fb_h - y)
+        height = fb_h - y;
+    if (width == 0 || height == 0)
+        return;
+
+    gpu_flush_count++;
+
     uint64_t flags;
     spin_lock_irqsave(&gpu_lock, &flags);
 
-    gpu_transfer_to_host_2d(FB_RESOURCE_ID, x, y, width, height, &flags);
-    gpu_resource_flush(FB_RESOURCE_ID, x, y, width, height, &flags);
+    int r1 = gpu_transfer_to_host_2d(FB_RESOURCE_ID, x, y, width, height);
+    int r2 = gpu_resource_flush(FB_RESOURCE_ID, x, y, width, height);
 
     spin_unlock_irqrestore(&gpu_lock, flags);
+
+    if (r1 < 0 || r2 < 0) {
+        uart_printf("[gpu] FAIL #%u xfer=%d flush=%d ok=%u t=%u nd=%u\n",
+                gpu_flush_count, r1, r2,
+                gpu_cmd_ok, gpu_cmd_timeout, gpu_cmd_nodesc);
+    }
 }
 
 void virtio_gpu_flush_all(void)
@@ -1015,12 +1068,17 @@ void virtio_gpu_irq_handler(void)
         return;
 
     /*
-     * ACK the interrupt. For our polling-based command submission,
-     * we don't actually need to process used buffers here — the
-     * polling loop in gpu_submit_cmd already handles that.
+     * ACK the interrupt unconditionally. The INTERRUPT_STATUS and
+     * INTERRUPT_ACK registers are simple MMIO — reading ISR and
+     * writing ACK is atomic at the device level and doesn't need
+     * the gpu_lock. The poll loop in gpu_submit_cmd also ACKs
+     * the interrupt after completion, but double-ACK is harmless
+     * (ACKing an already-cleared bit is a no-op).
      *
-     * However, the device may fire interrupts for display configuration
-     * changes (EVENT_DISPLAY). We acknowledge them here.
+     * We must NOT use spin_trylock here. If the poll loop holds
+     * gpu_lock and we fail to ACK, the level-triggered interrupt
+     * stays asserted, causing an interrupt storm that prevents
+     * the poll loop from making progress.
      */
     uint32_t isr = mmio_read32(gpudev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
     if (isr)

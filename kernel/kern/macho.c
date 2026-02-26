@@ -812,18 +812,20 @@ load_return_t macho_load(const char *path, struct vm_space *space,
      * macOS uses a random slide in the range [0, 1GB) with page alignment.
      * A typical scheme: 16MB aligned, 4 bits of entropy (16 positions).
      *
-     * For now, ASLR is DISABLED (slide=0) to ensure stability. Enable by
-     * uncommenting the block below after thorough testing:
+     * ASLR: Enabled. Uses the virtual counter (cntvct_el0) as an entropy
+     * source. 4 bits of entropy (16 slots), 16MB aligned.
      *
-     *   if (hdr.flags & MH_PIE) {
-     *       uint64_t entropy;
-     *       __asm__ volatile("mrs %0, cntvct_el0" : "=r"(entropy));
-     *       uint64_t slot = ((entropy >> 8) & 0xF) + 1;
-     *       aslr_slide = (int64_t)(slot << 24);
-     *   }
+     * Only applied to MH_PIE (position-independent) executables.
+     * The slide is always > 0 (slot range [1..16]) to ensure the
+     * binary is actually relocated from its linked base address.
      */
     int64_t aslr_slide = 0;
-    (void)hdr.flags;  /* Suppress unused warning until ASLR enabled */
+    if (hdr.flags & MH_PIE) {
+        uint64_t entropy;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(entropy));
+        uint64_t slot = ((entropy >> 8) & 0xF) + 1;
+        aslr_slide = (int64_t)(slot << 24);  /* 16MB aligned */
+    }
 
     load_return_t lret = parse_machfile(vp, &hdr, space, 1,
                                         aslr_slide, result, NULL);

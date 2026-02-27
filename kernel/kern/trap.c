@@ -143,11 +143,33 @@ void trap_irq_el1(struct trap_frame *tf)
 
     gic_end_of_interrupt(irq);
 
-    /* Check for preemption after handling kernel-mode IRQ */
+    /* Check for preemption after handling kernel-mode IRQ.
+     *
+     * CRITICAL: Only preempt if the current SP is within the current
+     * thread's kernel stack. During early boot (before load_context
+     * jumps into the bootstrap thread), the CPU runs on the boot stack
+     * with current_thread = idle_thread. If we call sched_switch() in
+     * that state, the boot stack SP gets saved into the idle thread's
+     * context — corrupting it permanently. When the idle thread later
+     * resumes, it runs on the (abandoned) boot stack and crashes.
+     *
+     * This mirrors XNU's approach where kernel_bootstrap runs with
+     * preemption disabled until the scheduler is fully operational.
+     */
     struct cpu_data *cd;
     __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
     if (cd && cd->need_resched) {
-        sched_switch();
+        struct thread *cur = cd->current_thread;
+        if (cur && cur->kernel_stack) {
+            uint64_t sp_val;
+            __asm__ volatile("mov %0, sp" : "=r"(sp_val));
+            uint64_t klo = (uint64_t)cur->kernel_stack;
+            uint64_t khi = klo + cur->kernel_stack_size;
+            if (sp_val >= klo && sp_val < khi) {
+                sched_switch();
+            }
+            /* else: SP not in thread's kernel stack (boot stack) — skip preemption */
+        }
     }
 }
 
@@ -204,6 +226,53 @@ void trap_sync_el0(struct trap_frame *tf)
             struct thread *th = current_thread_get();
             if (th != NULL)
                 signal_check(th, tf);
+        }
+
+        /* Sanity check: trap frame must return to EL0 (user mode).
+         * If SPSR indicates EL1 or ELR is a kernel address, something
+         * has corrupted the trap frame and eret would crash. */
+        {
+            uint64_t check_spsr = tf->spsr & 0xF;
+            uint64_t check_elr = tf->elr;
+            if (check_spsr != 0x0) {  /* 0x0 = EL0t */
+                kprintf("[trap] BUG: tf->spsr=0x%lx (mode=0x%lx, expected EL0t=0x0) tf=0x%lx\n",
+                        tf->spsr, check_spsr, (uint64_t)tf);
+                kprintf("[trap]   elr=0x%lx x30=0x%lx pid=%d\n",
+                        tf->elr, tf->regs[30],
+                        current_thread_get() && current_thread_get()->task ?
+                        current_thread_get()->task->pid : -1);
+                panic("trap frame SPSR corrupted before eret");
+            }
+            if (check_elr >= 0x40000000UL && check_elr < 0x80000000UL) {
+                kprintf("[trap] BUG: tf->elr=0x%lx is a kernel address! tf=0x%lx\n",
+                        check_elr, (uint64_t)tf);
+                panic("trap frame ELR corrupted before eret");
+            }
+        }
+
+        /* Sanity check: TTBR0 must match this process's page table.
+         * If TTBR0 is the kernel PGD or another process's PGD, the
+         * user-mode return will execute with wrong mappings �� crash. */
+        {
+            struct thread *th2 = current_thread_get();
+            if (th2 && th2->task && th2->task->vm_space &&
+                th2->task->vm_space->pgd) {
+                uint64_t cur_ttbr0;
+                __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(cur_ttbr0));
+                uint64_t expected_pgd = (uint64_t)th2->task->vm_space->pgd;
+                uint64_t ttbr0_pgd = cur_ttbr0 & 0x0000FFFFFFFFF000UL;
+                if (ttbr0_pgd != expected_pgd) {
+                    kprintf("[trap] BUG: TTBR0=0x%lx (pgd=0x%lx) but expected pgd=0x%lx\n",
+                            cur_ttbr0, ttbr0_pgd, expected_pgd);
+                    kprintf("[trap]   pid=%d tid=%lu elr=0x%lx\n",
+                            th2->task->pid, th2->tid, tf->elr);
+                    /* Fix it so we don't crash, then panic with info */
+                    vmm_switch_space(th2->task->vm_space);
+                    kprintf("[trap]   FIXED: switched TTBR0 to correct pgd\n");
+                    /* Don't panic — let it continue so we can see if this
+                     * is the root cause of the freezes/crashes */
+                }
+            }
         }
         break;
 
@@ -568,6 +637,26 @@ void trap_irq_el0(struct trap_frame *tf)
         struct thread *th = current_thread_get();
         if (th != NULL)
             signal_check(th, tf);
+    }
+
+    /* Sanity check: TTBR0 must match this process's page table before eret */
+    {
+        struct thread *th2 = current_thread_get();
+        if (th2 && th2->task && th2->task->vm_space &&
+            th2->task->vm_space->pgd) {
+            uint64_t cur_ttbr0;
+            __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(cur_ttbr0));
+            uint64_t expected_pgd = (uint64_t)th2->task->vm_space->pgd;
+            uint64_t ttbr0_pgd = cur_ttbr0 & 0x0000FFFFFFFFF000UL;
+            if (ttbr0_pgd != expected_pgd) {
+                kprintf("[trap_irq_el0] BUG: TTBR0=0x%lx (pgd=0x%lx) but expected pgd=0x%lx\n",
+                        cur_ttbr0, ttbr0_pgd, expected_pgd);
+                kprintf("[trap_irq_el0]   pid=%d tid=%lu elr=0x%lx\n",
+                        th2->task->pid, th2->tid, tf->elr);
+                vmm_switch_space(th2->task->vm_space);
+                kprintf("[trap_irq_el0]   FIXED: switched TTBR0 to correct pgd\n");
+            }
+        }
     }
 }
 

@@ -1374,6 +1374,10 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
     /* Update process state */
     strncpy_p(p->p_comm, k_path, PROC_NAME_MAX - 1);
 
+    /* Keep task name in sync with proc name (for diagnostics) */
+    if (p->p_task)
+        strncpy_p(p->p_task->name, k_path, sizeof(p->p_task->name) - 1);
+
     /* Switch to the new VM space */
     vmm_switch_space(p->p_vmspace);
 

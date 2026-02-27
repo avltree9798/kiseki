@@ -5396,7 +5396,8 @@ EXPORT int getdtablesize(void)
 EXPORT long sysconf(int name)
 {
     switch (name) {
-    case 11: /* _SC_PAGESIZE */
+    case 11: /* _SC_PAGESIZE (POSIX/Kiseki) */
+    case 29: /* _SC_PAGESIZE (macOS/BSD) */
         return 4096;
     case 5:  /* _SC_OPEN_MAX */
         return 256;

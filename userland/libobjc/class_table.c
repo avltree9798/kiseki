@@ -11,6 +11,7 @@
 #include "visibility.h"
 #include <stdlib.h>
 #include <assert.h>
+#include <stdio.h>
 
 typedef void (*loadIMP)(Class, SEL);
 
@@ -40,8 +41,11 @@ SEL loadSel;
 
 PRIVATE void objc_init_load_messages_table(void)
 {
+	fprintf(stderr, "[libobjc] objc_init_load_messages_table: begin\n");
 	load_messages_initialize(&load_table, 4096);
+	fprintf(stderr, "[libobjc] objc_init_load_messages_table: load_table initialized\n");
 	loadSel = sel_registerName("load");
+	fprintf(stderr, "[libobjc] objc_init_load_messages_table: done\n");
 }
 
 PRIVATE void objc_send_load_message(Class class)
@@ -142,8 +146,12 @@ PRIVATE Class class_table_next(void **e)
 PRIVATE BOOL objc_resolve_class(Class cls);
 PRIVATE void init_class_tables(void)
 {
+	fprintf(stderr, "[libobjc] init_class_tables: begin\n");
+	fprintf(stderr, "[libobjc] init_class_tables: calling class_table_internal_initialize(4096)\n");
 	class_table_internal_initialize(&class_table, 4096);
+	fprintf(stderr, "[libobjc] init_class_tables: class_table_internal done, calling objc_init_load_messages_table\n");
 	objc_init_load_messages_table();
+	fprintf(stderr, "[libobjc] init_class_tables: done\n");
 }
 
 ////////////////////////////////////////////////////////////////////////////////

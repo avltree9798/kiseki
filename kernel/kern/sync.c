@@ -36,14 +36,34 @@ void spin_init(spinlock_t *lock)
 
 void spin_lock(spinlock_t *lock)
 {
+    /*
+     * Bug 15 fix: Use YIELD-based polling instead of WFE.
+     *
+     * On QEMU TCG (single-threaded vCPU emulation), WFE blocks the
+     * entire vCPU until an event (SEV). Because all vCPUs share one
+     * host thread, a vCPU blocked in WFE can starve the lock-holding
+     * vCPU from running, preventing it from ever releasing the lock.
+     *
+     * YIELD is the standard ARM hint for spin-waiting. On QEMU TCG,
+     * it causes the emulator to consider switching to another vCPU,
+     * which lets the lock holder make progress. On real hardware,
+     * YIELD is a NOP or a low-power hint — either way it's safe.
+     *
+     * The loop structure:
+     *   1. Try to acquire (ldaxr + stxr)
+     *   2. If locked, YIELD and retry
+     *   3. If stxr failed (contention), retry from ldaxr
+     */
     uint32_t tmp;
     __asm__ volatile(
-        "   sevl\n"
-        "1: wfe\n"
-        "   ldaxr   %w0, [%1]\n"
-        "   cbnz    %w0, 1b\n"
-        "   stxr    %w0, %w2, [%1]\n"
-        "   cbnz    %w0, 1b\n"
+        "1: ldaxr   %w0, [%1]\n"       /* load lock value (acquire) */
+        "   cbnz    %w0, 2f\n"         /* if locked, go to spin */
+        "   stxr    %w0, %w2, [%1]\n"  /* try to store 1 (acquire) */
+        "   cbnz    %w0, 1b\n"         /* if stxr failed, retry */
+        "   b       3f\n"              /* acquired — done */
+        "2: yield\n"                    /* hint: we're spinning */
+        "   b       1b\n"              /* retry */
+        "3:\n"
         : "=&r"(tmp)
         : "r"(&lock->locked), "r"(1)
         : "memory"
@@ -54,6 +74,7 @@ void spin_unlock(spinlock_t *lock)
 {
     __asm__ volatile(
         "stlr   %w0, [%1]\n"
+        "sev\n"             /* Wake cores in WFE (kept for real hardware) */
         :
         : "r"(0), "r"(&lock->locked)
         : "memory"
@@ -79,12 +100,24 @@ bool spin_trylock(spinlock_t *lock)
 
 void spin_lock_irqsave(spinlock_t *lock, uint64_t *flags)
 {
+    if (__builtin_expect(lock == NULL, 0)) {
+        kprintf("[BUG] spin_lock_irqsave: NULL lock! LR=0x%lx\n",
+                (uint64_t)__builtin_return_address(0));
+        *flags = irq_save();
+        return;
+    }
     *flags = irq_save();
     spin_lock(lock);
 }
 
 void spin_unlock_irqrestore(spinlock_t *lock, uint64_t flags)
 {
+    if (__builtin_expect(lock == NULL, 0)) {
+        kprintf("[BUG] spin_unlock_irqrestore: NULL lock! LR=0x%lx\n",
+                (uint64_t)__builtin_return_address(0));
+        irq_restore(flags);
+        return;
+    }
     spin_unlock(lock);
     irq_restore(flags);
 }

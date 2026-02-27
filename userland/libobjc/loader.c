@@ -40,6 +40,7 @@ static void init_runtime(void)
 	static BOOL first_run = YES;
 	if (first_run)
 	{
+		fprintf(stderr, "[libobjc] init_runtime: begin\n");
 		// Create the main runtime lock.  This is not safe in theory, but in
 		// practice the first time that this function is called will be in the
 		// loader, from the main thread.  Future loaders may run concurrently,
@@ -51,18 +52,28 @@ static void init_runtime(void)
 		// call dlopen() or equivalent, and the platform's implementation of
 		// this does not perform any synchronization.
 		INIT_LOCK(runtime_mutex);
+		fprintf(stderr, "[libobjc] init_runtime: INIT_LOCK done\n");
 		// Create the various tables that the runtime needs.
 		init_selector_tables();
+		fprintf(stderr, "[libobjc] init_runtime: init_selector_tables done\n");
 		init_dispatch_tables();
+		fprintf(stderr, "[libobjc] init_runtime: init_dispatch_tables done\n");
 		init_protocol_table();
+		fprintf(stderr, "[libobjc] init_runtime: init_protocol_table done\n");
 		init_class_tables();
+		fprintf(stderr, "[libobjc] init_runtime: init_class_tables done\n");
 		init_alias_table();
+		fprintf(stderr, "[libobjc] init_runtime: init_alias_table done\n");
 		init_early_blocks();
+		fprintf(stderr, "[libobjc] init_runtime: init_early_blocks done\n");
 		init_arc();
+		fprintf(stderr, "[libobjc] init_runtime: init_arc done\n");
 #if defined(EMBEDDED_BLOCKS_RUNTIME)
 		init_trampolines();
+		fprintf(stderr, "[libobjc] init_runtime: init_trampolines done\n");
 #endif
 		init_builtin_classes();
+		fprintf(stderr, "[libobjc] init_runtime: init_builtin_classes done\n");
 		first_run = NO;
 		if (getenv("LIBOBJC_MEMORY_PROFILE"))
 		{
@@ -80,6 +91,7 @@ static void init_runtime(void)
 		if (_dispatch_end_NSAutoReleasePool != 0) {
 			_dispatch_end_NSAutoReleasePool = objc_autoreleasePoolPop;
 		}
+		fprintf(stderr, "[libobjc] init_runtime: complete\n");
 	}
 }
 
@@ -313,7 +325,16 @@ OBJC_PUBLIC void __objc_load(struct objc_init *init)
 #ifdef OLDABI_COMPAT
 OBJC_PUBLIC void __objc_exec_class(struct objc_module_abi_8 *module)
 {
+	fprintf(stderr, "[libobjc] __objc_exec_class: enter, module=%p\n", (void*)module);
+	if (module) {
+		fprintf(stderr, "[libobjc]   module version=%lu size=%lu name=%s symtab=%p\n",
+			module->version, module->size,
+			module->name ? module->name : "(null)",
+			(void*)module->symbol_table);
+	}
+
 	init_runtime();
+	fprintf(stderr, "[libobjc] __objc_exec_class: init_runtime done\n");
 
 	switch (CurrentABI)
 	{
@@ -326,49 +347,78 @@ OBJC_PUBLIC void __objc_exec_class(struct objc_module_abi_8 *module)
 			fprintf(stderr, "Version 2 Objective-C ABI may not be mixed with earlier versions.\n");
 			abort();
 	}
+	fprintf(stderr, "[libobjc] __objc_exec_class: ABI check done (ABI=%d)\n", (int)CurrentABI);
 
 	// Check that this module uses an ABI version that we recognise.  
 	// In future, we should pass the ABI version to the class / category load
 	// functions so that we can change various structures more easily.
-	assert(objc_check_abi_version(module));
+	if (!objc_check_abi_version(module)) {
+		fprintf(stderr, "[libobjc] __objc_exec_class: ABI version check FAILED!\n");
+		abort();
+	}
+	fprintf(stderr, "[libobjc] __objc_exec_class: ABI version OK\n");
 
 
 	// The runtime mutex is held for the entire duration of a load.  It does
 	// not need to be acquired or released in any of the called load functions.
+	fprintf(stderr, "[libobjc] __objc_exec_class: about to LOCK_RUNTIME_FOR_SCOPE\n");
 	LOCK_RUNTIME_FOR_SCOPE();
+	fprintf(stderr, "[libobjc] __objc_exec_class: runtime lock acquired\n");
 
 	struct objc_symbol_table_abi_8 *symbols = module->symbol_table;
+	fprintf(stderr, "[libobjc] __objc_exec_class: symbols=%p sel_count=%lu class_count=%u cat_count=%u\n",
+		(void*)symbols, symbols->selector_count, symbols->class_count, symbols->category_count);
+
 	// Register all of the selectors used in this module.
 	if (symbols->selectors)
 	{
+		fprintf(stderr, "[libobjc] __objc_exec_class: registering %lu selectors at %p\n",
+			symbols->selector_count, (void*)symbols->selectors);
 		objc_register_selector_array(symbols->selectors,
 				symbols->selector_count);
+		fprintf(stderr, "[libobjc] __objc_exec_class: selectors registered\n");
 	}
 
 	unsigned short defs = 0;
 	// Load the classes from this module
 	for (unsigned short i=0 ; i<symbols->class_count ; i++)
 	{
-		objc_load_class(objc_upgrade_class(symbols->definitions[defs++]));
+		void *raw_def = symbols->definitions[defs];
+		fprintf(stderr, "[libobjc] __objc_exec_class: loading class %u/%u def=%p\n",
+			i, symbols->class_count, raw_def);
+		Class upgraded = objc_upgrade_class(raw_def);
+		fprintf(stderr, "[libobjc] __objc_exec_class: class upgraded to %p name=%s\n",
+			(void*)upgraded, upgraded ? upgraded->name : "(null)");
+		objc_load_class(upgraded);
+		fprintf(stderr, "[libobjc] __objc_exec_class: class loaded\n");
+		defs++;
 	}
 	unsigned int category_start = defs;
 	// Load the categories from this module
 	for (unsigned short i=0 ; i<symbols->category_count; i++)
 	{
+		fprintf(stderr, "[libobjc] __objc_exec_class: loading category %u/%u\n",
+			i, symbols->category_count);
 		objc_try_load_category(objc_upgrade_category(symbols->definitions[defs++]));
+		fprintf(stderr, "[libobjc] __objc_exec_class: category loaded\n");
 	}
 	// Load the static instances
+	fprintf(stderr, "[libobjc] __objc_exec_class: loading statics, defs=%u\n", defs);
 	struct objc_static_instance_list **statics = (void*)symbols->definitions[defs];
 	while (NULL != statics && NULL != *statics)
 	{
 		objc_init_statics(*(statics++));
 	}
+	fprintf(stderr, "[libobjc] __objc_exec_class: statics done\n");
 
 	// Load categories and statics that were deferred.
 	objc_load_buffered_categories();
+	fprintf(stderr, "[libobjc] __objc_exec_class: buffered categories done\n");
 	objc_init_buffered_statics();
+	fprintf(stderr, "[libobjc] __objc_exec_class: buffered statics done\n");
 	// Fix up the class links for loaded classes.
 	objc_resolve_class_links();
+	fprintf(stderr, "[libobjc] __objc_exec_class: class links resolved\n");
 	for (unsigned short i=0 ; i<symbols->category_count; i++)
 	{
 		struct objc_category *cat = (struct objc_category*)
@@ -380,5 +430,7 @@ OBJC_PUBLIC void __objc_exec_class(struct objc_module_abi_8 *module)
 			objc_send_load_message(class);
 		}
 	}
+	fprintf(stderr, "[libobjc] __objc_exec_class: COMPLETE for module %s\n",
+		module->name ? module->name : "(null)");
 }
 #endif

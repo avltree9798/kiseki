@@ -74,7 +74,7 @@ static uint8_t vq_pages[3 * PAGE_SIZE] __aligned(PAGE_SIZE);
 
 /* Static request header and status byte (must be physically addressable) */
 static struct virtio_blk_req blk_req_hdr __aligned(16);
-static uint8_t blk_req_status __aligned(16);
+static volatile uint8_t blk_req_status __aligned(16);
 
 /* ============================================================================
  * VirtIO MMIO Device Initialization
@@ -336,9 +336,21 @@ static int virtio_blk_rw(uint32_t type, uint64_t sector,
         return -1;
 
     struct virtqueue *vq = &blkdev.vq[0];
-    uint64_t flags;
 
-    spin_lock_irqsave(&blk_lock, &flags);
+    /*
+     * Use spin_lock (NOT spin_lock_irqsave) for the outer serialization.
+     * We need the lock to protect the shared request buffers and virtqueue
+     * state, but we must NOT disable interrupts during the poll phase.
+     *
+     * If we hold the lock with IRQs disabled while polling, any other core
+     * that tries to do disk I/O will also disable IRQs and spin on this
+     * lock. With all 4 cores stuck spinning with IRQs off, the timer never
+     * fires, the scheduler never runs, and the system deadlocks.
+     *
+     * With spin_lock (IRQs enabled), waiters spin but can still service
+     * timer and input interrupts, keeping the system responsive.
+     */
+    spin_lock(&blk_lock);
 
     /* Allocate 3 descriptors */
     int d0 = alloc_desc(vq);
@@ -350,7 +362,7 @@ static int virtio_blk_rw(uint32_t type, uint64_t sector,
         if (d0 >= 0) free_desc(vq, (uint32_t)d0);
         if (d1 >= 0) free_desc(vq, (uint32_t)d1);
         if (d2 >= 0) free_desc(vq, (uint32_t)d2);
-        spin_unlock_irqrestore(&blk_lock, flags);
+        spin_unlock(&blk_lock);
         return -1;
     }
 
@@ -395,10 +407,36 @@ static int virtio_blk_rw(uint32_t type, uint64_t sector,
     /* Notify the device */
     mmio_write32(blkdev.base + VIRTIO_MMIO_QUEUE_NOTIFY, 0);
 
-    /* Poll for completion: wait until the used ring advances */
+    /* Poll for completion: wait until the used ring advances.
+     * Interrupts remain ENABLED during this loop so that timer, input,
+     * and other IRQs continue to be serviced on this core. */
+    uint32_t poll_count = 0;
     while (vq->used->idx == vq->last_used_idx) {
-        /* Spin -- in production this would be interrupt-driven */
         dsb();
+        poll_count++;
+        if (poll_count > 10000000) {
+            kprintf("[virtio-blk] timeout waiting for completion sector=%lu\n",
+                    sector);
+            free_chain(vq, (uint32_t)d0);
+            spin_unlock(&blk_lock);
+            return -1;
+        }
+    }
+
+    /*
+     * Critical: dsb() AFTER the used ring index becomes visible.
+     * On ARM, the used->idx write from the device may be observed before
+     * the DMA writes to the data buffer and status byte have landed.
+     * This barrier ensures all prior device DMA writes are visible to us.
+     */
+    dsb();
+
+    /* Validate the used ring entry matches our descriptor chain */
+    uint16_t used_slot = vq->last_used_idx % vq->num;
+    uint32_t used_id = vq->used->ring[used_slot].id;
+    if (used_id != (uint32_t)d0) {
+        kprintf("[virtio-blk] used ring mismatch: expected desc %d, got %u "
+                "(sector=%lu)\n", d0, used_id, sector);
     }
 
     /* Process used ring entry */
@@ -408,14 +446,34 @@ static int virtio_blk_rw(uint32_t type, uint64_t sector,
     uint32_t isr = mmio_read32(blkdev.base + VIRTIO_MMIO_INTERRUPT_STATUS);
     mmio_write32(blkdev.base + VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
+    /*
+     * Retry loop: the status byte DMA may lag behind the used ring update
+     * even after a dsb. Give it a few extra chances with barriers.
+     */
+    uint8_t status = blk_req_status;
+    if (status == 0xFF) {
+        for (int retry = 0; retry < 100; retry++) {
+            dsb();
+            status = blk_req_status;
+            if (status != 0xFF)
+                break;
+        }
+        if (status != 0xFF) {
+            kprintf("[virtio-blk] status resolved after retry sector=%lu\n",
+                    sector);
+        }
+    }
+
     /* Free the descriptor chain */
     free_chain(vq, (uint32_t)d0);
 
-    spin_unlock_irqrestore(&blk_lock, flags);
+    /* Read status BEFORE releasing the lock -- another request could
+     * overwrite blk_req_status with 0xFF immediately after unlock. */
+    spin_unlock(&blk_lock);
 
-    if (blk_req_status != VIRTIO_BLK_S_OK) {
+    if (status != VIRTIO_BLK_S_OK) {
         kprintf("[virtio-blk] I/O error: status=%u sector=%lu\n",
-                blk_req_status, sector);
+                status, sector);
         return -1;
     }
 

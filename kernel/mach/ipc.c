@@ -876,7 +876,7 @@ ipc_kmsg_copyin_body(struct vm_space *sender_space,
              * Port rights in header (remote/local) are already handled
              * by the existing copyin logic. In-body port descriptors
              * would need similar copyin logic. Skip for now. */
-            kprintf("[ipc] copyin_body: port descriptor not yet supported\n");
+            /* Port descriptors in body: silently skip (not yet implemented) */
             desc_ptr += sizeof(mach_msg_port_descriptor_t);
             break;
         }
@@ -1098,7 +1098,16 @@ static mach_msg_return_t port_enqueue(struct ipc_port *port,
 /*
  * port_dequeue - Dequeue a message from a port's ring buffer.
  *
- * Blocks if no messages available (via semaphore).
+ * Timeout modes (matching XNU ipc_mqueue_receive_on_thread semantics):
+ *   - block_forever == true:  blocks indefinitely (semaphore_wait).
+ *   - block_forever == false, timeout_ms == 0: non-blocking poll
+ *     (semaphore_trywait only, returns MACH_RCV_TIMED_OUT immediately
+ *     if no message is queued).
+ *   - block_forever == false, timeout_ms > 0: timed wait — try
+ *     non-blocking first, then sleep up to timeout_ms milliseconds
+ *     (at 100Hz = 10ms/tick). Returns MACH_RCV_TIMED_OUT if no
+ *     message arrives within the deadline.
+ *
  * Returns MACH_MSG_SUCCESS or error. Copies raw message bytes into user
  * buffer and returns the kernel port pointers + types for copyout.
  * OOL descriptors are transferred from the queue slot to the caller's
@@ -1112,10 +1121,54 @@ static mach_msg_return_t port_dequeue(struct ipc_port *port,
                                       mach_msg_type_name_t *reply_type_out,
                                       mach_msg_type_name_t *dest_type_out,
                                       struct ipc_kmsg_ool *ool_descs_out,
-                                      uint32_t *ool_count_out)
+                                      uint32_t *ool_count_out,
+                                      uint32_t timeout_ms,
+                                      bool block_forever)
 {
-    /* Block until a message is available */
-    semaphore_wait(&port->msg_available);
+    /*
+     * Wait for a message to become available.
+     *
+     * On XNU, ipc_mqueue_receive_on_thread() handles the timeout using
+     * a thread_call-based timer and THREAD_ABORTSAFE. Our simplified
+     * version:
+     *   - block_forever: semaphore_wait (no timeout)
+     *   - !block_forever, timeout_ms == 0: semaphore_trywait (poll)
+     *   - !block_forever, timeout_ms > 0:  trywait + sleep in ticks
+     *
+     * At 100Hz, each tick = 10ms. We convert the timeout to ticks and
+     * poll once per tick. For the non-blocking case (timeout_ms == 0),
+     * we just do a single trywait — this is the fast path for display
+     * servers that need to poll for messages without blocking.
+     */
+    if (block_forever) {
+        /* Blocking wait — no timeout */
+        semaphore_wait(&port->msg_available);
+    } else if (timeout_ms == 0) {
+        /* Non-blocking poll — single trywait, return immediately */
+        if (!semaphore_trywait(&port->msg_available))
+            return MACH_RCV_TIMED_OUT;
+    } else {
+        /* Timed wait — try non-blocking first */
+        if (!semaphore_trywait(&port->msg_available)) {
+            /* No message immediately available — poll with sleep */
+            uint32_t ticks = (timeout_ms + 9) / 10;  /* Round up to ticks */
+            if (ticks == 0) ticks = 1;
+            uint32_t waited = 0;
+            bool acquired = false;
+
+            while (waited < ticks) {
+                thread_sleep_ticks(1);
+                waited++;
+                if (semaphore_trywait(&port->msg_available)) {
+                    acquired = true;
+                    break;
+                }
+            }
+
+            if (!acquired)
+                return MACH_RCV_TIMED_OUT;
+        }
+    }
 
     uint64_t flags;
     spin_lock_irqsave(&port->lock, &flags);
@@ -1183,7 +1236,7 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
     mach_msg_size_t send_size   = (mach_msg_size_t)tf->regs[2];
     mach_msg_size_t rcv_size    = (mach_msg_size_t)tf->regs[3];
     mach_port_name_t rcv_name   = (mach_port_name_t)tf->regs[4];
-    /* timeout in tf->regs[5] - unused for now */
+    uint32_t timeout_ms         = (uint32_t)tf->regs[5];
 
     struct thread *cur = current_thread_get();
     if (cur == NULL || cur->task == NULL)
@@ -1192,6 +1245,7 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
     struct ipc_space *space = cur->task->ipc_space;
     if (space == NULL)
         return MACH_SEND_INVALID_DEST;
+
 
     mach_msg_return_t ret = MACH_MSG_SUCCESS;
 
@@ -1498,7 +1552,14 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
         if (!(rcv_type & MACH_PORT_TYPE_RECEIVE))
             return MACH_RCV_INVALID_NAME;
 
-        /* Dequeue — blocks if empty. Returns raw bytes + translated ports + OOL. */
+        /*
+         * Dequeue — blocks if empty, or uses timeout if MACH_RCV_TIMEOUT set.
+         * Returns raw bytes + translated port pointers + OOL descriptors.
+         *
+         * On XNU, ipc_mqueue_receive_on_thread() handles the timeout by
+         * setting a thread_call timer. We pass timeout_ms to port_dequeue
+         * which polls with semaphore_trywait + thread_sleep_ticks.
+         */
         uint32_t actual = 0;
         struct ipc_port *msg_reply_port = NULL;
         mach_msg_type_name_t msg_reply_type = MACH_MSG_TYPE_PORT_NONE;
@@ -1506,9 +1567,23 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
         struct ipc_kmsg_ool rcv_ool_descs[MACH_MSG_OOL_MAX];
         uint32_t rcv_ool_count = 0;
 
+        /*
+         * If MACH_RCV_TIMEOUT is set, use the caller's timeout value.
+         * - timeout_ms == 0 with MACH_RCV_TIMEOUT: non-blocking poll
+         * - timeout_ms > 0 with MACH_RCV_TIMEOUT: timed wait
+         * - no MACH_RCV_TIMEOUT flag: block forever (ignore timeout_ms)
+         *
+         * This matches XNU's ipc_mqueue_receive_on_thread() which checks
+         * MACH_RCV_TIMEOUT to decide between THREAD_ABORTSAFE (block) and
+         * a timer-bounded wait.
+         */
+        bool rcv_block_forever = !(option & MACH_RCV_TIMEOUT);
+        uint32_t rcv_timeout = (option & MACH_RCV_TIMEOUT) ? timeout_ms : 0;
+
         ret = port_dequeue(rcv_port, (void *)user_msg, rcv_size, &actual,
                            &msg_reply_port, &msg_reply_type, &msg_dest_type,
-                           rcv_ool_descs, &rcv_ool_count);
+                           rcv_ool_descs, &rcv_ool_count,
+                           rcv_timeout, rcv_block_forever);
         if (ret != MACH_MSG_SUCCESS)
             return ret;
 

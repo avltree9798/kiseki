@@ -329,25 +329,24 @@ static void gpu_free_chain(struct virtqueue *vq, uint32_t head)
  * ============================================================================ */
 
 /*
- * gpu_poll_completion - Poll for virtqueue completion with IRQs briefly enabled.
+ * gpu_poll_completion - Poll for virtqueue completion.
  *
- * On QEMU TCG (single-threaded emulation), virtio-gpu may process commands
- * asynchronously in QEMU's main event loop. The vCPU must yield (via an
- * interrupt-enabled halt or exception) to let QEMU's event loop run and
- * update the used ring.
+ * On QEMU TCG (single-threaded emulation), virtio-gpu processes most 2D
+ * commands synchronously during the MMIO write to QUEUE_NOTIFY. The used
+ * ring is updated before MMIO write returns, so the quick check below
+ * catches the common case immediately (no poll needed).
  *
- * If we spin with IRQs disabled (as spin_lock_irqsave does), the vCPU
- * monopolizes QEMU's thread and the completion never arrives.
+ * For the rare async case, we poll with IRQs briefly enabled. Callers
+ * hold gpu_lock via spin_lock_irqsave (IRQs disabled to prevent lock-
+ * holder preemption on QEMU TCG). We re-enable IRQs momentarily inside
+ * the poll loop so QEMU's event loop can process the virtio command.
  *
- * Solution: briefly enable IRQs on each poll iteration. The gpu_lock is
- * still held, so no other kernel code can touch the virtqueue. The only
- * thing that can happen with IRQs enabled is the GIC delivering the
- * virtio-gpu interrupt, which our handler handles via trylock (and will
- * bail since we hold the lock). The important side-effect is that the
- * momentary IRQ enable lets QEMU process its event loop.
+ * Bug 15 root cause fix: spin_unlock() now issues SEV to wake WFE
+ * waiters. Without SEV, cores waiting on gpu_lock via spin_lock() would
+ * WFE-block forever on QEMU TCG, causing the system-wide freeze.
  *
- * Reference: Linux never polls with IRQs disabled; it uses threaded
- * completion callbacks (complete/wait_for_completion).
+ * The GPU IRQ handler (virtio_gpu_irq_handler) is lockless (just ACKs
+ * the interrupt), so it's safe for IRQs to fire while we hold gpu_lock.
  */
 static int gpu_poll_completion(struct virtqueue *vq, uint32_t head_desc)
 {
@@ -366,17 +365,22 @@ static int gpu_poll_completion(struct virtqueue *vq, uint32_t head_desc)
 
     /*
      * Command didn't complete synchronously. Poll with a timeout.
-     * Briefly enable IRQs on each iteration to let QEMU TCG's
-     * event loop process the command. Without this, the vCPU
-     * monopolises QEMU's host thread and the completion never arrives.
+     *
+     * Callers hold gpu_lock via spin_lock_irqsave (IRQs disabled to
+     * prevent lock-holder preemption on QEMU TCG). We briefly re-enable
+     * IRQs on each iteration so QEMU's event loop can process the
+     * virtio command. The GPU IRQ handler is lockless, so this is safe.
+     *
+     * Using ISB between daifclr/daifset to ensure the IRQ window is
+     * actually opened (ARM requires ISB after DAIF changes to take effect).
      */
     {
         uint32_t timeout = 50000000;
         while (vq_used_idx(vq) == vq->last_used_idx && timeout > 0) {
             dsb();
-            /* Briefly enable IRQs so QEMU TCG can process commands */
             __asm__ volatile("msr daifclr, #0x2" ::: "memory"); /* unmask IRQ */
-            __asm__ volatile("isb" ::: "memory");
+            __asm__ volatile("isb" ::: "memory");                /* open window */
+            spin_yield();
             __asm__ volatile("msr daifset, #0x2" ::: "memory"); /* remask IRQ */
             timeout--;
         }
@@ -1027,6 +1031,17 @@ void virtio_gpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
 
     gpu_flush_count++;
 
+    /*
+     * Use spin_lock_irqsave to prevent the timer from preempting us
+     * while holding gpu_lock. On QEMU TCG (single-threaded emulation),
+     * if the lock holder gets preempted and another vCPU spins on the
+     * lock, QEMU's host thread is consumed by the spinner and never
+     * returns to the lock holder — a livelock.
+     *
+     * IRQs are briefly re-enabled inside gpu_poll_completion() to let
+     * QEMU process virtio commands. The GPU IRQ handler is lockless
+     * (just ACKs the ISR), so this is safe.
+     */
     uint64_t flags;
     spin_lock_irqsave(&gpu_lock, &flags);
 

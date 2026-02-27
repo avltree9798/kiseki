@@ -86,7 +86,7 @@ fi
 USR_BIN_PROGS="find xargs id whoami which env du wc yes tcc file"
 
 # Binaries that go in /sbin (system admin)
-SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd mDNSResponder WindowServer"
+SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd mDNSResponder WindowServer loginwindow"
 
 # GUI application bundles (installed to /Applications/Foo.app/Foo)
 GUI_APPS="Dock Finder SystemUIServer Terminal"

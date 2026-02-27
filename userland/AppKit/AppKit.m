@@ -1177,6 +1177,8 @@ static struct {
 static BOOL _WSConnect(const char *app_name) {
     if (_ws_conn.connected) return YES;
 
+    fprintf(stderr, "[AppKit] _WSConnect: looking up '%s'\n", WS_SERVICE_NAME);
+
     /* Look up WindowServer service */
     kern_return_t kr = bootstrap_look_up(
         MACH_PORT_NULL, WS_SERVICE_NAME, &_ws_conn.service_port);
@@ -1185,6 +1187,8 @@ static BOOL _WSConnect(const char *app_name) {
                 WS_SERVICE_NAME, kr);
         return NO;
     }
+    fprintf(stderr, "[AppKit] _WSConnect: bootstrap_look_up OK, service_port=%u\n",
+            _ws_conn.service_port);
 
     /* Allocate our event port (receive right) */
     kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
@@ -1193,6 +1197,8 @@ static BOOL _WSConnect(const char *app_name) {
         fprintf(stderr, "[AppKit] mach_port_allocate failed: %d\n", kr);
         return NO;
     }
+    fprintf(stderr, "[AppKit] _WSConnect: event_port allocated = %u\n",
+            _ws_conn.event_port);
 
     /* Send CONNECT request */
     ws_msg_connect_t msg;
@@ -1211,6 +1217,7 @@ static BOOL _WSConnect(const char *app_name) {
         msg.app_name[len] = '\0';
     }
 
+    fprintf(stderr, "[AppKit] _WSConnect: sending CONNECT msg (SEND|RCV)...\n");
     kr = mach_msg(&msg.header, MACH_SEND_MSG | MACH_RCV_MSG,
                   sizeof(msg), sizeof(ws_reply_connect_t),
                   _ws_conn.event_port, MACH_MSG_TIMEOUT_NONE,
@@ -1222,6 +1229,8 @@ static BOOL _WSConnect(const char *app_name) {
 
     /* Parse reply */
     ws_reply_connect_t *reply = (ws_reply_connect_t *)&msg;
+    fprintf(stderr, "[AppKit] _WSConnect: reply received: id=%d result=%d conn_id=%d\n",
+            reply->header.msgh_id, reply->result, reply->conn_id);
     if (reply->result != 0 || reply->conn_id < 0) {
         fprintf(stderr, "[AppKit] WS_MSG_CONNECT rejected: result=%d conn_id=%d\n",
                 reply->result, reply->conn_id);
@@ -1263,7 +1272,12 @@ static void _WSDisconnect(void) {
 static int32_t _WSCreateWindow(int32_t x, int32_t y, uint32_t width,
                                 uint32_t height, uint32_t style_mask,
                                 const char *title) {
-    if (!_ws_conn.connected) return -1;
+    fprintf(stderr, "[AppKit] _WSCreateWindow: (%d,%d) %ux%u style=0x%x title='%s' connected=%d\n",
+            x, y, width, height, style_mask, title ? title : "(null)", _ws_conn.connected);
+    if (!_ws_conn.connected) {
+        fprintf(stderr, "[AppKit] _WSCreateWindow: NOT CONNECTED, returning -1\n");
+        return -1;
+    }
 
     /* We need a buffer large enough for the reply too */
     union {
@@ -1291,6 +1305,7 @@ static int32_t _WSCreateWindow(int32_t x, int32_t y, uint32_t width,
         buf.req.title[len] = '\0';
     }
 
+    fprintf(stderr, "[AppKit] _WSCreateWindow: sending CREATE_WINDOW msg (SEND|RCV)...\n");
     kern_return_t kr = mach_msg(&buf.req.header, MACH_SEND_MSG | MACH_RCV_MSG,
                                 sizeof(ws_msg_create_window_t),
                                 sizeof(ws_reply_create_window_t),
@@ -1301,11 +1316,14 @@ static int32_t _WSCreateWindow(int32_t x, int32_t y, uint32_t width,
         return -1;
     }
 
+    fprintf(stderr, "[AppKit] _WSCreateWindow: reply received: id=%d result=%d window_id=%d\n",
+            buf.reply.header.msgh_id, buf.reply.result, buf.reply.window_id);
     if (buf.reply.result != 0 || buf.reply.window_id < 0) {
         fprintf(stderr, "[AppKit] WS_MSG_CREATE_WINDOW rejected\n");
         return -1;
     }
 
+    fprintf(stderr, "[AppKit] _WSCreateWindow: SUCCESS window_id=%d\n", buf.reply.window_id);
     return buf.reply.window_id;
 }
 
@@ -1433,8 +1451,12 @@ static void _WSDrawRect(int32_t window_id, uint32_t dst_x, uint32_t dst_y,
     msg.height = height;
     msg.src_rowbytes = rowbytes;
 
-    mach_msg(&msg.header, MACH_SEND_MSG, sizeof(msg), 0,
+    mach_msg_return_t kr = mach_msg(&msg.header, MACH_SEND_MSG, sizeof(msg), 0,
              MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr != MACH_MSG_SUCCESS) {
+        fprintf(stderr, "[AppKit] _WSDrawRect: mach_msg SEND failed: %d (wid=%d %ux%u)\n",
+                kr, window_id, width, height);
+    }
 }
 
 /*
@@ -1866,6 +1888,11 @@ static int       __windowCount = 0;
                   backing:(NSBackingStoreType)backingStoreType
                     defer:(BOOL)flag
 {
+    fprintf(stderr, "[AppKit] NSWindow initWithContentRect: (%d,%d) %dx%d style=0x%lx\n",
+            (int)contentRect.origin.x, (int)contentRect.origin.y,
+            (int)contentRect.size.width, (int)contentRect.size.height,
+            (unsigned long)style);
+
     self = [super init];
     if (!self) return nil;
 
@@ -1899,6 +1926,8 @@ static int       __windowCount = 0;
 
     if (_windowNumber < 0) {
         fprintf(stderr, "[AppKit] NSWindow: failed to create WindowServer window\n");
+    } else {
+        fprintf(stderr, "[AppKit] NSWindow: created WS window_id=%d\n", _windowNumber);
     }
 
     /* Create default content view filling the window */
@@ -1914,6 +1943,8 @@ static int       __windowCount = 0;
         __allWindows[__windowCount++] = self;
     }
 
+    fprintf(stderr, "[AppKit] NSWindow initWithContentRect: done, windowNumber=%d, backingData=%p\n",
+            _windowNumber, _backingData);
     return self;
 }
 
@@ -1977,6 +2008,7 @@ static int       __windowCount = 0;
 
 - (void)makeKeyAndOrderFront:(id)sender {
     (void)sender;
+    fprintf(stderr, "[AppKit] makeKeyAndOrderFront: wid=%d\n", _windowNumber);
     _isVisible = YES;
     _isKeyWindow = YES;
     _isMainWindow = YES;
@@ -2072,7 +2104,11 @@ static int       __windowCount = 0;
 }
 
 - (void)display {
-    if (!_backingContext || !_contentView) return;
+    if (!_backingContext || !_contentView) {
+        fprintf(stderr, "[AppKit] NSWindow display: SKIP (backingCtx=%p contentView=%p wid=%d)\n",
+                (void *)_backingContext, (void *)_contentView, _windowNumber);
+        return;
+    }
 
     /* Set up graphics context */
     NSGraphicsContext *gctx = [NSGraphicsContext
@@ -2097,6 +2133,9 @@ static int       __windowCount = 0;
     if (!_backingData || _windowNumber < 0) return;
 
     /* Blit entire backing store to WindowServer */
+    fprintf(stderr, "[AppKit] flushWindow: wid=%d %zux%zu rowbytes=%zu data=%p\n",
+            _windowNumber, _backingWidth, _backingHeight,
+            _backingBytesPerRow, _backingData);
     _WSDrawRect(_windowNumber, 0, 0,
                 (uint32_t)_backingWidth, (uint32_t)_backingHeight,
                 _backingData, (uint32_t)_backingBytesPerRow);
@@ -2485,7 +2524,9 @@ typedef enum {
 
 + (id)sharedApplication {
     if (!NSApp) {
+        fprintf(stderr, "[AppKit] NSApplication sharedApplication: creating singleton\n");
         NSApp = [[NSApplication alloc] init];
+        fprintf(stderr, "[AppKit] NSApplication sharedApplication: done, NSApp=%p\n", (void *)NSApp);
     }
     return NSApp;
 }
@@ -2534,6 +2575,8 @@ typedef enum {
 }
 
 - (void)finishLaunching {
+    fprintf(stderr, "[AppKit] finishLaunching: starting (delegate=%p)\n", (void *)_delegate);
+
     /* Connect to WindowServer */
     const char *appName = "Application";
     if (_mainMenu) {
@@ -2545,9 +2588,12 @@ typedef enum {
         }
     }
 
+    fprintf(stderr, "[AppKit] finishLaunching: connecting to WS as '%s'\n", appName);
     if (!_WSConnect(appName)) {
         fprintf(stderr, "[AppKit] NSApplication: WARNING - could not connect to WindowServer\n");
         /* Continue anyway — allows running without WS for testing */
+    } else {
+        fprintf(stderr, "[AppKit] finishLaunching: WS connected OK (conn_id=%d)\n", _ws_conn.conn_id);
     }
 
     /* Sync menu to WindowServer */
@@ -2558,8 +2604,12 @@ typedef enum {
     /* Notify delegate */
     if (_delegate && class_respondsToSelector(object_getClass(_delegate),
             sel_registerName("applicationDidFinishLaunching:"))) {
+        fprintf(stderr, "[AppKit] finishLaunching: calling applicationDidFinishLaunching:\n");
         ((void (*)(id, SEL, id))objc_msgSend)(
             _delegate, sel_registerName("applicationDidFinishLaunching:"), nil);
+        fprintf(stderr, "[AppKit] finishLaunching: applicationDidFinishLaunching: returned\n");
+    } else {
+        fprintf(stderr, "[AppKit] finishLaunching: NO delegate or delegate lacks applicationDidFinishLaunching:\n");
     }
 
     /* Post notification */
@@ -2578,8 +2628,10 @@ typedef enum {
  * fire timers.
  */
 - (void)run {
+    fprintf(stderr, "[AppKit] NSApplication run: entering\n");
     [self finishLaunching];
     _isRunning = YES;
+    fprintf(stderr, "[AppKit] NSApplication run: entering event loop (__windowCount=%d)\n", __windowCount);
 
     ws_msg_buffer_t buf;
 

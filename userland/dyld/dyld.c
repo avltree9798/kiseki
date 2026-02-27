@@ -2217,18 +2217,10 @@ void dyld_main(const struct mach_header_64 *main_mh,
         bool inited[MAX_IMAGES];
         dyld_memset(inited, 0, sizeof(inited));
 
-        /*
-         * run_inits_for_image: call __mod_init_func for one image,
-         * recursively initialising dependencies first.
-         * We use an iterative deepening approach to avoid deep
-         * recursion (dyld has limited stack).
-         *
-         * Simple approach: iterate images in load order (1..N-1),
-         * then image 0. For each image, first ensure its deps are
-         * initialised. Since deps are loaded before dependents,
-         * iterating in load order is already mostly correct.
-         * We add a dependency-first pass as a safety measure.
-         */
+        dyld_puts("dyld: Phase 5.5: running __mod_init_func initialisers (");
+        dyld_put_hex(num_images);
+        dyld_puts(" images)\n");
+
         for (uint32_t pass_idx = 0; pass_idx < num_images; pass_idx++) {
             /* Dylibs first (1..num_images-1), then main binary (0) */
             uint32_t idx;
@@ -2308,6 +2300,13 @@ void dyld_main(const struct mach_header_64 *main_mh,
                 continue;
             }
 
+            dyld_puts("dyld: init[");
+            dyld_put_hex(idx);
+            dyld_puts("] '");
+            if (img->path) dyld_puts(img->path);
+            else dyld_puts("(main)");
+            dyld_puts("'\n");
+
             const uint8_t *cmd_ptr = (const uint8_t *)(mh + 1);
             for (uint32_t i = 0; i < mh->ncmds; i++) {
                 const struct load_command *lc =
@@ -2330,11 +2329,25 @@ void dyld_main(const struct mach_header_64 *main_mh,
                             uint64_t count =
                                 sect[j].size / sizeof(init_func_t);
 
+                            dyld_puts("dyld:   __mod_init_func: ");
+                            dyld_put_hex(count);
+                            dyld_puts(" entries at 0x");
+                            dyld_put_hex(sect_addr);
+                            dyld_puts("\n");
+
                             init_func_t *funcs =
                                 (init_func_t *)sect_addr;
                             for (uint64_t k = 0; k < count; k++) {
                                 if (funcs[k] != NULL) {
+                                    dyld_puts("dyld:   calling init[");
+                                    dyld_put_hex(k);
+                                    dyld_puts("] = 0x");
+                                    dyld_put_hex((uint64_t)funcs[k]);
+                                    dyld_puts("...\n");
                                     funcs[k]();
+                                    dyld_puts("dyld:   init[");
+                                    dyld_put_hex(k);
+                                    dyld_puts("] returned\n");
                                 }
                             }
                         }
@@ -2353,6 +2366,8 @@ void dyld_main(const struct mach_header_64 *main_mh,
      * Compute main_addr = text_base + entryoff.
      * Call main(argc, argv, envp, apple).
      * ---------------------------------------------------------------- */
+
+    dyld_puts("dyld: Phase 5.5 complete, all initialisers called\n");
 
     if (!main_img->has_main) {
         dyld_fatal("main binary has no LC_MAIN");

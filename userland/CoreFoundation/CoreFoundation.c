@@ -99,6 +99,18 @@ extern int pthread_mutex_init(void *mutex, const void *attr);
 extern int pthread_mutex_lock(void *mutex);
 extern int pthread_mutex_unlock(void *mutex);
 extern int pthread_mutex_destroy(void *mutex);
+
+/*
+ * Bug 14 fix: pthread_mutex_t must be properly aligned for ARM64 exclusive
+ * instructions (ldaxr/stlxr). Matches libSystem's definition.
+ */
+typedef struct {
+    int             type;
+    int             locked;
+    unsigned long   owner;
+    int             recursion;
+    volatile int    spinlock;
+} pthread_mutex_t;
 extern int pthread_once(int *once_control, void (*init_routine)(void));
 
 /* pthread TLS (thread-local storage) */
@@ -496,20 +508,25 @@ typedef struct __CFRuntimeClass {
 static const CFRuntimeClass *__CFRuntimeClassTable[__CF_MAX_TYPES];
 static CFTypeID __CFRuntimeNextTypeID = 1; /* 0 = _kCFRuntimeNotATypeID */
 
-/* Mutex for thread-safe registration */
-static uint8_t __CFRuntimeLock[64]; /* oversized for pthread_mutex_t */
+/* Mutex for thread-safe registration.
+ * Bug 14 fix: Must be pthread_mutex_t (not uint8_t[]) for proper alignment.
+ * ARM64 exclusive instructions (ldaxr/stlxr) in pthread_mutex_lock require
+ * 4-byte aligned addresses — a uint8_t array may be placed at an odd offset
+ * by the linker, causing alignment faults (DFSC=0x21).
+ */
+static pthread_mutex_t __CFRuntimeLock;
 static int     __CFRuntimeLockInit = 0;
 
 HIDDEN void __CFRuntimeLockAcquire(void) {
     if (!__CFRuntimeLockInit) {
-        pthread_mutex_init(__CFRuntimeLock, NULL);
+        pthread_mutex_init(&__CFRuntimeLock, NULL);
         __CFRuntimeLockInit = 1;
     }
-    pthread_mutex_lock(__CFRuntimeLock);
+    pthread_mutex_lock(&__CFRuntimeLock);
 }
 
 HIDDEN void __CFRuntimeLockRelease(void) {
-    pthread_mutex_unlock(__CFRuntimeLock);
+    pthread_mutex_unlock(&__CFRuntimeLock);
 }
 
 EXPORT CFTypeID _CFRuntimeRegisterClass(const CFRuntimeClass *cls) {
@@ -2115,7 +2132,8 @@ static struct {
     CFStringRef  value;
 } __CFConstantStringTable[__CFSTR_TABLE_SIZE];
 
-static uint8_t __CFStrTableLock[64]; /* pthread_mutex_t */
+/* Bug 14 fix: proper alignment for ARM64 exclusive instructions */
+static pthread_mutex_t __CFStrTableLock;
 static int     __CFStrTableLockInit = 0;
 
 EXPORT CFStringRef __CFStringMakeConstantString(const char *cStr) {
@@ -2129,17 +2147,17 @@ EXPORT CFStringRef __CFStringMakeConstantString(const char *cStr) {
 
     /* Lock */
     if (!__CFStrTableLockInit) {
-        pthread_mutex_init(__CFStrTableLock, NULL);
+        pthread_mutex_init(&__CFStrTableLock, NULL);
         __CFStrTableLockInit = 1;
     }
-    pthread_mutex_lock(__CFStrTableLock);
+    pthread_mutex_lock(&__CFStrTableLock);
 
     /* Linear probe for existing entry */
     CFIndex startIdx = idx;
     while (__CFConstantStringTable[idx].key) {
         if (strcmp(__CFConstantStringTable[idx].key, cStr) == 0) {
             CFStringRef result = __CFConstantStringTable[idx].value;
-            pthread_mutex_unlock(__CFStrTableLock);
+            pthread_mutex_unlock(&__CFStrTableLock);
             return result;
         }
         idx = (idx + 1) % __CFSTR_TABLE_SIZE;
@@ -2151,7 +2169,7 @@ EXPORT CFStringRef __CFStringMakeConstantString(const char *cStr) {
     struct __CFString *s = (struct __CFString *)_CFRuntimeCreateInstance(
         NULL, __CFStringTypeID,
         sizeof(struct __CFString) - sizeof(CFRuntimeBase), NULL);
-    if (!s) { pthread_mutex_unlock(__CFStrTableLock); return NULL; }
+    if (!s) { pthread_mutex_unlock(&__CFStrTableLock); return NULL; }
     s->_mutable = false;
     s->_isConstant = true;
     s->_ownsBuf = true;
@@ -2167,7 +2185,7 @@ EXPORT CFStringRef __CFStringMakeConstantString(const char *cStr) {
     __CFConstantStringTable[idx].key = s->_buf;
     __CFConstantStringTable[idx].value = (CFStringRef)s;
 
-    pthread_mutex_unlock(__CFStrTableLock);
+    pthread_mutex_unlock(&__CFStrTableLock);
     return (CFStringRef)s;
 }
 
@@ -3593,7 +3611,8 @@ struct __CFRunLoop {
     mach_port_t         _wakeUpPort;
 
     /* Lock for thread safety */
-    uint8_t             _lock[64];          /* oversized for pthread_mutex_t */
+    /* Bug 14 fix: proper type for ARM64 alignment */
+    pthread_mutex_t     _lock;
 
     /* Modes */
     __CFRunLoopMode     _modes[__CF_RL_MAX_MODES];
@@ -3636,7 +3655,7 @@ static void __CFRunLoopFinalize(CFTypeRef cf) {
         /* On real macOS, mach_port_deallocate — we'll leave the port
          * for now as process exit will reclaim it. */
     }
-    pthread_mutex_destroy(rl->_lock);
+    pthread_mutex_destroy(&rl->_lock);
 }
 
 static Boolean __CFRunLoopEqual(CFTypeRef cf1, CFTypeRef cf2) {
@@ -3753,7 +3772,7 @@ HIDDEN struct __CFRunLoop *__CFRunLoopCreate(void) {
     if (!rl) return NULL;
 
     rl->_pthread = pthread_self();
-    pthread_mutex_init(rl->_lock, NULL);
+    pthread_mutex_init(&rl->_lock, NULL);
     rl->_modeCount = 0;
     rl->_commonModeCount = 0;
     rl->_stopped = false;
@@ -4148,9 +4167,9 @@ EXPORT SInt32 CFRunLoopRunInMode(CFRunLoopMode modeName,
 
     if (!modeName) modeName = kCFRunLoopDefaultMode;
 
-    pthread_mutex_lock(rl->_lock);
+    pthread_mutex_lock(&rl->_lock);
     __CFRunLoopMode *mode = __CFRunLoopFindMode(rl, modeName, false);
-    pthread_mutex_unlock(rl->_lock);
+    pthread_mutex_unlock(&rl->_lock);
 
     if (!mode) return kCFRunLoopRunFinished;
 
@@ -4206,12 +4225,12 @@ EXPORT Boolean CFRunLoopIsWaiting(CFRunLoopRef rl) {
 EXPORT void CFRunLoopAddCommonMode(CFRunLoopRef rl, CFRunLoopMode mode) {
     if (!rl || !mode) return;
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
 
     /* Check if already registered */
     for (CFIndex i = 0; i < loop->_commonModeCount; i++) {
         if (CFEqual(loop->_commonModes[i], mode)) {
-            pthread_mutex_unlock(loop->_lock);
+            pthread_mutex_unlock(&loop->_lock);
             return;
         }
     }
@@ -4222,7 +4241,7 @@ EXPORT void CFRunLoopAddCommonMode(CFRunLoopRef rl, CFRunLoopMode mode) {
         __CFRunLoopFindMode(loop, mode, true);
     }
 
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
 }
 
 
@@ -4271,7 +4290,7 @@ EXPORT void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopSource *src = (struct __CFRunLoopSource *)source;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
 
     /* If modeName is kCFRunLoopCommonModes, add to all common modes */
     if (modeName == kCFRunLoopCommonModes || CFEqual(modeName, kCFRunLoopCommonModes)) {
@@ -4310,7 +4329,7 @@ EXPORT void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
         }
     }
 
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
 }
 
 EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
@@ -4319,7 +4338,7 @@ EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopSource *src = (struct __CFRunLoopSource *)source;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
 
     /* Helper: remove from a single mode */
     #define __REMOVE_SOURCE_FROM_MODE(m) do { \
@@ -4346,7 +4365,7 @@ EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
 
     #undef __REMOVE_SOURCE_FROM_MODE
 
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
 }
 
 EXPORT Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
@@ -4355,7 +4374,7 @@ EXPORT Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef sourc
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopSource *src = (struct __CFRunLoopSource *)source;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
     __CFRunLoopMode *m = __CFRunLoopFindMode(loop, modeName, false);
     Boolean found = false;
     if (m) {
@@ -4363,7 +4382,7 @@ EXPORT Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef sourc
             if (m->_sources[j] == src) { found = true; break; }
         }
     }
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
     return found;
 }
 
@@ -4444,7 +4463,7 @@ EXPORT void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer,
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopTimer *t = (struct __CFRunLoopTimer *)timer;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
 
     if (modeName == kCFRunLoopCommonModes || CFEqual(modeName, kCFRunLoopCommonModes)) {
         for (CFIndex ci = 0; ci < loop->_commonModeCount; ci++) {
@@ -4468,7 +4487,7 @@ EXPORT void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer,
         }
     }
 
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
 }
 
 EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer,
@@ -4477,7 +4496,7 @@ EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer,
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopTimer *t = (struct __CFRunLoopTimer *)timer;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
 
     #define __REMOVE_TIMER_FROM_MODE(m) do { \
         for (CFIndex j = 0; j < (m)->_timerCount; j++) { \
@@ -4500,7 +4519,7 @@ EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer,
 
     #undef __REMOVE_TIMER_FROM_MODE
 
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
 }
 
 EXPORT Boolean CFRunLoopContainsTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer,
@@ -4509,7 +4528,7 @@ EXPORT Boolean CFRunLoopContainsTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer,
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopTimer *t = (struct __CFRunLoopTimer *)timer;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
     __CFRunLoopMode *m = __CFRunLoopFindMode(loop, modeName, false);
     Boolean found = false;
     if (m) {
@@ -4517,7 +4536,7 @@ EXPORT Boolean CFRunLoopContainsTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer,
             if (m->_timers[j] == t) { found = true; break; }
         }
     }
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
     return found;
 }
 
@@ -4612,7 +4631,7 @@ EXPORT void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer,
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopObserver *obs = (struct __CFRunLoopObserver *)observer;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
 
     if (modeName == kCFRunLoopCommonModes || CFEqual(modeName, kCFRunLoopCommonModes)) {
         for (CFIndex ci = 0; ci < loop->_commonModeCount; ci++) {
@@ -4636,7 +4655,7 @@ EXPORT void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer,
         }
     }
 
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
 }
 
 EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer,
@@ -4645,7 +4664,7 @@ EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef observ
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopObserver *obs = (struct __CFRunLoopObserver *)observer;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
 
     #define __REMOVE_OBSERVER_FROM_MODE(m) do { \
         for (CFIndex j = 0; j < (m)->_observerCount; j++) { \
@@ -4668,7 +4687,7 @@ EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef observ
 
     #undef __REMOVE_OBSERVER_FROM_MODE
 
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
 }
 
 EXPORT Boolean CFRunLoopContainsObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer,
@@ -4677,7 +4696,7 @@ EXPORT Boolean CFRunLoopContainsObserver(CFRunLoopRef rl, CFRunLoopObserverRef o
     struct __CFRunLoop *loop = (struct __CFRunLoop *)rl;
     struct __CFRunLoopObserver *obs = (struct __CFRunLoopObserver *)observer;
 
-    pthread_mutex_lock(loop->_lock);
+    pthread_mutex_lock(&loop->_lock);
     __CFRunLoopMode *m = __CFRunLoopFindMode(loop, modeName, false);
     Boolean found = false;
     if (m) {
@@ -4685,7 +4704,7 @@ EXPORT Boolean CFRunLoopContainsObserver(CFRunLoopRef rl, CFRunLoopObserverRef o
             if (m->_observers[j] == obs) { found = true; break; }
         }
     }
-    pthread_mutex_unlock(loop->_lock);
+    pthread_mutex_unlock(&loop->_lock);
     return found;
 }
 
@@ -4762,7 +4781,7 @@ static void __CFInitSpecialNumbers(void) {
 __attribute__((constructor, used))
 static void __CFInitialize(void) {
     /* Initialise runtime mutex */
-    pthread_mutex_init(__CFRuntimeLock, NULL);
+    pthread_mutex_init(&__CFRuntimeLock, NULL);
     __CFRuntimeLockInit = 1;
 
     /* Register all built-in types.

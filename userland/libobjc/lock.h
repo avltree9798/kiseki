@@ -18,13 +18,14 @@ typedef CRITICAL_SECTION mutex_t;
 #	include <pthread.h>
 
 typedef pthread_mutex_t mutex_t;
-// If this pthread implementation has a static initializer for recursive
-// mutexes, use that, otherwise fall back to the portable version
-#	ifdef PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
-#		define INIT_LOCK(x) x = (pthread_mutex_t)PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
-#	elif defined(PTHREAD_RECURSIVE_MUTEX_INITIALIZER)
-#		define INIT_LOCK(x) x = (pthread_mutex_t)PTHREAD_RECURSIVE_MUTEX_INITIALIZER
-#	else
+// Always use the portable init_recursive_mutex() path.
+// We CANNOT use static initialisers like PTHREAD_RECURSIVE_MUTEX_INITIALIZER
+// because libobjc's C++ files are compiled against macOS SDK headers (where
+// pthread_mutex_t is 64 bytes and the static initialiser writes a magic sig
+// 0x32AAABA2), but at runtime we link against Kiseki's libSystem where
+// pthread_mutex_t is 24 bytes with type==2 for recursive.  The ABI mismatch
+// causes the recursive-ownership check in pthread_mutex_lock to fail,
+// leading to deadlock on the second recursive acquisition.
 #		define INIT_LOCK(x) init_recursive_mutex(&(x))
 
 static inline void init_recursive_mutex(pthread_mutex_t *x)
@@ -35,7 +36,6 @@ static inline void init_recursive_mutex(pthread_mutex_t *x)
 	pthread_mutex_init(x, &recursiveAttributes);
 	pthread_mutexattr_destroy(&recursiveAttributes);
 }
-#	endif
 
 #	define LOCK(x) pthread_mutex_lock(x)
 #	define UNLOCK(x) pthread_mutex_unlock(x)

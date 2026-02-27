@@ -128,9 +128,19 @@ static struct PREFIX(_table_cell_struct) *PREFIX(alloc_cells)(PREFIX(_table) *ta
 
 static PREFIX(_table) *PREFIX(_create)(uint32_t capacity)
 {
+	fprintf(stderr, "[libobjc] hash_table _create: capacity=%u, sizeof(table)=%lu sizeof(cell)=%lu\n",
+		capacity, (unsigned long)sizeof(PREFIX(_table)),
+		(unsigned long)sizeof(struct PREFIX(_table_cell_struct)));
 	PREFIX(_table) *table = CALLOC(1, sizeof(PREFIX(_table)));
+	fprintf(stderr, "[libobjc] hash_table _create: table allocated at %p\n", (void*)table);
+	if (!table) {
+		fprintf(stderr, "[libobjc] hash_table _create: CALLOC FAILED for table!\n");
+		return NULL;
+	}
 #	ifndef MAP_TABLE_NO_LOCK
+	fprintf(stderr, "[libobjc] hash_table _create: calling INIT_LOCK\n");
 	INIT_LOCK(table->lock);
+	fprintf(stderr, "[libobjc] hash_table _create: INIT_LOCK done\n");
 #	endif
 #	if defined(ENABLE_GC) && defined(MAP_TABLE_TYPES_BITMAP)
 	// The low word in the bitmap stores the offsets of the next entries
@@ -138,8 +148,14 @@ static PREFIX(_table) *PREFIX(_create)(uint32_t capacity)
 	table->descr = GC_make_descriptor(&bitmap,
 			sizeof(struct PREFIX(_table_cell_struct)) / sizeof (void*));
 #	endif
+	fprintf(stderr, "[libobjc] hash_table _create: allocating %u cells\n", capacity);
 	table->table = PREFIX(alloc_cells)(table, capacity);
+	fprintf(stderr, "[libobjc] hash_table _create: cells allocated at %p\n", (void*)table->table);
+	if (!table->table) {
+		fprintf(stderr, "[libobjc] hash_table _create: CALLOC FAILED for cells!\n");
+	}
 	table->table_size = capacity;
+	fprintf(stderr, "[libobjc] hash_table _create: done\n");
 	return table;
 }
 

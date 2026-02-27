@@ -225,8 +225,11 @@ static int ws_connect(void)
         return -1;
     }
 
-    /* Send connect message */
-    struct {
+    /* Send connect message.
+     * mach_msg with SEND|RCV uses the SAME buffer for both phases —
+     * the reply overwrites the send buffer starting at the header.
+     * Use a union so send and recv share the same base address. */
+    union {
         ws_msg_connect_t    send;
         ws_reply_connect_t  recv;
     } msg;
@@ -261,7 +264,7 @@ static int ws_connect(void)
 static int32_t ws_create_window(int32_t x, int32_t y, uint32_t w, uint32_t h,
                                  uint32_t style, const char *title)
 {
-    struct {
+    union {
         ws_msg_create_window_t  send;
         ws_reply_create_window_t recv;
     } msg;
@@ -792,11 +795,19 @@ static int poll_event(ws_msg_buffer_t *buf, mach_msg_timeout_t timeout_ms)
                                 g_event_port,
                                 timeout_ms,
                                 MACH_PORT_NULL);
+    if (kr == KERN_SUCCESS) {
+        /* Only log non-mouse-move events to reduce serial spam */
+        if (buf->header.msgh_id != 3012)
+            fprintf(stderr, "[loginwindow] poll_event: GOT msg id=%d size=%u port=%u\n",
+                    buf->header.msgh_id, buf->header.msgh_size, g_event_port);
+    }
     return (kr == KERN_SUCCESS) ? 1 : 0;
 }
 
 static void handle_key_event(ws_event_key_t *ev)
 {
+    fprintf(stderr, "[loginwindow] handle_key: keycode=%u ch=%u(0x%x) mods=0x%x\n",
+            ev->keycode, ev->characters, ev->characters, ev->modifiers);
     if (!login_active) return;
 
     uint32_t keycode = ev->keycode;

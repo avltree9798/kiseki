@@ -366,12 +366,50 @@ static BOOL installMethodInDtable(Class class,
 		return NO;
 	}
 	SparseArrayInsert(dtable, sel_id, method);
-	// In TDD mode, we also register the first typed method that we
-	// encounter as the untyped version.
-#ifdef TYPE_DEPENDENT_DISPATCH
-	uint32_t untyped_idx = get_untyped_idx(method->selector);
-	SparseArrayInsert(dtable, untyped_idx, method);
-#endif
+	// Install at ALL selector indices (untyped + every typed variant)
+	// for the same selector name.  Without TYPE_DEPENDENT_DISPATCH,
+	// each typed variant of a selector gets a different dtable index.
+	// If a subclass registers drawRect: with type "v@:{CGRect=dddd}"
+	// but the caller dispatches [self drawRect:] using the compiler's
+	// typed selector "v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16",
+	// objc_msgSend's fast path will look up the caller's typed index
+	// and miss the override.  By installing at every known index for
+	// this selector name we guarantee the fast path always finds the
+	// most-derived implementation.
+	{
+		const char *selName = sel_getName(method->selector);
+		// First, install at the untyped index.
+		uint32_t untyped_idx = get_untyped_idx(method->selector);
+		if (untyped_idx != sel_id)
+		{
+			struct objc_method *existing = SparseArrayLookup(dtable, untyped_idx);
+			if (NULL == existing || replaceExisting)
+			{
+				SparseArrayInsert(dtable, untyped_idx, method);
+			}
+		}
+		// Now install at every typed variant's index.
+		// First call with count=0 to get the number of typed variants.
+		unsigned nTyped = sel_copyTypedSelectors_np(selName, NULL, 0);
+		if (nTyped > 0 && nTyped <= 16)
+		{
+			SEL typedSels[16];
+			unsigned got = sel_copyTypedSelectors_np(selName, typedSels, nTyped);
+			for (unsigned i = 0; i < got; i++)
+			{
+				if (typedSels[i] == NULL) continue;
+				uint32_t typed_idx = typedSels[i]->index;
+				if (typed_idx != sel_id && typed_idx != untyped_idx)
+				{
+					struct objc_method *existing = SparseArrayLookup(dtable, typed_idx);
+					if (NULL == existing || replaceExisting)
+					{
+						SparseArrayInsert(dtable, typed_idx, method);
+					}
+				}
+			}
+		}
+	}
 
 	static SEL cxx_construct, cxx_destruct;
 	if (NULL == cxx_construct)
@@ -730,7 +768,6 @@ OBJC_PUBLIC void objc_send_initialize(id object)
 	}
 	Class meta = class->isa;
 
-
 	// Make sure that the class is resolved.
 	objc_resolve_class(class);
 
@@ -741,38 +778,21 @@ OBJC_PUBLIC void objc_send_initialize(id object)
 	}
 
 	// Lock the runtime while we're creating dtables and before we acquire the
-	// init lock.  This prevents a lock-order reversal when dtable_for_class is
-	// called from something holding the runtime lock while we're still holding
-	// the initialize lock.  We should ensure that we never acquire the runtime
-	// lock after acquiring the initialize lock.
+	// init lock.
 	LOCK_RUNTIME();
 
 	// Superclass +initialize might possibly send a message to this class, in
-	// which case this method would be called again.  See NSObject and
-	// NSAutoreleasePool +initialize interaction in GNUstep.
+	// which case this method would be called again.
 	if (objc_test_class_flag(class, objc_class_flag_initialized))
 	{
-		// We know that initialization has started because the flag is set.
-		// Check that it's finished by grabbing the class lock.  This will be
-		// released once the class has been fully initialized. The runtime
-		// lock needs to be released first to prevent a deadlock between the
-		// runtime lock and the class-specific lock.
 		UNLOCK_RUNTIME();
-
 		objc_sync_enter((id)meta);
 		objc_sync_exit((id)meta);
 		assert(dtable_for_class(class) != uninstalled_dtable);
 		return;
 	}
 
-	// We should try to acquire the class lock before any runtime/init locks.
-	// If another thread is in the middle of running `allocateHiddenClass()` it 
-	// has acquired a spinlock and will be trying to acquire the runtime lock. 
-	// When this happens there is a small chance we could hit the same spinlock
-	// and deadlock the process (as any further attempts to acquire the runtime 
-	// will also block forever).
 	UNLOCK_RUNTIME();
-
 	LOCK_OBJECT_FOR_SCOPE((id)meta);
 	LOCK_RUNTIME();
 	LOCK(&initialize_lock);

@@ -33,11 +33,39 @@ extern void  *objc_autoreleasePoolPush(void);
 extern void   objc_autoreleasePoolPop(void *pool);
 
 /* C library extras not in framework headers */
-extern int    fprintf(void *stream, const char *fmt, ...);
 extern int    snprintf(char *str, size_t size, const char *fmt, ...);
-/* memmove — from <string.h> via Foundation.h */
-extern void **__stderrp;
-#define stderr (*__stderrp)
+
+/* CoreFoundation C functions for toll-free bridged string access.
+ * CFStringRef and CFIndex are already defined by CoreFoundation.h
+ * (included transitively via AppKit.h). */
+extern CFIndex  CFStringGetLength(CFStringRef theString);
+extern uint16_t CFStringGetCharacterAtIndex(CFStringRef theString, CFIndex idx);
+
+/* Safe fprintf replacement — bypasses broken FILE* pointer */
+static int _safe_fprintf_stderr(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static int _safe_fprintf_stderr(const char *fmt, ...) {
+    char _buf[256];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    extern int vsnprintf(char *, unsigned long, const char *, __builtin_va_list);
+    int n = vsnprintf(_buf, sizeof(_buf), fmt, ap);
+    __builtin_va_end(ap);
+    if (n > 0) {
+        unsigned long len = (unsigned long)n;
+        if (len > sizeof(_buf) - 1) len = sizeof(_buf) - 1;
+        long r;
+        __asm__ volatile(
+            "mov x0, #2\n"
+            "mov x1, %1\n"
+            "mov x2, %2\n"
+            "mov x16, #4\n"
+            "svc #0x80\n"
+            "mov %0, x0"
+            : "=r"(r) : "r"(_buf), "r"(len) : "x0","x1","x2","x16","memory");
+    }
+    return n;
+}
+#define fprintf(stream, ...) _safe_fprintf_stderr(__VA_ARGS__)
 
 /*
  * POSIX types (pid_t, ssize_t, etc.) are provided by <types.h>
@@ -734,9 +762,9 @@ static id _TerminalDrawRect(id self, SEL _cmd, CGRect dirtyRect) {
     CGContextRef ctx = [gctx CGContext];
     if (!ctx) return nil;
 
-    /* Render each cell */
+    /* Render each cell (Y=0 is top of bitmap in Kiseki's coordinate system) */
     for (uint32_t row = 0; row < TERM_ROWS; row++) {
-        CGFloat y = (CGFloat)(TERM_HEIGHT - (row + 1) * CHAR_HEIGHT);
+        CGFloat y = (CGFloat)(row * CHAR_HEIGHT);
 
         for (uint32_t col = 0; col < TERM_COLS; col++) {
             CGFloat x = (CGFloat)(col * CHAR_WIDTH);
@@ -780,7 +808,7 @@ static id _TerminalDrawRect(id self, SEL _cmd, CGRect dirtyRect) {
 
             if (attr & ATTR_UNDERLINE) {
                 CGContextSetRGBFillColor(ctx, fg_r, fg_g, fg_b, 1.0);
-                CGContextFillRect(ctx, CGRectMake(x, y, CHAR_WIDTH, 1));
+                CGContextFillRect(ctx, CGRectMake(x, y + CHAR_HEIGHT - 1, CHAR_WIDTH, 1));
             }
         }
     }
@@ -788,7 +816,7 @@ static id _TerminalDrawRect(id self, SEL _cmd, CGRect dirtyRect) {
     /* Draw block cursor */
     if (term.cur_row < TERM_ROWS && term.cur_col < TERM_COLS) {
         CGFloat cx = (CGFloat)(term.cur_col * CHAR_WIDTH);
-        CGFloat cy = (CGFloat)(TERM_HEIGHT - (term.cur_row + 1) * CHAR_HEIGHT);
+        CGFloat cy = (CGFloat)(term.cur_row * CHAR_HEIGHT);
         unsigned char ch = term.cells[term.cur_row][term.cur_col];
         uint8_t fg_idx = term.cell_fg[term.cur_row][term.cur_col];
         uint8_t bg_idx = term.cell_bg[term.cur_row][term.cur_col];
@@ -839,7 +867,6 @@ static id _TerminalKeyDown(id self, SEL _cmd, id theEvent) {
 
     uint16_t keyCode = [event keyCode];
     NSUInteger modifiers = [event modifierFlags];
-    NSString *chars = [event characters];
 
     /* Special keys: send VT100 escape sequences to PTY master */
     switch (keyCode) {
@@ -872,10 +899,15 @@ static id _TerminalKeyDown(id self, SEL _cmd, id theEvent) {
         goto done;
     }
 
-    /* Regular characters */
+    /* Regular characters — use CF C API to avoid ObjC messaging on CFStrings
+     * (CFStrings may not have ObjC isa set during toll-free bridging init) */
+    CFStringRef chars = (CFStringRef)[event characters];
     if (!chars) return nil;
 
-    uint16_t ch = [chars characterAtIndex:0];
+    CFIndex len = CFStringGetLength(chars);
+    if (len == 0) return nil;
+
+    uint16_t ch = (uint16_t)CFStringGetCharacterAtIndex(chars, 0);
 
     if (ch == 0) return nil;
 
@@ -1025,10 +1057,10 @@ int main(int argc, const char *argv[]) {
             [NSApp sendEvent:event];
         }
 
-        /* 2c-d. Poll PTY and feed VT100 emulator */
+        /* 2b. Poll PTY and feed VT100 emulator */
         term_poll_and_redraw();
 
-        /* 2e. Display dirty windows */
+        /* 2c. Display dirty windows */
         if (g_window) {
             [g_window displayIfNeeded];
         }

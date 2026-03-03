@@ -26,5 +26,6 @@ exports:
                    _NSApplicationDidFinishLaunchingNotification,
                    _NSApplicationWillTerminateNotification,
                    _NSWindowDidBecomeKeyNotification,
-                   _NSWindowDidResignKeyNotification ]
+                    _NSWindowDidResignKeyNotification,
+                    __FoundationEnsureInitialized ]
 ...

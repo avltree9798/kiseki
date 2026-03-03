@@ -46,7 +46,7 @@ LDFLAGS   := -target arm64-apple-macos11 \
 all: $(DYLIB)
 	@echo "  CoreGraphics.framework built successfully"
 
-$(DYLIB): CoreGraphics.c libSystem.tbd dyld.tbd $(CF_TBD)
+$(DYLIB): CoreGraphics.c cg_font8x16.inc libSystem.tbd dyld.tbd $(CF_TBD)
 	@echo "  FRAMEWORK  CoreGraphics.framework"
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ CoreGraphics.c libSystem.tbd dyld.tbd $(CF_TBD)

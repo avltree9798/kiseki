@@ -28,15 +28,42 @@
 extern Class  objc_allocateClassPair(Class superclass, const char *name, size_t extraBytes);
 extern void   objc_registerClassPair(Class cls);
 extern BOOL   class_addMethod(Class cls, SEL name, IMP imp, const char *types);
+extern SEL    sel_registerName(const char *str);
+extern const char *sel_getName(SEL sel);
+extern const char *class_getName(Class cls);
+extern Class  object_getClass(id obj);
 extern void  *objc_autoreleasePoolPush(void);
 extern void   objc_autoreleasePoolPop(void *pool);
 
 /* C library extras not in framework headers */
-extern int    fprintf(void *stream, const char *fmt, ...);
 extern int    snprintf(char *str, size_t size, const char *fmt, ...);
 /* strcmp, strcpy, strncpy, strcat, strrchr, strstr — from <string.h> via Foundation.h */
-extern void **__stderrp;
-#define stderr (*__stderrp)
+
+/* Safe fprintf replacement — bypasses broken FILE* pointer */
+static int _safe_fprintf_stderr(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static int _safe_fprintf_stderr(const char *fmt, ...) {
+    char _buf[256];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    extern int vsnprintf(char *, unsigned long, const char *, __builtin_va_list);
+    int n = vsnprintf(_buf, sizeof(_buf), fmt, ap);
+    __builtin_va_end(ap);
+    if (n > 0) {
+        unsigned long len = (unsigned long)n;
+        if (len > sizeof(_buf) - 1) len = sizeof(_buf) - 1;
+        long r;
+        __asm__ volatile(
+            "mov x0, #2\n"
+            "mov x1, %1\n"
+            "mov x2, %2\n"
+            "mov x16, #4\n"
+            "svc #0x80\n"
+            "mov %0, x0"
+            : "=r"(r) : "r"(_buf), "r"(len) : "x0","x1","x2","x16","memory");
+    }
+    return n;
+}
+#define fprintf(stream, ...) _safe_fprintf_stderr(__VA_ARGS__)
 
 /*
  * POSIX types (dev_t, mode_t, pid_t, off_t, struct timespec, etc.)
@@ -295,8 +322,6 @@ static void finder_read_directory(void)
         }
     }
 
-    fprintf(stderr, "[Finder] Read %d entries from %s\n",
-            g_entry_count, g_current_path);
 }
 
 /*
@@ -454,7 +479,6 @@ static void finder_launch_executable(const char *exe_path)
     }
 
     /* Parent */
-    fprintf(stderr, "[Finder] Launched '%s' (PID %d)\n", exe_path, (int)pid);
 }
 
 static void finder_open_item(int idx)
@@ -474,7 +498,6 @@ static void finder_open_item(int idx)
     if (ent->is_app_bundle) {
         char exe_path[PATH_MAX];
         if (finder_resolve_app_executable(fullpath, exe_path, sizeof(exe_path)) == 0) {
-            fprintf(stderr, "[Finder] Opening app bundle: %s → %s\n", fullpath, exe_path);
             finder_launch_executable(exe_path);
         } else {
             fprintf(stderr, "[Finder] Failed to resolve executable in '%s'\n", fullpath);
@@ -482,10 +505,7 @@ static void finder_open_item(int idx)
     } else if (ent->is_dir) {
         finder_navigate_into(ent->name);
     } else if (ent->is_executable) {
-        fprintf(stderr, "[Finder] Launching executable: %s\n", fullpath);
         finder_launch_executable(fullpath);
-    } else {
-        fprintf(stderr, "[Finder] No handler for file: %s\n", fullpath);
     }
 }
 
@@ -832,9 +852,6 @@ static id _finderAppDidFinishLaunching(id self, SEL _cmd, id notification) {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:(id)CFSTR("Finder")];
     [NSApp setMainMenu:menu];
 
-    fprintf(stderr, "[Finder] Browser window created at (%d, %d) %dx%d, showing %s (%d entries)\n",
-            FINDER_WIN_X, FINDER_WIN_Y, FINDER_WIN_W, FINDER_WIN_H,
-            g_current_path, g_entry_count);
     return nil;
 }
 
@@ -844,6 +861,7 @@ static id _finderAppDidFinishLaunching(id self, SEL _cmd, id notification) {
 
 int main(int argc, const char *argv[]) {
     (void)argc; (void)argv;
+
     void *pool = objc_autoreleasePoolPush();
 
     /* Create shared application */

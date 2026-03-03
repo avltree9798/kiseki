@@ -936,9 +936,8 @@ int main(void)
     for (;;) {
         int getty_pid = spawn_getty();
         if (getty_pid < 0) {
-            printf("init: failed to spawn getty, retrying...\n");
-            for (volatile int i = 0; i < 50000000; i++)
-                ;
+            printf("init: failed to spawn getty, retrying in 5s...\n");
+            sleep(5);
             continue;
         }
 
@@ -954,12 +953,14 @@ int main(void)
             if (rpid == getty_pid) {
                 printf("\ninit: getty (pid %d) exited, status=%d\n",
                        rpid, (status >> 8) & 0xFF);
+                sleep(2);   /* throttle respawn to avoid CPU exhaustion */
                 break;
             }
 
             /* Re-spawn fbcon0 getty if it exited */
             if (rpid == fbcon_getty_pid) {
                 printf("init: fbcon0 getty (pid %d) exited, respawning\n", rpid);
+                sleep(2);   /* throttle respawn to avoid CPU exhaustion */
                 fbcon_getty_pid = spawn_getty_on("/dev/fbcon0");
                 if (fbcon_getty_pid > 0) {
                     printf("init: respawned fbcon0 getty (pid %d)\n",

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <unistd.h>
 #include "objc/runtime.h"
 #include "objc/objc-arc.h"
 #include "objc/message.h"
@@ -411,7 +412,9 @@ int objc_sync_enter(id object)
 {
 	if ((object == 0) || isSmallObject(object)) { return 0; }
 	struct reference_list *list = referenceListForObject(object, YES);
+
 	LOCK(&list->lock);
+
 	return 0;
 }
 

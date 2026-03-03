@@ -991,6 +991,18 @@ int vm_map_enter(struct vm_map *map, uint64_t *addr, uint64_t size,
         }
     }
 
+    /* Bug 17b: Validate that the returned address doesn't overlap any existing entry */
+    {
+        struct vm_map_entry *chk = map->header.next;
+        while (chk != &map->header) {
+            if (chk->vme_start < map_addr + size && chk->vme_end > map_addr) {
+                kprintf("[vm_map] BUG: vm_map_enter OVERLAP! new=[0x%lx,0x%lx) existing=[0x%lx,0x%lx) fixed=%d nentries=%d\n",
+                        map_addr, map_addr + size, chk->vme_start, chk->vme_end, fixed, map->nentries);
+            }
+            chk = chk->next;
+        }
+    }
+
     /* Allocate an entry */
     struct vm_map_entry *new_entry = vm_map_alloc_entry(map);
     if (!new_entry) {

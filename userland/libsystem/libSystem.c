@@ -768,6 +768,28 @@ static block_header_t *_heap_head = NULL;
 
 static inline size_t _align16(size_t n) { return (n + 15) & ~(size_t)15; }
 
+/* ---- malloc diagnostic: direct svc write to stderr ---- */
+static void _malloc_raw_write(const char *s)
+{
+    unsigned long len = 0;
+    const char *p = s;
+    while (*p++) len++;
+    syscall3(SYS_write, 2, (long)s, (long)len);
+}
+static void _malloc_raw_hex(unsigned long val)
+{
+    char buf[19];
+    buf[0] = '0'; buf[1] = 'x';
+    for (int i = 15; i >= 0; i--) {
+        int nibble = val & 0xf;
+        buf[2 + i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+        val >>= 4;
+    }
+    buf[18] = '\0';
+    _malloc_raw_write(buf);
+}
+/* ---- end malloc diagnostic ---- */
+
 static void *_mmap_pages(size_t size)
 {
     size_t pages = (size + 4095) & ~(size_t)4095;
@@ -776,18 +798,31 @@ static void *_mmap_pages(size_t size)
 
     long ret = syscall6(SYS_mmap, 0, pages, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (ret < 0)
+
+    if (ret < 0) {
+        _malloc_raw_write("[malloc] MMAP FAILED req=");
+        _malloc_raw_hex(pages);
+        _malloc_raw_write(" err=");
+        _malloc_raw_hex((unsigned long)(-ret));
+        _malloc_raw_write("\n");
         return NULL;
+    }
     return (void *)ret;
 }
 
 static block_header_t *_find_free(size_t size)
 {
     block_header_t *cur = _heap_head;
+    unsigned long steps = 0;
     while (cur) {
         if (cur->free && cur->size >= size)
             return cur;
         cur = cur->next;
+        steps++;
+        if (steps > 1000000) {
+            _malloc_raw_write("[malloc] FATAL: _find_free infinite loop detected!\n");
+            return NULL;
+        }
     }
     return NULL;
 }
@@ -808,12 +843,26 @@ static void _split_block(block_header_t *block, size_t size)
 static void _coalesce(void)
 {
     block_header_t *cur = _heap_head;
+    unsigned long steps = 0;
     while (cur && cur->next) {
-        if (cur->free && cur->next->free) {
+        /*
+         * Only merge two free blocks if they are physically adjacent.
+         * The next block must start immediately after cur's data region.
+         * Without this check, blocks from different mmap regions
+         * (linked via _heap_head prepend) would be merged, creating a
+         * monster block whose size spans across unrelated memory.
+         */
+        if (cur->free && cur->next->free &&
+            (char *)cur + HEADER_SIZE + cur->size == (char *)cur->next) {
             cur->size += HEADER_SIZE + cur->next->size;
             cur->next = cur->next->next;
         } else {
             cur = cur->next;
+        }
+        steps++;
+        if (steps > 1000000) {
+            _malloc_raw_write("[malloc] FATAL: _coalesce infinite loop detected!\n");
+            return;
         }
     }
 }
@@ -1070,14 +1119,19 @@ static FILE _stderr_file = { 2, _F_WRITE | _F_UNBUF,   NULL, 0, 0, 0, EOF };
 /*
  * Export under both standard and Apple names.
  * macOS <stdio.h> defines: #define stdin __stdinp, etc.
- * So binaries compiled against the macOS SDK import ___stdinp, not _stdin.
- * We export both names for compatibility.
+ * The macOS convention is that __stdinp/etc are FILE ** (pointer-to-pointer)
+ * so that `#define stderr (*__stderrp)` yields a FILE *.
+ * Client code declares: extern void **__stderrp; #define stderr (*__stderrp)
  */
-EXPORT FILE *__stdinp  = &_stdin_file;
-EXPORT FILE *__stdoutp = &_stdout_file;
-EXPORT FILE *__stderrp = &_stderr_file;
+static FILE *_stdin_ptr  = &_stdin_file;
+static FILE *_stdout_ptr = &_stdout_file;
+static FILE *_stderr_ptr = &_stderr_file;
 
-/* Also export the standard names for code that doesn't use macOS headers */
+EXPORT FILE **__stdinp  = &_stdin_ptr;
+EXPORT FILE **__stdoutp = &_stdout_ptr;
+EXPORT FILE **__stderrp = &_stderr_ptr;
+
+/* Also export the standard names (single pointer) for code that uses them directly */
 EXPORT FILE *stdin  = &_stdin_file;
 EXPORT FILE *stdout = &_stdout_file;
 EXPORT FILE *stderr = &_stderr_file;

@@ -31,10 +31,31 @@ extern BOOL   class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 extern void  *objc_autoreleasePoolPush(void);
 extern void   objc_autoreleasePoolPop(void *pool);
 
-/* C library extras not in framework headers */
-extern int    fprintf(void *stream, const char *fmt, ...);
-extern void **__stderrp;
-#define stderr (*__stderrp)
+/* Safe fprintf replacement — bypasses broken FILE* pointer */
+static int _safe_fprintf_stderr(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static int _safe_fprintf_stderr(const char *fmt, ...) {
+    char _buf[256];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    extern int vsnprintf(char *, unsigned long, const char *, __builtin_va_list);
+    int n = vsnprintf(_buf, sizeof(_buf), fmt, ap);
+    __builtin_va_end(ap);
+    if (n > 0) {
+        unsigned long len = (unsigned long)n;
+        if (len > sizeof(_buf) - 1) len = sizeof(_buf) - 1;
+        long r;
+        __asm__ volatile(
+            "mov x0, #2\n"
+            "mov x1, %1\n"
+            "mov x2, %2\n"
+            "mov x16, #4\n"
+            "svc #0x80\n"
+            "mov %0, x0"
+            : "=r"(r) : "r"(_buf), "r"(len) : "x0","x1","x2","x16","memory");
+    }
+    return n;
+}
+#define fprintf(stream, ...) _safe_fprintf_stderr(__VA_ARGS__)
 
 /* Screen dimensions (matching WindowServer) */
 #define SCREEN_WIDTH    1280
@@ -163,6 +184,7 @@ static id _sysUIAppDidFinishLaunching(id self, SEL _cmd, id notification) {
         initWithFrame:CGRectMake(0, 0, CLOCK_WIDTH, CLOCK_HEIGHT)];
 
     [clockWindow setContentView:clockView];
+
     [clockWindow makeKeyAndOrderFront:nil];
 
     /* Store global references for periodic clock updates */
@@ -173,8 +195,6 @@ static id _sysUIAppDidFinishLaunching(id self, SEL _cmd, id notification) {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:(id)CFSTR("SystemUIServer")];
     [NSApp setMainMenu:menu];
 
-    fprintf(stderr, "[SystemUIServer] Clock window created at (%d, %d) size %dx%d\n",
-            CLOCK_X, CLOCK_Y, CLOCK_WIDTH, CLOCK_HEIGHT);
     return nil;
 }
 
@@ -214,6 +234,7 @@ static BOOL _clockNeedsUpdate(void) {
 
 int main(int argc, const char *argv[]) {
     (void)argc; (void)argv;
+
     void *pool = objc_autoreleasePoolPush();
 
     /* Create shared application */

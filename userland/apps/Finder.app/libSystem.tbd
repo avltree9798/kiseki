@@ -10,7 +10,7 @@ exports:
                    _memcpy, _memmove, _memset, _memcmp,
                    _strlen, _strcmp, _strncmp, _strcpy, _strncpy, _strdup,
                    _strcat, _strrchr, _strstr,
-                   _snprintf, _fprintf, _fwrite, _printf,
+                   _snprintf, _vsnprintf, _fprintf, _fwrite, _printf,
                    ___stderrp, ___stdoutp,
                    _opendir, _readdir, _closedir, _stat, _lstat,
                    _fork, _execve, __exit, _setsid, _getenv,

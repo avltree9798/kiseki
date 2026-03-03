@@ -7,7 +7,8 @@ compatibility-version: 1.0.0
 exports:
   - targets:     [ arm64-macos ]
     symbols:     [ _CFRetain, _CFRelease,
-                   _CFStringCreateWithCString, _CFStringGetCStringPtr,
-                   ___CFStringMakeConstantString,
-                   _kCFAllocatorDefault ]
+                    _CFStringCreateWithCString, _CFStringGetCStringPtr,
+                    _CFStringGetLength, _CFStringGetCharacterAtIndex,
+                    ___CFStringMakeConstantString,
+                    _kCFAllocatorDefault ]
 ...

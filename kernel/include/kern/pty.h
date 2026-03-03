@@ -57,9 +57,13 @@ struct pty {
     uint32_t        pt_s2m_count;   /* Bytes in buffer */
     spinlock_t      pt_s2m_lock;
 
-    /* Reference counts for master and slave sides */
-    int             pt_master_open; /* Master side is open */
-    int             pt_slave_open;  /* Slave side is open */
+    /* Reference counts for master and slave file descriptions.
+     * Incremented when a new struct file is created for this side
+     * (openpty), decremented when the last fd sharing that struct
+     * file is closed (f_refcount drops to 0).  The PTY is freed
+     * when both counts reach zero. */
+    int             pt_master_open; /* Master-side file description count */
+    int             pt_slave_open;  /* Slave-side file description count */
 };
 
 /* ============================================================================

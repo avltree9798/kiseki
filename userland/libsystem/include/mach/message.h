@@ -155,6 +155,14 @@ typedef struct {
 #define MACH_MSG_OOL_VOLATILE_DESCRIPTOR    3
 #define MACH_MSG_GUARDED_PORT_DESCRIPTOR    4
 
+/*
+ * Mach IPC descriptors use #pragma pack(4) to match the XNU ABI.
+ * This prevents the compiler from inserting alignment padding after
+ * mach_msg_body_t (4 bytes) before a descriptor's pointer/uint64 field.
+ * See XNU osfmk/mach/message.h.
+ */
+#pragma pack(push, 4)
+
 typedef struct {
     mach_port_t             name;
     mach_msg_size_t         pad1;
@@ -171,6 +179,8 @@ typedef struct {
     mach_msg_descriptor_type_t type : 8;
     mach_msg_size_t         size;
 } mach_msg_ool_descriptor_t;
+
+#pragma pack(pop)
 
 /* ============================================================================
  * Message Trailer

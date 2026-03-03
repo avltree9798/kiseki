@@ -117,14 +117,28 @@ extern char  *strcpy(char *dst, const char *src);
 extern char  *strncpy(char *dst, const char *src, size_t n);
 extern char  *strdup(const char *s);
 extern int    snprintf(char *buf, size_t size, const char *fmt, ...);
-extern int    fprintf(void *stream, const char *fmt, ...);
 extern int    printf(const char *fmt, ...);
 extern size_t fwrite(const void *ptr, size_t size, size_t nmemb, void *stream);
 
-extern void **__stderrp;
 extern void **__stdoutp;
-#define stderr (*__stderrp)
 #define stdout (*__stdoutp)
+
+/* Safe stderr write — bypasses broken FILE* pointer (Bug 21 fix) */
+static void _fnd_stderr_write(const char *s) {
+    if (!s) return;
+    unsigned long len = 0;
+    while (s[len]) len++;
+    if (len == 0) return;
+    long r;
+    __asm__ volatile(
+        "mov x0, #2\n"
+        "mov x1, %1\n"
+        "mov x2, %2\n"
+        "mov x16, #4\n"
+        "svc #0x80\n"
+        "mov %0, x0"
+        : "=r"(r) : "r"(s), "r"(len) : "x0","x1","x2","x16","memory");
+}
 
 /* ============================================================================
  * Section 4: CoreFoundation Imported Types & Functions
@@ -192,6 +206,21 @@ extern void _CFRuntimeInitStaticInstance(void *memory, CFTypeID typeID);
 extern CFTypeRef   CFRetain(CFTypeRef cf);
 extern void        CFRelease(CFTypeRef cf);
 extern CFTypeID    CFGetTypeID(CFTypeRef cf);
+
+/* Individual type ID getters — needed for toll-free bridging ISA lookup */
+extern CFTypeID CFStringGetTypeID(void);
+extern CFTypeID CFArrayGetTypeID(void);
+extern CFTypeID CFDictionaryGetTypeID(void);
+extern CFTypeID CFNumberGetTypeID(void);
+extern CFTypeID CFDataGetTypeID(void);
+extern CFTypeID CFDateGetTypeID(void);
+extern CFTypeID CFSetGetTypeID(void);
+extern CFTypeID CFBooleanGetTypeID(void);
+extern CFTypeID CFNullGetTypeID(void);
+
+/* Bridge ISA lookup registration */
+typedef uintptr_t (*__CFBridgeISALookupFn)(CFTypeID typeID);
+extern void _CFRuntimeBridgeSetISALookup(__CFBridgeISALookupFn fn);
 
 extern CFStringRef CFStringCreateWithCString(CFAllocatorRef alloc, const char *cStr, UInt32 encoding);
 extern const char *CFStringGetCStringPtr(CFStringRef theString, UInt32 encoding);
@@ -301,10 +330,13 @@ __attribute__((objc_root_class))
 - (BOOL)isProxy;
 @end
 
+
+
 @implementation NSObject
 
 + (id)alloc {
     size_t size = class_getInstanceSize(self);
+
     /* Allocate with hidden refcount word at obj[-1] for toll-free bridging */
     intptr_t *raw = (intptr_t *)calloc(1, sizeof(intptr_t) + size);
     if (!raw) return nil;
@@ -1122,6 +1154,7 @@ __attribute__((objc_root_class))
 @interface NSAutoreleasePool : NSObject {
     void *_pool;
 }
++ (BOOL)_ARCCompatibleAutoreleasePool;
 - (id)init;
 - (void)drain;
 - (void)dealloc;
@@ -1129,23 +1162,34 @@ __attribute__((objc_root_class))
 
 @implementation NSAutoreleasePool
 
+/*
+ * +_ARCCompatibleAutoreleasePool
+ *
+ * GNUstep libobjc2 checks for this method in initAutorelease() to decide
+ * whether to use its built-in ARC-style autorelease pool.  If this method
+ * exists, the runtime sets useARCAutoreleasePool = YES and manages pools
+ * internally via arc_tls, avoiding the creation of NSAutoreleasePool
+ * instances (which would cause infinite recursion: -init calling
+ * objc_autoreleasePoolPush -> [NSAutoreleasePool new] -> -init -> ...).
+ */
++ (BOOL)_ARCCompatibleAutoreleasePool {
+    return YES;
+}
+
 - (id)init {
     self = [super init];
-    if (self) {
-        _pool = objc_autoreleasePoolPush();
-    }
+    /* Do NOT call objc_autoreleasePoolPush() here.
+     * The runtime's built-in ARC pool handles push/pop.
+     * This class exists for compatibility but the runtime
+     * bypasses it when +_ARCCompatibleAutoreleasePool returns YES. */
     return self;
 }
 
 - (void)drain {
-    if (_pool) {
-        objc_autoreleasePoolPop(_pool);
-        _pool = NULL;
-    }
+    /* No-op: the runtime manages the pool internally. */
 }
 
 - (void)dealloc {
-    [self drain];
     [super dealloc];
 }
 
@@ -1265,7 +1309,8 @@ void NSLog(id format, ...) {
     if (!format) return;
     const char *s = CFStringGetCStringPtr((CFStringRef)format, kCFStringEncodingUTF8);
     if (s) {
-        fprintf(stderr, "%s\n", s);
+        _fnd_stderr_write(s);
+        _fnd_stderr_write("\n");
     }
 }
 
@@ -1490,13 +1535,80 @@ static NSBundle *__mainBundle = nil;
  * Section 23: Framework Initialisation
  * ============================================================================ */
 
-__attribute__((constructor, used))
-static void __FoundationInitialize(void) {
-    /* Initialise notification name constants */
+/*
+ * __FoundationBridgeISALookup — Toll-free bridging callback.
+ *
+ * Called by CoreFoundation's _CFRuntimeCreateInstance to set the ObjC
+ * isa pointer on newly created CF objects.  Without this, CFString etc.
+ * have isa == NULL and any ObjC message send to them crashes.
+ */
+/*
+ * Cached class pointers for toll-free bridging.
+ * Resolved lazily via objc_getClass() (a C function, no ObjC messages).
+ * We retry on each call until resolved because the ObjC runtime may not
+ * have loaded Foundation's classes yet during early constructor execution.
+ */
+static Class __bridge_NSString     = NULL;
+static Class __bridge_NSArray      = NULL;
+static Class __bridge_NSDictionary = NULL;
+static Class __bridge_NSNumber     = NULL;
+static Class __bridge_NSData       = NULL;
+static Class __bridge_NSDate       = NULL;
+
+static void __FoundationResolveBridgeClasses(void) {
+    if (!__bridge_NSString)     __bridge_NSString     = objc_getClass("NSString");
+    if (!__bridge_NSArray)      __bridge_NSArray      = objc_getClass("NSArray");
+    if (!__bridge_NSDictionary) __bridge_NSDictionary = objc_getClass("NSDictionary");
+    if (!__bridge_NSNumber)     __bridge_NSNumber     = objc_getClass("NSNumber");
+    if (!__bridge_NSData)       __bridge_NSData       = objc_getClass("NSData");
+    if (!__bridge_NSDate)       __bridge_NSDate       = objc_getClass("NSDate");
+}
+
+static uintptr_t __FoundationBridgeISALookup(CFTypeID typeID) {
+    /* Resolve classes on every call until all are found.
+     * During early construction objc_getClass may return NULL;
+     * we simply return 0 (no isa) for those objects and they
+     * will work fine as long as they are only used via C APIs
+     * (which is true for CFSTR constants). */
+    __FoundationResolveBridgeClasses();
+    if (typeID == CFStringGetTypeID())     return (uintptr_t)__bridge_NSString;
+    if (typeID == CFArrayGetTypeID())      return (uintptr_t)__bridge_NSArray;
+    if (typeID == CFDictionaryGetTypeID()) return (uintptr_t)__bridge_NSDictionary;
+    if (typeID == CFNumberGetTypeID())     return (uintptr_t)__bridge_NSNumber;
+    if (typeID == CFDataGetTypeID())       return (uintptr_t)__bridge_NSData;
+    if (typeID == CFDateGetTypeID())       return (uintptr_t)__bridge_NSDate;
+    return 0;
+}
+
+static BOOL __foundation_inited = NO;
+
+/*
+ * _FoundationEnsureInitialized — Called lazily to finish Foundation setup.
+ *
+ * We split initialization: the bridge ISA lookup is registered in the
+ * constructor (safe — just sets a function pointer), but the notification
+ * name constants are created later (they call CFSTR which triggers the
+ * ISA lookup, which needs objc_getClass to work, which requires all
+ * ObjC classes to be loaded).
+ *
+ * Called from [NSApplication sharedApplication] — by that point all
+ * images are loaded and ObjC classes are registered.
+ */
+__attribute__((visibility("default")))
+void _FoundationEnsureInitialized(void) {
+    if (__foundation_inited) return;
+    __foundation_inited = YES;
     NSApplicationDidFinishLaunchingNotification = CFSTR("NSApplicationDidFinishLaunchingNotification");
     NSApplicationWillTerminateNotification = CFSTR("NSApplicationWillTerminateNotification");
     NSWindowDidBecomeKeyNotification = CFSTR("NSWindowDidBecomeKeyNotification");
     NSWindowDidResignKeyNotification = CFSTR("NSWindowDidResignKeyNotification");
+}
+
+__attribute__((constructor, used))
+static void __FoundationInitialize(void) {
+    /* Register toll-free bridging ISA lookup so CF objects get ObjC isa pointers.
+     * This just sets a function pointer — safe during early construction. */
+    _CFRuntimeBridgeSetISALookup(__FoundationBridgeISALookup);
 }
 
 /* ============================================================================

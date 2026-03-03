@@ -27,6 +27,7 @@
 #include <mach/mach.h>
 #include <servers/bootstrap.h>
 #include <IOKit/IOKitLib.h>
+#include <sys/mman.h>
 
 /* ============================================================================
  * Constants
@@ -1123,11 +1124,37 @@ static void handle_set_frame(ws_rcv_buffer_t *buf)
     compositor_dirty = true;
 }
 
+/*
+ * free_ool_data - Free OOL memory mapped into our address space by the kernel.
+ *
+ * Every DRAW_RECT carries an OOL descriptor whose pages are mapped into
+ * WindowServer's address space during mach_msg receive.  If we don't
+ * munmap them after copying pixels, every draw leaks the entire pixel
+ * buffer (e.g. 1000 pages for the Dock's 1280x800 desktop).
+ */
+static void free_ool_data(mach_msg_ool_descriptor_t *desc)
+{
+    if (desc->address && desc->size > 0) {
+        uint64_t addr = (uint64_t)(uintptr_t)desc->address;
+        uint64_t size = desc->size;
+        uint64_t page_mask = 4096 - 1;
+        uint64_t aligned_addr = addr & ~page_mask;
+        uint64_t aligned_size = ((addr + size + page_mask) & ~page_mask) - aligned_addr;
+        munmap((void *)(uintptr_t)aligned_addr, (size_t)aligned_size);
+    }
+}
+
 static void handle_draw_rect(ws_rcv_buffer_t *buf)
 {
     ws_msg_draw_rect_t *msg = &buf->draw_rect;
     struct ws_window *w = find_window(msg->window_id);
-    if (!w || w->conn_id != msg->conn_id || !w->backing) return;
+    if (!w || w->conn_id != msg->conn_id || !w->backing) {
+        printf("[WS] DRAW_RECT: REJECTED w=%p conn_ok=%d backing=%p\n",
+               (void *)w, w ? (w->conn_id == msg->conn_id) : -1,
+               w ? (void *)w->backing : NULL);
+        free_ool_data(&msg->surface_desc);
+        return;
+    }
 
     /* The OOL descriptor's address now points to mapped memory in our space
      * (the kernel did copyout into our address space) */
@@ -1138,10 +1165,18 @@ static void handle_draw_rect(ws_rcv_buffer_t *buf)
     uint32_t bw = msg->width;
     uint32_t bh = msg->height;
 
-    if (!src_pixels || bw == 0 || bh == 0) return;
+    if (!src_pixels || bw == 0 || bh == 0) {
+        printf("[WS] DRAW_RECT: REJECTED null_pixels=%d bw=%u bh=%u\n",
+               src_pixels == NULL, bw, bh);
+        free_ool_data(&msg->surface_desc);
+        return;
+    }
 
     /* Clamp to window bounds */
-    if (dx >= w->width || dy >= w->height) return;
+    if (dx >= w->width || dy >= w->height) {
+        free_ool_data(&msg->surface_desc);
+        return;
+    }
     if (dx + bw > w->width)  bw = w->width - dx;
     if (dy + bh > w->height) bh = w->height - dy;
 
@@ -1158,7 +1193,8 @@ static void handle_draw_rect(ws_rcv_buffer_t *buf)
         memcpy(drow, srow, bw * sizeof(uint32_t));
     }
 
-    /* TODO: Could free the OOL memory. For now the kernel will handle it. */
+    /* Free the OOL memory now that pixels have been copied */
+    free_ool_data(&msg->surface_desc);
 
     compositor_dirty = true;
 }
@@ -1448,10 +1484,8 @@ static void send_key_event(struct ws_client *c, int32_t window_id,
     evt.modifiers = mods;
     evt.is_repeat = is_repeat;
 
-    kern_return_t kr = mach_msg(&evt.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+    mach_msg(&evt.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
              sizeof(evt), 0, MACH_PORT_NULL, 5, MACH_PORT_NULL);
-    printf("[WS] send_key_event: port=%u msg_id=%d keycode=%u kr=%d\n",
-           c->event_port, msg_id, keycode, kr);
 }
 
 static bool process_hid(void)
@@ -1579,9 +1613,6 @@ static bool process_hid(void)
 
         case HID_EVENT_KEY_DOWN:
         case HID_EVENT_KEY_UP: {
-            printf("[WS] KEY %s keycode=%u flags=0x%x key_window_id=%d\n",
-                   ev.type == HID_EVENT_KEY_DOWN ? "DOWN" : "UP",
-                   ev.keycode, ev.flags, key_window_id);
             /* Route to key window's client */
             if (key_window_id >= 0) {
                 struct ws_window *kw = find_window(key_window_id);
@@ -1591,19 +1622,10 @@ static bool process_hid(void)
                         int32_t msg_id = (ev.type == HID_EVENT_KEY_DOWN)
                                          ? WS_EVENT_KEY_DOWN : WS_EVENT_KEY_UP;
                         uint32_t ascii = keycode_to_char(ev.keycode, ev.flags);
-                        printf("[WS]   -> sending to conn=%d win=%d port=%u msg=%d ascii=%u('%c')\n",
-                               kw->conn_id, kw->window_id, c->event_port, msg_id,
-                               ascii, (ascii >= 0x20 && ascii < 0x7f) ? (char)ascii : '?');
                         send_key_event(c, kw->window_id, msg_id,
                                       ev.keycode, ascii, ev.flags, 0);
-                    } else {
-                        printf("[WS]   -> NO CLIENT for conn_id=%d\n", kw->conn_id);
                     }
-                } else {
-                    printf("[WS]   -> key window %d NOT FOUND\n", key_window_id);
                 }
-            } else {
-                printf("[WS]   -> NO KEY WINDOW (key_window_id=-1)\n");
             }
             break;
         }
@@ -1740,7 +1762,7 @@ int main(int argc, char *argv[])
                          0,
                          sizeof(rcv_buf),
                          svc_port,
-                         5,                     /* 5ms → rounds to 1 tick (10ms) */
+                         50,                    /* 50ms idle sleep to reduce CPU usage */
                          MACH_PORT_NULL);
 
             if (kr == MACH_MSG_SUCCESS) {

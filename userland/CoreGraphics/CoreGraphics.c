@@ -2884,7 +2884,13 @@ EXPORT void CGContextSynchronize(CGContextRef c) {
     (void)c;
 }
 
-/* --- CGContext text drawing (stubs — will be implemented with CoreText) --- */
+/* --- CGContext text drawing --- */
+
+/* 8x16 VGA bitmap font for text rendering */
+#define __CG_FONT_W 8
+#define __CG_FONT_H 16
+
+#include "cg_font8x16.inc"
 
 EXPORT void CGContextSetFont(CGContextRef c, void *font) {
     (void)c; (void)font;
@@ -2899,13 +2905,87 @@ EXPORT void CGContextSelectFont(CGContextRef c, const char *name,
     (void)c; (void)name; (void)size; (void)textEncoding;
 }
 
-EXPORT void CGContextShowText(CGContextRef c, const char *string, size_t length) {
-    (void)c; (void)string; (void)length;
-}
-
 EXPORT void CGContextShowTextAtPoint(CGContextRef c, CGFloat x, CGFloat y,
     const char *string, size_t length) {
-    (void)c; (void)x; (void)y; (void)string; (void)length;
+    if (!c || !c->_gstate || !string || c->_type != __kCGContextTypeBitmap)
+        return;
+
+    CGFloat *fc = c->_gstate->fillColor;
+    CGFloat ga  = c->_gstate->alpha;
+    CGFloat finalA = fc[3] * ga;
+    CGFloat charSpacing = c->_gstate->characterSpacing;
+
+    /* Check if we can use the fast opaque path */
+    bool opaque = (finalA >= 1.0 &&
+                   c->_gstate->blendMode == kCGBlendModeNormal);
+
+    /* Precompute uint8 colour for the opaque fast path */
+    uint8_t fR = (uint8_t)(fc[0] * 255.0 + 0.5);
+    uint8_t fG = (uint8_t)(fc[1] * 255.0 + 0.5);
+    uint8_t fB = (uint8_t)(fc[2] * 255.0 + 0.5);
+
+    /* Get clip rect */
+    CGRect clip = c->_gstate->clipRect;
+    int clipX0 = (int)clip.origin.x;
+    int clipY0 = (int)clip.origin.y;
+    int clipX1 = (int)(clip.origin.x + clip.size.width);
+    int clipY1 = (int)(clip.origin.y + clip.size.height);
+
+    /* Clamp clip to bitmap bounds */
+    if (clipX0 < 0) clipX0 = 0;
+    if (clipY0 < 0) clipY0 = 0;
+    if (clipX1 > (int)c->_width)  clipX1 = (int)c->_width;
+    if (clipY1 > (int)c->_height) clipY1 = (int)c->_height;
+
+    CGFloat curX = x;
+    CGFloat curY = y;
+
+    for (size_t i = 0; i < length; i++) {
+        unsigned char ch = (unsigned char)string[i];
+        const unsigned char *glyph = __cg_font8x16[ch];
+
+        /* Glyph origin: (curX, curY) is the baseline-left in CG convention.
+         * Our bitmap font has 16 rows; treat y as the TOP of the glyph
+         * (matching how WindowServer and AppKit callers use it). */
+        int gx = (int)curX;
+        int gy = (int)curY;
+
+        /* Skip entirely if glyph is off-screen */
+        if (gx + __CG_FONT_W <= clipX0 || gx >= clipX1 ||
+            gy + __CG_FONT_H <= clipY0 || gy >= clipY1) {
+            curX += __CG_FONT_W + charSpacing;
+            continue;
+        }
+
+        for (int row = 0; row < __CG_FONT_H; row++) {
+            int py = gy + row;
+            if (py < clipY0 || py >= clipY1) continue;
+            uint8_t bits = glyph[row];
+            if (bits == 0) continue; /* empty row — skip */
+            for (int col = 0; col < __CG_FONT_W; col++) {
+                if (!(bits & (0x80 >> col))) continue;
+                int px = gx + col;
+                if (px < clipX0 || px >= clipX1) continue;
+                if (opaque) {
+                    __CGContextSetPixelOpaque(c, px, py, fR, fG, fB);
+                } else {
+                    __CGContextBlendPixel(c, px, py,
+                                          fc[0], fc[1], fc[2], fc[3]);
+                }
+            }
+        }
+
+        curX += __CG_FONT_W + charSpacing;
+    }
+
+    /* Update text position */
+    c->_gstate->textPosition = CGPointMake(curX, curY);
+}
+
+EXPORT void CGContextShowText(CGContextRef c, const char *string, size_t length) {
+    if (!c || !c->_gstate) return;
+    CGPoint pos = c->_gstate->textPosition;
+    CGContextShowTextAtPoint(c, pos.x, pos.y, string, length);
 }
 
 EXPORT void CGContextShowGlyphs(CGContextRef c, const void *glyphs, size_t count) {

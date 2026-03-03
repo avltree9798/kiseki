@@ -115,6 +115,9 @@ struct proc {
 
     /* File creation mask */
     mode_t          p_umask;                    /* umask (default 022) */
+
+    /* Fault tracking (prevents infinite demand-page retry loops) */
+    uint64_t        p_last_fault_va;            /* Last VA that got TLBI retry */
 };
 
 /* ============================================================================

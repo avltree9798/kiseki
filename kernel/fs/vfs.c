@@ -9,6 +9,7 @@
 #include <kern/kprintf.h>
 #include <kern/sync.h>
 #include <kern/proc.h>
+#include <kern/pty.h>
 #include <fs/vfs.h>
 
 /* ============================================================================
@@ -1190,6 +1191,13 @@ vfs_close(int fd)
         void *pipe_ptr = fp->f_pipe;
         int pipe_dir = (int)fp->f_pipe_dir;
 
+        /* Decrement PTY open count when last fd referencing this
+         * file description is closed.  fork() increments f_refcount
+         * (via fd_dup_table) so the PTY stays alive as long as any
+         * process still holds an fd to this file description. */
+        struct pty *pty_ptr = (struct pty *)fp->f_pty;
+        int pty_side = (int)fp->f_pty_side;
+
         fp->f_vnode = NULL;
         fp->f_pipe = NULL;
         fp->f_pty = NULL;
@@ -1198,6 +1206,15 @@ vfs_close(int fd)
 
         if (pipe_ptr != NULL)
             pipe_close_end(pipe_ptr, pipe_dir);
+
+        if (pty_ptr != NULL) {
+            if (pty_side == 0)
+                pty_ptr->pt_master_open--;
+            else
+                pty_ptr->pt_slave_open--;
+            if (pty_ptr->pt_master_open <= 0 && pty_ptr->pt_slave_open <= 0)
+                pty_free(pty_ptr);
+        }
 
         if (vp != NULL)
             vnode_release(vp);

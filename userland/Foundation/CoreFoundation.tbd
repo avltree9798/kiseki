@@ -39,5 +39,11 @@ exports:
                    _kCFTypeDictionaryKeyCallBacks,
                    _kCFTypeDictionaryValueCallBacks,
                    __CFRuntimeRegisterClass, __CFRuntimeCreateInstance,
-                   __CFRuntimeInitStaticInstance ]
+                   __CFRuntimeInitStaticInstance,
+                   __CFRuntimeBridgeSetISALookup,
+                   _CFStringGetTypeID, _CFArrayGetTypeID,
+                   _CFDictionaryGetTypeID, _CFNumberGetTypeID,
+                   _CFDataGetTypeID, _CFDateGetTypeID,
+                   _CFSetGetTypeID, _CFBooleanGetTypeID,
+                   _CFNullGetTypeID ]
 ...

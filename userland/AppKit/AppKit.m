@@ -165,14 +165,48 @@ extern char  *strcpy(char *dst, const char *src);
 extern char  *strncpy(char *dst, const char *src, size_t n);
 extern char  *strdup(const char *s);
 extern int    snprintf(char *buf, size_t size, const char *fmt, ...);
-extern int    fprintf(void *stream, const char *fmt, ...);
 extern int    printf(const char *fmt, ...);
 extern size_t fwrite(const void *ptr, size_t size, size_t nmemb, void *stream);
 
-extern void **__stderrp;
-extern void **__stdoutp;
-#define stderr (*__stderrp)
-#define stdout (*__stdoutp)
+/*
+ * IMPORTANT: Do NOT use fprintf(stderr, ...) from AppKit!
+ *
+ * AppKit is compiled with macOS SDK headers (for ObjC runtime), but links
+ * against Kiseki's libSystem at runtime.  The __stderrp indirection produces
+ * a FILE* with bit 36 set (0x00000013000540e0 instead of 0x00000003000540e0),
+ * and fprintf writing through that corrupted pointer trashes heap memory
+ * (specifically the ObjC runtime's reference_list->lock mutexes, causing
+ * Bug 21 deadlock in objc_sync_enter).
+ *
+ * Instead we redirect all fprintf(stderr,...) to snprintf + raw write(2,...).
+ */
+static int _appkit_fprintf_stderr(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static int _appkit_fprintf_stderr(const char *fmt, ...) {
+    char _buf[256];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    extern int vsnprintf(char *, size_t, const char *, __builtin_va_list);
+    int n = vsnprintf(_buf, sizeof(_buf), fmt, ap);
+    __builtin_va_end(ap);
+    if (n > 0) {
+        size_t len = (size_t)n;
+        if (len > sizeof(_buf) - 1) len = sizeof(_buf) - 1;
+        /* direct syscall write to fd 2 */
+        long r;
+        __asm__ volatile(
+            "mov x0, #2\n"
+            "mov x1, %1\n"
+            "mov x2, %2\n"
+            "mov x16, #4\n"
+            "svc #0x80\n"
+            "mov %0, x0"
+            : "=r"(r) : "r"(_buf), "r"(len) : "x0","x1","x2","x16","memory");
+    }
+    return n;
+}
+
+/* Shadow fprintf: all calls to fprintf(stderr, ...) become safe */
+#define fprintf(stream, ...) _appkit_fprintf_stderr(__VA_ARGS__)
 
 /* Mach IPC primitives */
 typedef unsigned int mach_port_t;
@@ -222,6 +256,16 @@ typedef struct {
     mach_msg_size_t     msgh_descriptor_count;
 } mach_msg_body_t;
 
+/*
+ * Mach IPC descriptor structs must use #pragma pack(4) to match the
+ * macOS/XNU ABI. Without this, the compiler inserts 4 bytes of padding
+ * after mach_msg_body_t (4 bytes) to align the void* address field to
+ * 8 bytes, making sizeof(ws_msg_draw_rect_t) = 80 instead of 72.
+ * XNU's mach/message.h uses #pragma pack(push, 4) for all descriptor
+ * types. See osfmk/mach/message.h.
+ */
+#pragma pack(push, 4)
+
 typedef struct {
     void                    *address;
     unsigned int            deallocate : 8;
@@ -230,6 +274,8 @@ typedef struct {
     mach_msg_descriptor_type_t type : 8;
     mach_msg_size_t         size;
 } mach_msg_ool_descriptor_t;
+
+#pragma pack(pop)
 
 extern mach_msg_return_t mach_msg(
     mach_msg_header_t   *msg,
@@ -513,6 +559,7 @@ typedef struct {
     uint32_t            width, height;
 } ws_msg_set_frame_t;
 
+#pragma pack(push, 4)
 typedef struct {
     mach_msg_header_t           header;
     mach_msg_body_t             body;
@@ -523,6 +570,7 @@ typedef struct {
     uint32_t                    width, height;
     uint32_t                    src_rowbytes;
 } ws_msg_draw_rect_t;
+#pragma pack(pop)
 
 typedef struct {
     mach_msg_header_t   header;
@@ -629,11 +677,15 @@ __attribute__((objc_root_class))
 /* Global shared application instance (matching macOS NSApp) */
 EXPORT id NSApp = nil;
 
-/* Notification name constants */
-EXPORT CFStringRef NSApplicationDidFinishLaunchingNotification = NULL;
-EXPORT CFStringRef NSApplicationWillTerminateNotification = NULL;
-EXPORT CFStringRef NSWindowDidBecomeKeyNotification = NULL;
-EXPORT CFStringRef NSWindowDidResignKeyNotification = NULL;
+/* Notification name constants — defined and initialised by Foundation.
+ * AppKit merely references them via extern. */
+extern CFStringRef NSApplicationDidFinishLaunchingNotification;
+extern CFStringRef NSApplicationWillTerminateNotification;
+extern CFStringRef NSWindowDidBecomeKeyNotification;
+extern CFStringRef NSWindowDidResignKeyNotification;
+
+/* Deferred Foundation initialisation (safe to call after class loading) */
+extern void _FoundationEnsureInitialized(void);
 
 /* ============================================================================
  * Section 11: NSGraphicsContext
@@ -1063,7 +1115,13 @@ typedef enum {
        modifierFlags:(NSUInteger)flags
            timestamp:(NSTimeInterval)timestamp
 {
-    NSEvent *e = [[NSEvent alloc] init];
+    /* Reuse a single cached event to avoid per-event heap alloc (Bug 28 fix).
+     * Safe because events are consumed synchronously before the next one is created. */
+    static NSEvent *__cachedEvent = nil;
+    if (!__cachedEvent) {
+        __cachedEvent = [[NSEvent alloc] init];
+    }
+    NSEvent *e = __cachedEvent;
     if (e) {
         e->_type = type;
         e->_windowNumber = windowNumber;
@@ -1177,8 +1235,6 @@ static struct {
 static BOOL _WSConnect(const char *app_name) {
     if (_ws_conn.connected) return YES;
 
-    fprintf(stderr, "[AppKit] _WSConnect: looking up '%s'\n", WS_SERVICE_NAME);
-
     /* Look up WindowServer service */
     kern_return_t kr = bootstrap_look_up(
         MACH_PORT_NULL, WS_SERVICE_NAME, &_ws_conn.service_port);
@@ -1187,9 +1243,6 @@ static BOOL _WSConnect(const char *app_name) {
                 WS_SERVICE_NAME, kr);
         return NO;
     }
-    fprintf(stderr, "[AppKit] _WSConnect: bootstrap_look_up OK, service_port=%u\n",
-            _ws_conn.service_port);
-
     /* Allocate our event port (receive right) */
     kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
                             &_ws_conn.event_port);
@@ -1197,9 +1250,6 @@ static BOOL _WSConnect(const char *app_name) {
         fprintf(stderr, "[AppKit] mach_port_allocate failed: %d\n", kr);
         return NO;
     }
-    fprintf(stderr, "[AppKit] _WSConnect: event_port allocated = %u\n",
-            _ws_conn.event_port);
-
     /* Send CONNECT request */
     ws_msg_connect_t msg;
     memset(&msg, 0, sizeof(msg));
@@ -1217,7 +1267,6 @@ static BOOL _WSConnect(const char *app_name) {
         msg.app_name[len] = '\0';
     }
 
-    fprintf(stderr, "[AppKit] _WSConnect: sending CONNECT msg (SEND|RCV)...\n");
     kr = mach_msg(&msg.header, MACH_SEND_MSG | MACH_RCV_MSG,
                   sizeof(msg), sizeof(ws_reply_connect_t),
                   _ws_conn.event_port, MACH_MSG_TIMEOUT_NONE,
@@ -1229,8 +1278,6 @@ static BOOL _WSConnect(const char *app_name) {
 
     /* Parse reply */
     ws_reply_connect_t *reply = (ws_reply_connect_t *)&msg;
-    fprintf(stderr, "[AppKit] _WSConnect: reply received: id=%d result=%d conn_id=%d\n",
-            reply->header.msgh_id, reply->result, reply->conn_id);
     if (reply->result != 0 || reply->conn_id < 0) {
         fprintf(stderr, "[AppKit] WS_MSG_CONNECT rejected: result=%d conn_id=%d\n",
                 reply->result, reply->conn_id);
@@ -1239,8 +1286,6 @@ static BOOL _WSConnect(const char *app_name) {
 
     _ws_conn.conn_id = reply->conn_id;
     _ws_conn.connected = YES;
-    fprintf(stderr, "[AppKit] Connected to WindowServer (conn_id=%d, event_port=%u)\n",
-            _ws_conn.conn_id, _ws_conn.event_port);
     return YES;
 }
 
@@ -1272,8 +1317,6 @@ static void _WSDisconnect(void) {
 static int32_t _WSCreateWindow(int32_t x, int32_t y, uint32_t width,
                                 uint32_t height, uint32_t style_mask,
                                 const char *title) {
-    fprintf(stderr, "[AppKit] _WSCreateWindow: (%d,%d) %ux%u style=0x%x title='%s' connected=%d\n",
-            x, y, width, height, style_mask, title ? title : "(null)", _ws_conn.connected);
     if (!_ws_conn.connected) {
         fprintf(stderr, "[AppKit] _WSCreateWindow: NOT CONNECTED, returning -1\n");
         return -1;
@@ -1305,25 +1348,33 @@ static int32_t _WSCreateWindow(int32_t x, int32_t y, uint32_t width,
         buf.req.title[len] = '\0';
     }
 
-    fprintf(stderr, "[AppKit] _WSCreateWindow: sending CREATE_WINDOW msg (SEND|RCV)...\n");
+    /* First call: SEND the request AND RCV the first reply/event */
     kern_return_t kr = mach_msg(&buf.req.header, MACH_SEND_MSG | MACH_RCV_MSG,
                                 sizeof(ws_msg_create_window_t),
-                                sizeof(ws_reply_create_window_t),
+                                sizeof(buf),
                                 _ws_conn.event_port, MACH_MSG_TIMEOUT_NONE,
                                 MACH_PORT_NULL);
-    if (kr != MACH_MSG_SUCCESS) {
-        fprintf(stderr, "[AppKit] WS_MSG_CREATE_WINDOW mach_msg failed: %d\n", kr);
+    if (kr != MACH_MSG_SUCCESS)
         return -1;
+
+    /* Loop: if we received an event instead of the reply, discard and re-receive */
+    for (int attempts = 0; attempts < 32; attempts++) {
+        if (buf.reply.header.msgh_id == WS_REPLY_CREATE_WINDOW)
+            break; /* got the reply we want */
+        /* Receive again (RCV only, no SEND) */
+        kr = mach_msg(&buf.reply.header, MACH_RCV_MSG,
+                       0, sizeof(buf),
+                       _ws_conn.event_port, MACH_MSG_TIMEOUT_NONE,
+                       MACH_PORT_NULL);
+        if (kr != MACH_MSG_SUCCESS)
+            return -1;
     }
 
-    fprintf(stderr, "[AppKit] _WSCreateWindow: reply received: id=%d result=%d window_id=%d\n",
-            buf.reply.header.msgh_id, buf.reply.result, buf.reply.window_id);
-    if (buf.reply.result != 0 || buf.reply.window_id < 0) {
-        fprintf(stderr, "[AppKit] WS_MSG_CREATE_WINDOW rejected\n");
+    if (buf.reply.header.msgh_id != WS_REPLY_CREATE_WINDOW)
         return -1;
-    }
+    if (buf.reply.result != 0 || buf.reply.window_id < 0)
+        return -1;
 
-    fprintf(stderr, "[AppKit] _WSCreateWindow: SUCCESS window_id=%d\n", buf.reply.window_id);
     return buf.reply.window_id;
 }
 
@@ -1454,8 +1505,11 @@ static void _WSDrawRect(int32_t window_id, uint32_t dst_x, uint32_t dst_y,
     mach_msg_return_t kr = mach_msg(&msg.header, MACH_SEND_MSG, sizeof(msg), 0,
              MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     if (kr != MACH_MSG_SUCCESS) {
-        fprintf(stderr, "[AppKit] _WSDrawRect: mach_msg SEND failed: %d (wid=%d %ux%u)\n",
-                kr, window_id, width, height);
+        static int draw_fail_count = 0;
+        draw_fail_count++;
+        if (draw_fail_count <= 3)
+            fprintf(stderr, "[AppKit] _WSDrawRect: mach_msg SEND FAILED: kr=%d (wid=%d %ux%u)\n",
+                    kr, window_id, width, height);
     }
 }
 
@@ -1846,6 +1900,9 @@ static int       __windowCount = 0;
     size_t          _backingWidth;
     size_t          _backingHeight;
     size_t          _backingBytesPerRow;
+
+    /* Cached graphics context to avoid per-frame allocation (Bug 28 fix) */
+    id              _cachedGfxCtx;      /* NSGraphicsContext* */
 }
 - (id)initWithContentRect:(CGRect)contentRect
                 styleMask:(NSUInteger)style
@@ -1888,11 +1945,6 @@ static int       __windowCount = 0;
                   backing:(NSBackingStoreType)backingStoreType
                     defer:(BOOL)flag
 {
-    fprintf(stderr, "[AppKit] NSWindow initWithContentRect: (%d,%d) %dx%d style=0x%lx\n",
-            (int)contentRect.origin.x, (int)contentRect.origin.y,
-            (int)contentRect.size.width, (int)contentRect.size.height,
-            (unsigned long)style);
-
     self = [super init];
     if (!self) return nil;
 
@@ -1924,12 +1976,6 @@ static int       __windowCount = 0;
         _styleMask,
         "Untitled");
 
-    if (_windowNumber < 0) {
-        fprintf(stderr, "[AppKit] NSWindow: failed to create WindowServer window\n");
-    } else {
-        fprintf(stderr, "[AppKit] NSWindow: created WS window_id=%d\n", _windowNumber);
-    }
-
     /* Create default content view filling the window */
     NSView *cv = [[NSView alloc] initWithFrame:
         CGRectMake(0, 0, contentRect.size.width, contentRect.size.height)];
@@ -1943,8 +1989,6 @@ static int       __windowCount = 0;
         __allWindows[__windowCount++] = self;
     }
 
-    fprintf(stderr, "[AppKit] NSWindow initWithContentRect: done, windowNumber=%d, backingData=%p\n",
-            _windowNumber, _backingData);
     return self;
 }
 
@@ -2008,7 +2052,6 @@ static int       __windowCount = 0;
 
 - (void)makeKeyAndOrderFront:(id)sender {
     (void)sender;
-    fprintf(stderr, "[AppKit] makeKeyAndOrderFront: wid=%d\n", _windowNumber);
     _isVisible = YES;
     _isKeyWindow = YES;
     _isMainWindow = YES;
@@ -2105,15 +2148,15 @@ static int       __windowCount = 0;
 
 - (void)display {
     if (!_backingContext || !_contentView) {
-        fprintf(stderr, "[AppKit] NSWindow display: SKIP (backingCtx=%p contentView=%p wid=%d)\n",
-                (void *)_backingContext, (void *)_contentView, _windowNumber);
         return;
     }
 
-    /* Set up graphics context */
-    NSGraphicsContext *gctx = [NSGraphicsContext
-        graphicsContextWithCGContext:_backingContext flipped:YES];
-    [NSGraphicsContext setCurrentContext:gctx];
+    /* Reuse cached graphics context to avoid per-frame alloc (Bug 28 fix) */
+    if (!_cachedGfxCtx) {
+        _cachedGfxCtx = [NSGraphicsContext
+            graphicsContextWithCGContext:_backingContext flipped:YES];
+    }
+    [NSGraphicsContext setCurrentContext:_cachedGfxCtx];
 
     /* Clear backing store to window background */
     CGContextSetRGBFillColor(_backingContext, 0.93, 0.93, 0.93, 1.0);
@@ -2133,9 +2176,6 @@ static int       __windowCount = 0;
     if (!_backingData || _windowNumber < 0) return;
 
     /* Blit entire backing store to WindowServer */
-    fprintf(stderr, "[AppKit] flushWindow: wid=%d %zux%zu rowbytes=%zu data=%p\n",
-            _windowNumber, _backingWidth, _backingHeight,
-            _backingBytesPerRow, _backingData);
     _WSDrawRect(_windowNumber, 0, 0,
                 (uint32_t)_backingWidth, (uint32_t)_backingHeight,
                 _backingData, (uint32_t)_backingBytesPerRow);
@@ -2209,10 +2249,8 @@ static int       __windowCount = 0;
     _backingBytesPerRow = _backingWidth * 4;
 
     _backingData = calloc(_backingHeight, _backingBytesPerRow);
-    if (!_backingData) {
-        fprintf(stderr, "[AppKit] NSWindow: failed to allocate backing store\n");
+    if (!_backingData)
         return;
-    }
 
     _backingColorSpace = CGColorSpaceCreateDeviceRGB();
     _backingContext = CGBitmapContextCreate(
@@ -2221,13 +2259,15 @@ static int       __windowCount = 0;
         kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
 
     if (!_backingContext) {
-        fprintf(stderr, "[AppKit] NSWindow: failed to create backing CGContext\n");
         free(_backingData);
         _backingData = NULL;
     }
 }
 
 - (void)_destroyBackingStore {
+    /* Invalidate cached graphics context (Bug 28 fix) */
+    _cachedGfxCtx = nil;
+
     if (_backingContext) {
         CGContextRelease(_backingContext);
         _backingContext = NULL;
@@ -2524,9 +2564,10 @@ typedef enum {
 
 + (id)sharedApplication {
     if (!NSApp) {
-        fprintf(stderr, "[AppKit] NSApplication sharedApplication: creating singleton\n");
+        /* Finish deferred Foundation setup (notification name constants etc.).
+         * Safe here because all images are loaded and ObjC classes registered. */
+        _FoundationEnsureInitialized();
         NSApp = [[NSApplication alloc] init];
-        fprintf(stderr, "[AppKit] NSApplication sharedApplication: done, NSApp=%p\n", (void *)NSApp);
     }
     return NSApp;
 }
@@ -2575,8 +2616,6 @@ typedef enum {
 }
 
 - (void)finishLaunching {
-    fprintf(stderr, "[AppKit] finishLaunching: starting (delegate=%p)\n", (void *)_delegate);
-
     /* Connect to WindowServer */
     const char *appName = "Application";
     if (_mainMenu) {
@@ -2588,12 +2627,8 @@ typedef enum {
         }
     }
 
-    fprintf(stderr, "[AppKit] finishLaunching: connecting to WS as '%s'\n", appName);
     if (!_WSConnect(appName)) {
-        fprintf(stderr, "[AppKit] NSApplication: WARNING - could not connect to WindowServer\n");
         /* Continue anyway — allows running without WS for testing */
-    } else {
-        fprintf(stderr, "[AppKit] finishLaunching: WS connected OK (conn_id=%d)\n", _ws_conn.conn_id);
     }
 
     /* Sync menu to WindowServer */
@@ -2604,12 +2639,8 @@ typedef enum {
     /* Notify delegate */
     if (_delegate && class_respondsToSelector(object_getClass(_delegate),
             sel_registerName("applicationDidFinishLaunching:"))) {
-        fprintf(stderr, "[AppKit] finishLaunching: calling applicationDidFinishLaunching:\n");
         ((void (*)(id, SEL, id))objc_msgSend)(
             _delegate, sel_registerName("applicationDidFinishLaunching:"), nil);
-        fprintf(stderr, "[AppKit] finishLaunching: applicationDidFinishLaunching: returned\n");
-    } else {
-        fprintf(stderr, "[AppKit] finishLaunching: NO delegate or delegate lacks applicationDidFinishLaunching:\n");
     }
 
     /* Post notification */
@@ -2628,16 +2659,14 @@ typedef enum {
  * fire timers.
  */
 - (void)run {
-    fprintf(stderr, "[AppKit] NSApplication run: entering\n");
     [self finishLaunching];
     _isRunning = YES;
-    fprintf(stderr, "[AppKit] NSApplication run: entering event loop (__windowCount=%d)\n", __windowCount);
 
     ws_msg_buffer_t buf;
 
     while (_isRunning) {
-        /* Poll for WindowServer events with 10ms timeout */
-        if (_WSPollEvent(&buf, 10)) {
+        /* Poll for WindowServer events with 100ms timeout */
+        if (_WSPollEvent(&buf, 100)) {
             [self _processWSEvent:&buf];
         }
 
@@ -3302,17 +3331,11 @@ typedef enum {
  * Sets up notification name constants and any global state.
  * ============================================================================ */
 
-__attribute__((constructor, used))
-static void __AppKitInitialize(void) {
-    NSApplicationDidFinishLaunchingNotification =
-        CFSTR("NSApplicationDidFinishLaunchingNotification");
-    NSApplicationWillTerminateNotification =
-        CFSTR("NSApplicationWillTerminateNotification");
-    NSWindowDidBecomeKeyNotification =
-        CFSTR("NSWindowDidBecomeKeyNotification");
-    NSWindowDidResignKeyNotification =
-        CFSTR("NSWindowDidResignKeyNotification");
-}
+/* AppKit constructor — currently a no-op.
+ * Notification name constants are initialised by Foundation via
+ * _FoundationEnsureInitialized(), called from +[NSApplication sharedApplication].
+ * CFSTR must NOT be called in constructors because ObjC classes may not
+ * be loaded yet, causing toll-free bridged objects to get NULL isa. */
 
 /* ============================================================================
  * End of AppKit.framework

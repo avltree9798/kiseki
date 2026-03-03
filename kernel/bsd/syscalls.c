@@ -1110,23 +1110,10 @@ int sys_close(struct trap_frame *tf)
         return 0;
     }
 
-    /* Check if this is a PTY fd */
-    {
-        int pty_close_side;
-        struct pty *pty_close = (struct pty *)vfs_get_pty(fd, &pty_close_side);
-        if (pty_close != NULL) {
-            if (pty_close_side == 0)
-                pty_close->pt_master_open = 0;
-            else
-                pty_close->pt_slave_open = 0;
-            /* Free the PTY pair when both sides are closed */
-            if (!pty_close->pt_master_open && !pty_close->pt_slave_open)
-                pty_free(pty_close);
-            vfs_free_fd(fd);
-            syscall_return(tf, 0);
-            return 0;
-        }
-    }
+    /* PTY fds are handled by the normal vfs_close path below.
+     * PTY open counts are decremented when the file refcount drops to 0
+     * (in vfs_close / fd_close_all), not here — because fork() shares
+     * the same struct file across parent and child. */
 
     int ret = vfs_close(fd);
     if (ret < 0)
@@ -2215,6 +2202,17 @@ int sys_mmap(struct trap_frame *tf)
         uint8_t *kva = (uint8_t *)pa;
         for (uint64_t b = 0; b < PAGE_SIZE; b++)
             kva[b] = 0;
+
+        /* Bug 17b: Check if this VA already has a valid PTE before overwriting */
+        {
+            uint64_t target_va = map_va + i * PAGE_SIZE;
+            uint64_t existing_pa = vmm_translate(p->p_vmspace->pgd, target_va);
+            if (existing_pa != 0) {
+                kprintf("[mmap BUG] VA 0x%lx already mapped to PA 0x%lx, "
+                        "about to remap to PA 0x%lx (pid=%d)\n",
+                        target_va, existing_pa, pa, p->p_pid);
+            }
+        }
 
         int ret = vmm_map_page(p->p_vmspace->pgd,
                                map_va + i * PAGE_SIZE, pa, pte_flags);

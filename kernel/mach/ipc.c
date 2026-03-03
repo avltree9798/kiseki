@@ -131,6 +131,17 @@ static void vm_map_copy_free(struct vm_map_copy *copy)
         }
         pmm_free_pages((uint64_t)copy->kdata, order);
         copy->kdata = NULL;
+    } else if (copy->type == VM_MAP_COPY_PAGE_LIST && copy->kdata != NULL) {
+        /* Free each page in the PA array, then the array pages themselves */
+        uint64_t npages = (copy->size + PAGE_SIZE - 1) / PAGE_SIZE;
+        uint64_t *pa_array = (uint64_t *)copy->kdata;
+        for (uint64_t i = 0; i < npages; i++) {
+            if (pa_array[i] != 0)
+                pmm_free_page(pa_array[i]);
+        }
+        /* offset stores the buddy order used for the PA array allocation */
+        pmm_free_pages((uint64_t)copy->kdata, (uint32_t)copy->offset);
+        copy->kdata = NULL;
     }
 
     copy->type = VM_MAP_COPY_NONE;
@@ -503,82 +514,110 @@ ipc_kmsg_copyin_ool_descriptor(struct vm_space *sender_space,
     }
 
     /*
-     * Allocate kernel buffer pages.
+     * Allocate kernel buffer pages — one page at a time.
      *
-     * On XNU, vm_map_copyin_kernel_buffer() does:
-     *   kbuf = kalloc_data(len, Z_WAITOK)
-     *   copyinmap(src_map, src_addr, kbuf, len)
+     * We use a page list (array of PAs) instead of a single contiguous
+     * buddy allocation.  This avoids fragmentation failures for large
+     * OOL transfers (e.g., 640x384 RGBA window = 240 pages).
      *
-     * We use pmm_alloc_pages() since we have no kernel heap.
-     * The buddy allocator gives us 2^order pages.
+     * The PA array is stored in contiguous pages allocated via
+     * pmm_alloc_pages().  Each page holds 512 uint64_t entries.
+     * For up to 512 pages (2MB): 1 array page (order 0)
+     * For up to 1024 pages (4MB): 2 array pages (order 1)
+     * For up to 2048 pages (8MB): 4 array pages (order 2)
      */
     uint64_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    uint32_t order = 0;
-    uint64_t p = 1;
-    while (p < npages) {
-        p <<= 1;
-        order++;
-    }
 
-    uint64_t kbuf_pa = pmm_alloc_pages(order);
-    if (kbuf_pa == 0) {
-        kprintf("[ipc] copyin_ool: failed to allocate %lu pages (order %u)\n",
-                npages, order);
+    /* Sanity: max 2048 pages (8MB) per OOL descriptor */
+    if (npages > 2048) {
+        kprintf("[ipc] copyin_ool: too large (%lu pages)\n", npages);
         return MACH_SEND_NO_BUFFER;
     }
 
-    /*
-     * Copy data from sender's address space into kernel buffer.
-     *
-     * The kernel buffer is identity-mapped (PA == kernel VA) since our
-     * PMM allocates from the identity-mapped region. We can access it
-     * directly from kernel context.
-     *
-     * For the sender's user VA, we need to translate through their page
-     * tables to get the physical address, then access via identity mapping.
-     * We copy page-by-page since user pages may not be contiguous physically.
-     */
-    uint64_t copied = 0;
-    while (copied < size) {
-        uint64_t src_va = user_addr + copied;
-        uint64_t page_offset = src_va & (PAGE_SIZE - 1);
-        uint64_t chunk = PAGE_SIZE - page_offset;
-        if (chunk > size - copied)
-            chunk = size - copied;
+    /* Compute how many pages needed for the PA array */
+    uint64_t entries_per_page = PAGE_SIZE / sizeof(uint64_t);  /* 512 */
+    uint64_t pa_array_npages = (npages + entries_per_page - 1) / entries_per_page;
+    uint32_t pa_array_order = 0;
+    {
+        uint64_t p = 1;
+        while (p < pa_array_npages) {
+            p <<= 1;
+            pa_array_order++;
+        }
+    }
 
-        /* Translate sender's VA to PA */
+    /* Allocate contiguous pages to hold the PA array */
+    uint64_t pa_array_base = pmm_alloc_pages(pa_array_order);
+    if (pa_array_base == 0) {
+        return MACH_SEND_NO_BUFFER;
+    }
+    uint64_t *pa_array = (uint64_t *)pa_array_base;
+    uint64_t pa_array_total_entries = ((uint64_t)1 << pa_array_order) * entries_per_page;
+    for (uint64_t i = 0; i < pa_array_total_entries; i++)
+        pa_array[i] = 0;
+
+    /* Allocate one page at a time and copy from sender */
+    for (uint64_t i = 0; i < npages; i++) {
+        uint64_t kpage = pmm_alloc_page();
+        if (kpage == 0) {
+            /* OOM — free already-allocated pages */
+            for (uint64_t j = 0; j < i; j++)
+                pmm_free_page(pa_array[j]);
+            pmm_free_pages(pa_array_base, pa_array_order);
+            {
+                static uint64_t oom_count = 0;
+                if (oom_count < 3 || (oom_count & (oom_count - 1)) == 0)
+                    kprintf("[ipc] copyin_ool: OOM at page %lu/%lu (occurrence %lu)\n",
+                            i, npages, ++oom_count);
+                else
+                    oom_count++;
+            }
+            return MACH_SEND_NO_BUFFER;
+        }
+        pa_array[i] = kpage;
+
+        /* Copy from sender's user page to kernel page */
+        uint64_t src_offset = i * PAGE_SIZE;
+        uint64_t src_va = user_addr + src_offset;
+        uint64_t page_offset = src_va & (PAGE_SIZE - 1);
+        uint64_t chunk = PAGE_SIZE;
+        if (src_offset + chunk > size)
+            chunk = size - src_offset;
+
         uint64_t src_pa = vmm_translate(sender_space->pgd, src_va & PAGE_MASK);
         if (src_pa == 0) {
-            kprintf("[ipc] copyin_ool: unmapped sender VA 0x%lx\n", src_va);
-            pmm_free_pages(kbuf_pa, order);
-            return MACH_SEND_INVALID_DEST;
+            /* Unmapped page — zero-fill this kernel page instead */
+            uint8_t *dst = (uint8_t *)kpage;
+            for (uint64_t z = 0; z < PAGE_SIZE; z++)
+                dst[z] = 0;
+        } else {
+            uint8_t *src = (uint8_t *)(src_pa + page_offset);
+            uint8_t *dst = (uint8_t *)kpage;
+            ipc_memcpy(dst, src, chunk);
+            /* Zero remainder */
+            if (chunk < PAGE_SIZE) {
+                uint8_t *zp = dst + chunk;
+                for (uint64_t z = chunk; z < PAGE_SIZE; z++)
+                    *zp++ = 0;
+            }
         }
-
-        /* Copy from sender's physical page to kernel buffer */
-        uint8_t *src = (uint8_t *)(src_pa + page_offset);
-        uint8_t *dst = (uint8_t *)(kbuf_pa + copied);
-        ipc_memcpy(dst, src, chunk);
-
-        copied += chunk;
     }
 
     /*
      * Create the vm_map_copy object.
-     *
-     * On XNU, vm_map_copyin_kernel_buffer() allocates a vm_map_copy,
-     * sets type = VM_MAP_COPY_KERNEL_BUFFER, stores the buffer pointer
-     * and size.
      */
     struct vm_map_copy *copy = vm_map_copy_alloc();
     if (copy == NULL) {
-        pmm_free_pages(kbuf_pa, order);
+        for (uint64_t i = 0; i < npages; i++)
+            pmm_free_page(pa_array[i]);
+        pmm_free_pages(pa_array_base, pa_array_order);
         return MACH_SEND_NO_BUFFER;
     }
 
-    copy->type = VM_MAP_COPY_KERNEL_BUFFER;
+    copy->type = VM_MAP_COPY_PAGE_LIST;
     copy->size = size;
-    copy->offset = 0;
-    copy->kdata = (void *)kbuf_pa;
+    copy->offset = pa_array_order;  /* Store order for freeing PA array */
+    copy->kdata = (void *)pa_array_base;
 
     /*
      * If deallocate=true, unmap the source range from the sender.
@@ -690,64 +729,114 @@ ipc_kmsg_copyout_ool_descriptor(struct vm_space *rcv_space,
      *   2. Copies from the kernel buffer to those pages
      *   3. Frees the kernel buffer (kfree_data)
      */
-    uint8_t *kbuf = (uint8_t *)copy->kdata;
-    uint64_t mapped = 0;
+    /*
+     * For PAGE_LIST type, we can directly remap the kernel pages into
+     * the receiver's address space — no need to allocate new pages and
+     * copy.  This is a zero-copy transfer from the kernel staging pages
+     * to the receiver.
+     *
+     * For KERNEL_BUFFER type (contiguous), we allocate new pages and
+     * copy as before.
+     */
+    if (copy->type == VM_MAP_COPY_PAGE_LIST) {
+        uint64_t *pa_array = (uint64_t *)copy->kdata;
 
-    for (uint64_t i = 0; i < npages; i++) {
-        uint64_t page_pa = pmm_alloc_page();
-        if (page_pa == 0) {
-            /* OOM — unmap what we've already mapped */
-            for (uint64_t j = 0; j < i; j++) {
-                uint64_t va = rcv_va + j * PAGE_SIZE;
-                uint64_t pa = vmm_unmap_page(rcv_space->pgd, va);
-                if (pa != 0)
-                    pmm_free_page(pa);
+        for (uint64_t i = 0; i < npages; i++) {
+            uint64_t va = rcv_va + i * PAGE_SIZE;
+            uint64_t page_pa = pa_array[i];
+
+            if (page_pa == 0) {
+                /* Should not happen, but allocate a zero page */
+                page_pa = pmm_alloc_page();
+                if (page_pa == 0) {
+                    /* OOM cleanup */
+                    for (uint64_t j = 0; j < i; j++) {
+                        uint64_t pva = rcv_va + j * PAGE_SIZE;
+                        vmm_unmap_page(rcv_space->pgd, pva);
+                        /* Don't free — page belongs to pa_array, freed by copy_free */
+                    }
+                    if (rcv_space->map != NULL)
+                        vm_map_remove(rcv_space->map, rcv_va,
+                                      rcv_va + npages * PAGE_SIZE);
+                    vm_map_copy_free(copy);
+                    ool->copy = VM_MAP_COPY_NULL;
+                    kprintf("[ipc] copyout_ool: OOM allocating receiver pages\n");
+                    return MACH_SEND_NO_BUFFER;
+                }
+                uint8_t *zp = (uint8_t *)page_pa;
+                for (uint64_t z = 0; z < PAGE_SIZE; z++)
+                    zp[z] = 0;
+            } else {
+                /* Transfer ownership: clear from pa_array so copy_free won't free */
+                pa_array[i] = 0;
             }
-            if (rcv_space->map != NULL) {
-                vm_map_remove(rcv_space->map, rcv_va,
-                              rcv_va + npages * PAGE_SIZE);
+
+            if (vmm_map_page(rcv_space->pgd, va, page_pa, PTE_USER_RW) != 0) {
+                pmm_free_page(page_pa);
+                for (uint64_t j = 0; j < i; j++) {
+                    uint64_t pva = rcv_va + j * PAGE_SIZE;
+                    uint64_t pa = vmm_unmap_page(rcv_space->pgd, pva);
+                    if (pa != 0) pmm_free_page(pa);
+                }
+                if (rcv_space->map != NULL)
+                    vm_map_remove(rcv_space->map, rcv_va,
+                                  rcv_va + npages * PAGE_SIZE);
+                vm_map_copy_free(copy);
+                ool->copy = VM_MAP_COPY_NULL;
+                return MACH_SEND_NO_BUFFER;
             }
-            vm_map_copy_free(copy);
-            ool->copy = VM_MAP_COPY_NULL;
-            kprintf("[ipc] copyout_ool: OOM allocating receiver pages\n");
-            return MACH_SEND_NO_BUFFER;
         }
+    } else {
+        /* KERNEL_BUFFER type: contiguous buffer, copy page-by-page */
+        uint8_t *kbuf = (uint8_t *)copy->kdata;
+        uint64_t mapped = 0;
 
-        /* Map the page into the receiver's address space */
-        uint64_t va = rcv_va + i * PAGE_SIZE;
-        if (vmm_map_page(rcv_space->pgd, va, page_pa, PTE_USER_RW) != 0) {
-            pmm_free_page(page_pa);
-            /* Clean up previously mapped pages */
-            for (uint64_t j = 0; j < i; j++) {
-                uint64_t prev_va = rcv_va + j * PAGE_SIZE;
-                uint64_t pa = vmm_unmap_page(rcv_space->pgd, prev_va);
-                if (pa != 0)
-                    pmm_free_page(pa);
+        for (uint64_t i = 0; i < npages; i++) {
+            uint64_t page_pa = pmm_alloc_page();
+            if (page_pa == 0) {
+                for (uint64_t j = 0; j < i; j++) {
+                    uint64_t va = rcv_va + j * PAGE_SIZE;
+                    uint64_t pa = vmm_unmap_page(rcv_space->pgd, va);
+                    if (pa != 0) pmm_free_page(pa);
+                }
+                if (rcv_space->map != NULL)
+                    vm_map_remove(rcv_space->map, rcv_va,
+                                  rcv_va + npages * PAGE_SIZE);
+                vm_map_copy_free(copy);
+                ool->copy = VM_MAP_COPY_NULL;
+                kprintf("[ipc] copyout_ool: OOM allocating receiver pages\n");
+                return MACH_SEND_NO_BUFFER;
             }
-            if (rcv_space->map != NULL) {
-                vm_map_remove(rcv_space->map, rcv_va,
-                              rcv_va + npages * PAGE_SIZE);
+
+            uint64_t va = rcv_va + i * PAGE_SIZE;
+            if (vmm_map_page(rcv_space->pgd, va, page_pa, PTE_USER_RW) != 0) {
+                pmm_free_page(page_pa);
+                for (uint64_t j = 0; j < i; j++) {
+                    uint64_t pva = rcv_va + j * PAGE_SIZE;
+                    uint64_t pa = vmm_unmap_page(rcv_space->pgd, pva);
+                    if (pa != 0) pmm_free_page(pa);
+                }
+                if (rcv_space->map != NULL)
+                    vm_map_remove(rcv_space->map, rcv_va,
+                                  rcv_va + npages * PAGE_SIZE);
+                vm_map_copy_free(copy);
+                ool->copy = VM_MAP_COPY_NULL;
+                return MACH_SEND_NO_BUFFER;
             }
-            vm_map_copy_free(copy);
-            ool->copy = VM_MAP_COPY_NULL;
-            return MACH_SEND_NO_BUFFER;
+
+            uint64_t chunk = PAGE_SIZE;
+            if (mapped + chunk > size) chunk = size - mapped;
+
+            ipc_memcpy((void *)page_pa, kbuf + mapped, chunk);
+
+            if (chunk < PAGE_SIZE) {
+                uint8_t *zp = (uint8_t *)page_pa + chunk;
+                for (uint64_t z = chunk; z < PAGE_SIZE; z++)
+                    *zp++ = 0;
+            }
+
+            mapped += chunk;
         }
-
-        /* Copy data from kernel buffer to receiver's page */
-        uint64_t chunk = PAGE_SIZE;
-        if (mapped + chunk > size)
-            chunk = size - mapped;
-
-        ipc_memcpy((void *)page_pa, kbuf + mapped, chunk);
-
-        /* Zero remainder of last page */
-        if (chunk < PAGE_SIZE) {
-            uint8_t *zp = (uint8_t *)page_pa + chunk;
-            for (uint64_t z = chunk; z < PAGE_SIZE; z++)
-                *zp++ = 0;
-        }
-
-        mapped += chunk;
     }
 
     /* Free the kernel buffer (the vm_map_copy and its backing pages) */
@@ -1464,6 +1553,13 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
                 sender_vm, (uint8_t *)user_msg, send_size,
                 ool_descs, &ool_count);
             if (ool_ret != MACH_MSG_SUCCESS) {
+                {
+                    static uint32_t copyin_fail_count = 0;
+                    copyin_fail_count++;
+                    if (copyin_fail_count <= 3)
+                        kprintf("[ipc] COMPLEX copyin FAILED: ret=0x%x id=%d\n",
+                                ool_ret, hdr.msgh_id);
+                }
                 /* Release port refs on failure */
                 uint64_t pflags;
                 spin_lock_irqsave(&dest_port->lock, &pflags);
@@ -1721,9 +1817,6 @@ mach_msg_return_t mach_msg_trap(struct trap_frame *tf)
                     rcv_vm, (uint8_t *)user_msg, actual,
                     rcv_ool_descs, rcv_ool_count);
                 if (ool_ret != MACH_MSG_SUCCESS) {
-                    /* OOL copyout failed — message is already in user buffer
-                     * with zero/invalid OOL addresses. Log but continue;
-                     * the receiver will see NULL OOL pointers. */
                     kprintf("[ipc] recv: OOL copyout failed (%u)\n", ool_ret);
                 }
             } else {

@@ -204,6 +204,7 @@ typedef struct {
 #define VM_MAP_COPY_ENTRY_LIST      1   /* COW page references (future) */
 #define VM_MAP_COPY_KERNEL_BUFFER   2   /* Physical copy in kalloc'd buffer */
 #define VM_MAP_COPY_PHYS_MAP        3   /* Direct physical page mapping (shared) */
+#define VM_MAP_COPY_PAGE_LIST       4   /* Non-contiguous page array */
 
 /*
  * VM_MAP_COPY_PHYS_MAP:
@@ -259,16 +260,31 @@ typedef struct {
  * Mach Message Return Codes
  * ============================================================================ */
 
+/*
+ * Match XNU / userland <mach/message.h> error codes exactly.
+ */
 #define MACH_MSG_SUCCESS                0x00000000
-#define MACH_SEND_INVALID_DEST          0x10000002
-#define MACH_SEND_INVALID_RIGHT         0x10000007
-#define MACH_SEND_INVALID_HEADER        0x10000010
-#define MACH_SEND_NO_BUFFER             0x10000013
+#define MACH_SEND_IN_PROGRESS           0x10000001
+#define MACH_SEND_INVALID_DATA          0x10000002
+#define MACH_SEND_INVALID_DEST          0x10000003
+#define MACH_SEND_TIMED_OUT             0x10000004
+#define MACH_SEND_INTERRUPTED           0x10000007
 #define MACH_SEND_MSG_TOO_SMALL         0x10000008
+#define MACH_SEND_INVALID_REPLY         0x10000009
+#define MACH_SEND_INVALID_RIGHT         0x1000000a
+#define MACH_SEND_INVALID_MEMORY        0x1000000c
+#define MACH_SEND_NO_BUFFER             0x1000000d
+#define MACH_SEND_TOO_LARGE             0x1000000e
+#define MACH_SEND_INVALID_TYPE          0x1000000f
+#define MACH_SEND_INVALID_HEADER        0x10000010
+#define MACH_RCV_IN_PROGRESS            0x10004001
 #define MACH_RCV_INVALID_NAME           0x10004002
-#define MACH_RCV_TOO_LARGE              0x10004004
 #define MACH_RCV_TIMED_OUT              0x10004003
-#define MACH_RCV_PORT_DIED              0x10004005
+#define MACH_RCV_TOO_LARGE              0x10004004
+#define MACH_RCV_INTERRUPTED            0x10004005
+#define MACH_RCV_PORT_CHANGED           0x10004006
+#define MACH_RCV_INVALID_DATA           0x10004008
+#define MACH_RCV_PORT_DIED              0x10004009
 #define MACH_RCV_INVALID_TYPE           0x1000400F
 
 /* ============================================================================
@@ -279,7 +295,7 @@ typedef struct {
 #define MACH_MSG_SIZE_MAX           4096
 
 /* Message queue capacity per port */
-#define PORT_MSG_QUEUE_SIZE         16
+#define PORT_MSG_QUEUE_SIZE         32
 
 /* Maximum ports per task name space */
 #define TASK_PORT_TABLE_SIZE        256

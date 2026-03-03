@@ -1841,16 +1841,6 @@ static struct loaded_image *load_dylib(const char *path)
 
     int64_t slide = (int64_t)((uint64_t)base - min_addr);
 
-    dyld_puts("dyld: mapped '");
-    dyld_puts(path);
-    dyld_puts("' base=");
-    dyld_put_hex((uint64_t)base);
-    dyld_puts(" size=");
-    dyld_put_hex(total_vm_size);
-    dyld_puts(" slide=");
-    dyld_put_hex((uint64_t)slide);
-    dyld_puts("\n");
-
     /*
      * Second pass: copy segment data from the file into the mapped region.
      * For each segment, copy filesize bytes from file_data + fileoff,
@@ -2217,9 +2207,11 @@ void dyld_main(const struct mach_header_64 *main_mh,
         bool inited[MAX_IMAGES];
         dyld_memset(inited, 0, sizeof(inited));
 
+#ifdef DEBUG
         dyld_puts("dyld: Phase 5.5: running __mod_init_func initialisers (");
         dyld_put_hex(num_images);
         dyld_puts(" images)\n");
+#endif
 
         for (uint32_t pass_idx = 0; pass_idx < num_images; pass_idx++) {
             /* Dylibs first (1..num_images-1), then main binary (0) */
@@ -2300,12 +2292,14 @@ void dyld_main(const struct mach_header_64 *main_mh,
                 continue;
             }
 
+#ifdef DEBUG
             dyld_puts("dyld: init[");
             dyld_put_hex(idx);
             dyld_puts("] '");
             if (img->path) dyld_puts(img->path);
             else dyld_puts("(main)");
             dyld_puts("'\n");
+#endif
 
             const uint8_t *cmd_ptr = (const uint8_t *)(mh + 1);
             for (uint32_t i = 0; i < mh->ncmds; i++) {
@@ -2329,25 +2323,11 @@ void dyld_main(const struct mach_header_64 *main_mh,
                             uint64_t count =
                                 sect[j].size / sizeof(init_func_t);
 
-                            dyld_puts("dyld:   __mod_init_func: ");
-                            dyld_put_hex(count);
-                            dyld_puts(" entries at 0x");
-                            dyld_put_hex(sect_addr);
-                            dyld_puts("\n");
-
                             init_func_t *funcs =
                                 (init_func_t *)sect_addr;
                             for (uint64_t k = 0; k < count; k++) {
                                 if (funcs[k] != NULL) {
-                                    dyld_puts("dyld:   calling init[");
-                                    dyld_put_hex(k);
-                                    dyld_puts("] = 0x");
-                                    dyld_put_hex((uint64_t)funcs[k]);
-                                    dyld_puts("...\n");
                                     funcs[k]();
-                                    dyld_puts("dyld:   init[");
-                                    dyld_put_hex(k);
-                                    dyld_puts("] returned\n");
                                 }
                             }
                         }
@@ -2367,7 +2347,9 @@ void dyld_main(const struct mach_header_64 *main_mh,
      * Call main(argc, argv, envp, apple).
      * ---------------------------------------------------------------- */
 
+#ifdef DEBUG
     dyld_puts("dyld: Phase 5.5 complete, all initialisers called\n");
+#endif
 
     if (!main_img->has_main) {
         dyld_fatal("main binary has no LC_MAIN");
@@ -2375,22 +2357,8 @@ void dyld_main(const struct mach_header_64 *main_mh,
 
     uint64_t main_addr = main_img->text_base + main_img->main_entryoff;
 
-#ifdef DEBUG
-    dyld_puts("dyld: text_base=0x");
-    dyld_put_hex(main_img->text_base);
-    dyld_puts(" entryoff=0x");
-    dyld_put_hex(main_img->main_entryoff);
-    dyld_puts("\n");
-    dyld_puts("dyld: jumping to main at 0x");
-    dyld_put_hex(main_addr);
-    dyld_puts("\n");
-
     /* Read first instruction at entry point to verify mapping */
     uint32_t *entry_insn = (uint32_t *)main_addr;
-    dyld_puts("dyld: first instruction = 0x");
-    dyld_put_hex(*entry_insn);
-    dyld_puts("\n");
-#endif
 
     /*
      * Call main(argc, argv, envp, apple).
@@ -2407,6 +2375,9 @@ void dyld_main(const struct mach_header_64 *main_mh,
     main_func_t entry = (main_func_t)main_addr;
 
     int ret = entry((int)argc, argv, envp, apple);
+    dyld_puts("dyld: main() returned ");
+    dyld_put_dec(ret);
+    dyld_puts("\n");
 
     /*
      * main() returned — call libc exit() to flush stdio buffers.

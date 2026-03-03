@@ -25,6 +25,26 @@ static uint64_t ram_base;   /* Physical address of first managed page */
  * Must be held for the duration of any alloc/free/ref operation. */
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
+/*
+ * PMM_AUDIT: Independent bitmap to cross-check buddy allocator correctness.
+ * Bit set = page is allocated (in use). Bit clear = page is free.
+ * This is separate from the buddy allocator's flags field.
+ */
+#define PMM_AUDIT 1
+#if PMM_AUDIT
+static uint8_t pmm_audit_bitmap[PMM_MAX_PAGES / 8];  /* 32KB for 256K pages */
+
+static bool audit_is_allocated(uint64_t idx) {
+    return (pmm_audit_bitmap[idx / 8] >> (idx % 8)) & 1;
+}
+static void audit_set_allocated(uint64_t idx) {
+    pmm_audit_bitmap[idx / 8] |= (1 << (idx % 8));
+}
+static void audit_set_free(uint64_t idx) {
+    pmm_audit_bitmap[idx / 8] &= ~(1 << (idx % 8));
+}
+#endif
+
 /* --- Free list helpers --- */
 
 static void list_add(struct page **head, struct page *pg)
@@ -94,6 +114,12 @@ void pmm_init(uint64_t mem_start, uint64_t mem_end)
         total_pages = PMM_MAX_PAGES;
 
     free_pages = 0;
+
+#if PMM_AUDIT
+    /* Clear audit bitmap — all pages start as free */
+    for (uint64_t i = 0; i < sizeof(pmm_audit_bitmap); i++)
+        pmm_audit_bitmap[i] = 0;
+#endif
 
     /* Initialize all free lists */
     for (int i = 0; i <= PMM_MAX_ORDER; i++)
@@ -178,6 +204,25 @@ uint64_t pmm_alloc_pages(uint32_t order)
     free_pages -= (1UL << order);
     uint64_t pa = pmm_page_to_pa(block);
 
+#if PMM_AUDIT
+    /* Verify none of the pages we're about to return are already allocated */
+    {
+        uint64_t base_idx = page_index(block);
+        uint64_t count = 1UL << order;
+        for (uint64_t a = 0; a < count; a++) {
+            if (audit_is_allocated(base_idx + a)) {
+                kprintf("[PMM BUG] DOUBLE ALLOC! page idx %lu (PA 0x%lx) "
+                        "already allocated, returning it again in order-%u "
+                        "block at PA 0x%lx (block idx %lu)\n",
+                        base_idx + a,
+                        ram_base + ((base_idx + a) << PAGE_SHIFT),
+                        order, pa, base_idx);
+            }
+            audit_set_allocated(base_idx + a);
+        }
+    }
+#endif
+
     spin_unlock_irqrestore(&pmm_lock, flags);
     return pa;
 }
@@ -202,6 +247,24 @@ void pmm_free_pages(uint64_t paddr, uint32_t order)
         spin_unlock_irqrestore(&pmm_lock, flags);
         return;
     }
+
+#if PMM_AUDIT
+    /* Verify all pages in this block are actually allocated */
+    {
+        uint64_t base_idx = page_index(pg);
+        uint64_t count = 1UL << order;
+        for (uint64_t a = 0; a < count; a++) {
+            if (!audit_is_allocated(base_idx + a)) {
+                kprintf("[PMM BUG] DOUBLE FREE! page idx %lu (PA 0x%lx) "
+                        "already free, freeing again in order-%u block\n",
+                        base_idx + a,
+                        ram_base + ((base_idx + a) << PAGE_SHIFT),
+                        order);
+            }
+            audit_set_free(base_idx + a);
+        }
+    }
+#endif
 
     pg->flags = PAGE_FREE;
     pg->refcount = 0;
@@ -265,6 +328,17 @@ void pmm_page_unref(uint64_t paddr)
         /* Free the page while still holding the lock.
          * pmm_free_pages will try to take the lock again,
          * so we call the internal free logic directly. */
+#if PMM_AUDIT
+        {
+            uint64_t idx = page_index(pg);
+            if (!audit_is_allocated(idx)) {
+                kprintf("[PMM BUG] DOUBLE FREE via unref! page idx %lu "
+                        "(PA 0x%lx) already free\n",
+                        idx, paddr);
+            }
+            audit_set_free(idx);
+        }
+#endif
         pg->flags = PAGE_FREE;
         free_pages += 1;
 

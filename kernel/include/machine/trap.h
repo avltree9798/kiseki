@@ -25,7 +25,15 @@
 #define TF_SPSR     (33 * 8)
 #define TF_ESR      (34 * 8)
 #define TF_FAR      (35 * 8)
-#define TF_SIZE     (36 * 8)
+
+/* FP/NEON state (saved only for EL0 traps) */
+#define TF_FPCR     (36 * 8)
+#define TF_FPSR     (37 * 8)
+#define TF_Q0       (38 * 8)            /* q0-q31: 128 bits (16 bytes) each */
+/* q0 at offset 38*8, q1 at 38*8+16, ... q31 at 38*8+31*16 */
+#define TF_NEON_BASE (38 * 8)           /* = 304 */
+#define TF_NEON_END  (TF_NEON_BASE + 32 * 16)  /* 304 + 512 = 816 */
+#define TF_SIZE      ((TF_NEON_END + 15) & ~15) /* 816, already 16-byte aligned */
 
 /*
  * Exception class codes (ESR_EL1.EC field, bits [31:26])
@@ -49,7 +57,9 @@
  * trap_frame - Saved CPU state during an exception
  *
  * Layout must match the save/restore order in vectors.S exactly.
- * Total size: 36 * 8 = 288 bytes.
+ * GPR block: 36 * 8 = 288 bytes.
+ * FP/NEON block: 2*8 (FPCR+FPSR) + 32*16 (q0-q31) = 528 bytes.
+ * Total: 816 bytes.
  */
 struct trap_frame {
     uint64_t regs[31];  /* x0-x30 */
@@ -58,6 +68,10 @@ struct trap_frame {
     uint64_t spsr;      /* Saved Program Status Register */
     uint64_t esr;       /* Exception Syndrome Register */
     uint64_t far;       /* Fault Address Register */
+    /* FP/NEON state (saved for EL0 traps) */
+    uint64_t fpcr;      /* Floating-Point Control Register */
+    uint64_t fpsr;      /* Floating-Point Status Register */
+    uint64_t neon[64];  /* q0-q31 (each 128-bit = 2 * uint64_t) */
 };
 
 /*

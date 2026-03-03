@@ -517,6 +517,10 @@ void proc_exit(struct proc *p, int status)
     p->p_exited = true;
     p->p_state = PROC_ZOMBIE;
 
+    kprintf("[EXIT] PID %d '%s' status=0x%x (free: %lu pages / %lu MB)\n",
+            p->p_pid, p->p_comm, status,
+            pmm_get_free_pages(), (pmm_get_free_pages() * PAGE_SIZE) >> 20);
+
     /* Wake parent if waiting */
     struct proc *parent = p->p_parent;
     if (parent) {
@@ -926,10 +930,9 @@ int sys_fork_impl(struct trap_frame *tf)
     child_thread->state = TH_RUN;
     sched_enqueue(child_thread);
 
-#if DEBUG
-    kprintf("[FORK] child PID=%d (tid=%lu) enqueued. Setting parent return x0=%d\n",
-            child->p_pid, child_thread->tid, child->p_pid);
-#endif
+    kprintf("[FORK] PID %d -> %d '%s' (free: %lu pages)\n",
+            parent->p_pid, child->p_pid, child->p_comm,
+            pmm_get_free_pages());
 
     /* Parent return value: child's PID */
     tf->regs[0] = (uint64_t)child->p_pid;
@@ -975,8 +978,9 @@ int sys_fork_impl(struct trap_frame *tf)
  *
  * ============================================================================ */
 
-/* Default user stack size: 8MB */
-#define USER_STACK_SIZE     (8UL * 1024 * 1024)
+/* Default user stack size: 1MB (reduced from 8MB to conserve physical memory —
+ * each process eagerly allocates all stack pages at exec time) */
+#define USER_STACK_SIZE     (1UL * 1024 * 1024)
 #define USER_STACK_GUARD    PAGE_SIZE   /* Guard page at bottom of stack */
 
 /*
@@ -1393,6 +1397,27 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
     if (p->p_task)
         strncpy_p(p->p_task->name, k_path, sizeof(p->p_task->name) - 1);
 
+    /*
+     * Reset signal state for exec (POSIX requirement):
+     *  - Caught signals (custom handlers) reset to SIG_DFL
+     *  - Ignored signals stay ignored
+     *  - Pending signals are cleared (prevents inherited signals from
+     *    parent causing spurious EINTR in the new program)
+     *  - Signal mask (blocked set) is preserved across exec
+     */
+    {
+        struct sigacts *sa = &p->p_sigacts;
+        for (int i = 1; i < NSIG; i++) {
+            if (sa->actions[i].sa_handler != SIG_IGN &&
+                sa->actions[i].sa_handler != SIG_DFL) {
+                sa->actions[i].sa_handler = SIG_DFL;
+                sa->actions[i].sa_mask = 0;
+                sa->actions[i].sa_flags = 0;
+            }
+        }
+        sa->pending = 0;
+    }
+
     /* Switch to the new VM space */
     vmm_switch_space(p->p_vmspace);
 
@@ -1410,6 +1435,10 @@ int sys_execve_impl(struct trap_frame *tf, const char *path,
 
     pmm_free_pages(lr_pa, 3);
     pmm_free_pages(scratch_pa, 2);
+
+    kprintf("[EXEC] PID %d '%s' (free: %lu pages / %lu MB)\n",
+            p->p_pid, p->p_comm, pmm_get_free_pages(),
+            (pmm_get_free_pages() * PAGE_SIZE) >> 20);
     return 0;
 }
 

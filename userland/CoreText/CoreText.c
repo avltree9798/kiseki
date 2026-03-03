@@ -73,10 +73,10 @@ extern int    snprintf(char *buf, size_t size, const char *fmt, ...);
 extern int    fprintf(void *stream, const char *fmt, ...);
 extern size_t fwrite(const void *ptr, size_t size, size_t nmemb, void *stream);
 
-extern void **__stderrp;
-extern void **__stdoutp;
-#define stderr (*__stderrp)
-#define stdout (*__stdoutp)
+extern void *__stderrp;
+extern void *__stdoutp;
+#define stderr __stderrp
+#define stdout __stdoutp
 
 /* ============================================================================
  * Section 4: CoreFoundation Imported Types & Functions

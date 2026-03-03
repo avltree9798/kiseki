@@ -31,6 +31,66 @@ void trap_sync_el1(struct trap_frame *tf)
 {
     uint32_t ec = (tf->esr >> 26) & 0x3F;
 
+    /*
+     * Fast path: EL1 data abort on a USER address.
+     *
+     * This happens when a syscall handler directly accesses a user-space
+     * buffer (e.g., pty_master_read writing to a user pointer) and the
+     * backing page hasn't been demand-paged yet, or the page is mapped
+     * read-only and the kernel needs to write.
+     *
+     * Handle this silently (no diagnostic output) and return to retry.
+     */
+    if (ec == EC_DABT_SAME) {
+        uint64_t fault_va = tf->far;
+        uint32_t dfsc = tf->esr & 0x3F;
+        uint32_t fault_type = dfsc & 0x3C;
+
+        if (fault_va < 0xFFFF000000000000ULL && fault_va != 0 &&
+            !(fault_va >> 48)) {
+            struct proc *p = proc_current();
+            if (p && p->p_vmspace && p->p_vmspace->pgd) {
+                uint64_t page_va = fault_va & ~(uint64_t)0xFFF;
+
+                if (fault_type == 0x04 || fault_type == 0x0C) {
+                    pte_t *pte = vmm_get_pte(p->p_vmspace->pgd, page_va);
+
+                    if (pte && (*pte & PTE_VALID)) {
+                        if (fault_type == 0x0C) {
+                            uint64_t entry = *pte;
+                            entry &= ~PTE_AP_RO_ALL;
+                            entry |= PTE_AP_RW_ALL;
+                            *pte = entry;
+                        }
+                        __asm__ volatile(
+                            "tlbi vale1is, %0; dsb ish; isb"
+                            :: "r"(page_va >> 12)
+                            : "memory"
+                        );
+                        return;  /* handled silently */
+                    }
+
+                    /* No valid PTE — demand-page a zero page */
+                    uint64_t new_page = pmm_alloc_pages(0);
+                    if (new_page != 0) {
+                        uint8_t *pp = (uint8_t *)new_page;
+                        for (int zi = 0; zi < 4096; zi++)
+                            pp[zi] = 0;
+
+                        if (vmm_map_page(p->p_vmspace->pgd,
+                                         page_va, new_page, PTE_USER_RW) == 0) {
+                            return;  /* handled silently */
+                        }
+                        pmm_free_pages(new_page, 0);
+                    }
+                }
+            }
+        }
+        /* Fall through to diagnostic dump + panic if we couldn't handle it */
+    }
+
+    /* === Unhandled trap — print full diagnostics and panic === */
+
     kprintf("\n!!! KERNEL TRAP (sync EL1) !!!\n");
     kprintf("  EC=0x%x  ELR=0x%lx  FAR=0x%lx\n", ec, tf->elr, tf->far);
     kprintf("  ESR=0x%lx  SPSR=0x%lx\n", tf->esr, tf->spsr);
@@ -101,103 +161,6 @@ void trap_sync_el1(struct trap_frame *tf)
             for (int j = i; j < 31; j++)
                 kprintf("    x%d=0x%lx\n", j, tf->regs[j]);
         }
-    }
-
-    /*
-     * EL1 data abort on a USER address (FAR < 0xFFFF000000000000):
-     *
-     * This happens when a syscall handler directly accesses a user-space
-     * buffer (e.g., pty_master_read writing to a user pointer) and the
-     * backing page hasn't been demand-paged yet, or the page is mapped
-     * read-only and the kernel needs to write.
-     *
-     * XNU handles this via copyin/copyout with fault recovery labels.
-     * We don't have that infrastructure yet, so instead we handle faults
-     * here — identical to the EC_DABT_LOWER handler — and return to
-     * retry the faulting instruction.
-     *
-     * We handle two fault classes:
-     *   - Translation faults (DFSC 0x04-0x07): page not mapped
-     *   - Permission faults  (DFSC 0x0C-0x0F): page mapped but wrong perms
-     */
-    if (ec == EC_DABT_SAME) {
-        uint64_t fault_va = tf->far;
-        uint32_t dfsc = tf->esr & 0x3F;
-        uint32_t fault_type = dfsc & 0x3C;
-
-        if (fault_va < 0xFFFF000000000000ULL && fault_va != 0 &&
-            !(fault_va >> 48)) {
-            /* Valid TTBR0 user address (bits [63:48] == 0) */
-            struct proc *p = proc_current();
-            if (!p || !p->p_vmspace || !p->p_vmspace->pgd) {
-                kprintf("[trap_el1] user fault but no proc/vmspace: p=%p vmspace=%p pgd=%p\n",
-                        (void *)p, p ? (void *)p->p_vmspace : NULL,
-                        (p && p->p_vmspace) ? (void *)p->p_vmspace->pgd : NULL);
-            }
-            if (p && p->p_vmspace && p->p_vmspace->pgd) {
-                uint64_t page_va = fault_va & ~(uint64_t)0xFFF;
-
-                if (fault_type == 0x04) {
-                    /* Translation fault — page not present */
-                    uint64_t existing_pa = vmm_translate(p->p_vmspace->pgd, page_va);
-
-                    if (existing_pa != 0) {
-                        /* PTE exists — stale TLB, just flush and retry */
-                        __asm__ volatile(
-                            "tlbi vale1is, %0; dsb ish; isb"
-                            :: "r"(page_va >> 12)
-                            : "memory"
-                        );
-                        return;  /* retry the faulting instruction */
-                    }
-
-                    /* Demand-page: allocate a zero page and map it */
-                    uint64_t new_page = pmm_alloc_pages(0);
-                    if (new_page != 0) {
-                        uint8_t *pp = (uint8_t *)new_page;
-                        for (int zi = 0; zi < 4096; zi++)
-                            pp[zi] = 0;
-
-                        if (vmm_map_page(p->p_vmspace->pgd,
-                                         page_va, new_page, PTE_USER_RW) == 0) {
-                            return;  /* retry the faulting instruction */
-                        }
-                        pmm_free_pages(new_page, 0);
-                    }
-                } else if (fault_type == 0x0C) {
-                    /*
-                     * Permission fault — page is mapped but the kernel
-                     * can't write to it (e.g., page was mapped RO/RX by
-                     * demand paging or execve, and a syscall handler is
-                     * writing to it on behalf of the user process).
-                     *
-                     * Upgrade the PTE to RW and retry.
-                     */
-                    pte_t *pte = vmm_get_pte(p->p_vmspace->pgd, page_va);
-                    if (pte && (*pte & PTE_VALID)) {
-                        /* Upgrade to USER_RW: clear AP[2] (RO bit), keep rest */
-                        uint64_t entry = *pte;
-                        entry &= ~PTE_AP_RO_ALL;   /* Clear AP bits */
-                        entry |= PTE_AP_RW_ALL;     /* Set AP to EL1+EL0 R/W */
-                        *pte = entry;
-                        /* Flush TLB for this VA and retry */
-                        __asm__ volatile(
-                            "tlbi vale1is, %0; dsb ish; isb"
-                            :: "r"(page_va >> 12)
-                            : "memory"
-                        );
-                        return;  /* retry the faulting instruction */
-                    }
-                    kprintf("[trap_el1] perm fault: pgd=%p va=0x%lx pte=%p pte_val=0x%lx dfsc=0x%x\n",
-                            (void *)p->p_vmspace->pgd, page_va, (void *)pte,
-                            pte ? *pte : 0, dfsc);
-                } else {
-                    kprintf("[trap_el1] unhandled DFSC=0x%x fault_type=0x%x va=0x%lx\n",
-                            dfsc, fault_type, fault_va);
-                }
-            }
-        }
-        /* Fall through to panic if we couldn't handle it */
     }
 
     switch (ec) {

@@ -490,6 +490,22 @@ static char keycode_to_char(uint16_t code)
  */
 static void kbd_process_event(const struct virtio_input_event *ev)
 {
+    /* Handle scroll wheel events (EV_REL with REL_WHEEL) */
+    if (ev->type == EV_REL) {
+        if (ev->code == REL_WHEEL) {
+            struct hid_event hev;
+            hev.type = HID_EVENT_SCROLL;
+            hev.keycode = ev->value;    /* signed delta: +1=up, -1=down */
+            hev.abs_x = 0;
+            hev.abs_y = 0;
+            hev.buttons = 0;
+            hev.flags = hid_get_modifier_flags();
+            hev.timestamp = 0;
+            hid_ring_push(&hev);
+        }
+        return;
+    }
+
     if (ev->type != EV_KEY)
         return;     /* We only care about key events for keyboard */
 
@@ -677,6 +693,20 @@ static void tablet_process_event(const struct virtio_input_event *ev)
         hid_ring_push(&hev);
         break;
     }
+
+    case EV_REL:
+        if (ev->code == REL_WHEEL) {
+            struct hid_event hev;
+            hev.type = HID_EVENT_SCROLL;
+            hev.keycode = ev->value;    /* signed delta: +1=up, -1=down */
+            hev.abs_x = tablet_abs_x;
+            hev.abs_y = tablet_abs_y;
+            hev.buttons = tablet_buttons;
+            hev.flags = hid_get_modifier_flags();
+            hev.timestamp = 0;
+            hid_ring_push(&hev);
+        }
+        break;
 
     case EV_SYN:
         if (ev->code == 0 && (tablet_abs_x_dirty || tablet_abs_y_dirty)) {

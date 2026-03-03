@@ -61,8 +61,8 @@ extern char  *strdup(const char *s);
 extern int    snprintf(char *buf, size_t size, const char *fmt, ...);
 extern int    fprintf(void *stream, const char *fmt, ...);
 
-extern void **__stderrp;
-#define stderr (*__stderrp)
+extern void *__stderrp;
+#define stderr __stderrp
 
 /* CoreFoundation imports */
 typedef const void *CFTypeRef;

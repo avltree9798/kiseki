@@ -6,7 +6,7 @@
 # ============================================================================
 
 BUILDDIR  := ../../../build/userland
-APPDIR    := $(BUILDDIR)/Applications/SystemUIServer.app
+APPDIR    := $(BUILDDIR)/System/Library/CoreServices/SystemUIServer.app
 OBJDIR    := $(BUILDDIR)/obj/SystemUIServer
 
 BINARY    := $(APPDIR)/SystemUIServer

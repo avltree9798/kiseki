@@ -718,9 +718,9 @@ static void launch_gui_session(void)
      *   3. SystemUIServer (menu bar extras: clock, etc.)
      *   4. Terminal (convenience — not standard macOS behaviour)
      */
-    g_dock_pid = launch_app("/Applications/Dock.app/Dock", "Dock.app");
-    g_finder_pid = launch_app("/Applications/Finder.app/Finder", "Finder.app");
-    g_sysui_pid = launch_app("/Applications/SystemUIServer.app/SystemUIServer", "SystemUIServer.app");
+    g_dock_pid = launch_app("/System/Library/CoreServices/Dock.app/Dock", "Dock.app");
+    g_finder_pid = launch_app("/System/Library/CoreServices/Finder.app/Finder", "Finder.app");
+    g_sysui_pid = launch_app("/System/Library/CoreServices/SystemUIServer.app/SystemUIServer", "SystemUIServer.app");
     g_terminal_pid = launch_app("/Applications/Terminal.app/Terminal", "Terminal.app");
 
     /*
@@ -757,13 +757,13 @@ static void reap_children(void)
 
         if (pid == g_dock_pid) {
             name = "Dock.app"; pidp = &g_dock_pid;
-            path = "/Applications/Dock.app/Dock";
+            path = "/System/Library/CoreServices/Dock.app/Dock";
         } else if (pid == g_finder_pid) {
             name = "Finder.app"; pidp = &g_finder_pid;
-            path = "/Applications/Finder.app/Finder";
+            path = "/System/Library/CoreServices/Finder.app/Finder";
         } else if (pid == g_sysui_pid) {
             name = "SystemUIServer.app"; pidp = &g_sysui_pid;
-            path = "/Applications/SystemUIServer.app/SystemUIServer";
+            path = "/System/Library/CoreServices/SystemUIServer.app/SystemUIServer";
         } else if (pid == g_terminal_pid) {
             name = "Terminal.app"; pidp = &g_terminal_pid;
             /* Don't relaunch Terminal — user may have intentionally closed it */

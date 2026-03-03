@@ -21,6 +21,7 @@
 #include <kern/kprintf.h>
 #include <kern/sync.h>
 #include <kern/pmm.h>
+#include <kern/vmm.h>
 #include <drivers/virtio.h>
 #include <drivers/virtio_gpu.h>
 #include <drivers/gic.h>
@@ -925,6 +926,41 @@ int virtio_gpu_init(void)
         uint8_t *fb_mem = (uint8_t *)fb_contig_base;
         for (uint64_t b = 0; b < (uint64_t)alloc_pages * PAGE_SIZE; b++)
             fb_mem[b] = 0;
+
+        /*
+         * Remap framebuffer pages in kernel identity map as Non-Cacheable.
+         *
+         * The kernel identity map (set up in vmm_init) maps all RAM as
+         * Write-Back Cacheable. WindowServer's IOKit mapping uses Normal
+         * Non-Cacheable (MAIR index 1). Having the same physical pages
+         * mapped with different cache attributes is architecturally
+         * UNPREDICTABLE on ARM64 and causes visual artifacts.
+         *
+         * Fix: clean the data cache for these pages (flush WB zeros to RAM),
+         * then remap them as NC so both kernel and user mappings agree.
+         */
+        /* Clean data cache by VA for the framebuffer range */
+        for (uint64_t addr = fb_contig_base;
+             addr < fb_contig_base + (uint64_t)alloc_pages * PAGE_SIZE;
+             addr += 64) {  /* DC CIVAC operates on cache lines (64 bytes) */
+            __asm__ volatile("dc civac, %0" :: "r"(addr) : "memory");
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+
+        /* Remap each framebuffer page as Non-Cacheable in kernel identity map */
+        pte_t *kernel_pgd = vmm_get_kernel_pgd();
+        uint64_t nc_flags = PTE_PAGE | PTE_AF | PTE_SH_INNER |
+                            PTE_AP_RW_EL1 | PTE_ATTR_IDX(MAIR_NORMAL_NC) | PTE_UXN;
+        for (uint32_t p = 0; p < alloc_pages; p++) {
+            uint64_t pa = fb_contig_base + (uint64_t)p * PAGE_SIZE;
+            vmm_protect_page(kernel_pgd, pa, nc_flags);
+        }
+        /* TLB invalidation + barrier (vmm_protect_page does per-page TLBI,
+         * but add a DSB to ensure all TLBIs complete before we proceed) */
+        __asm__ volatile("dsb sy\n isb" ::: "memory");
+
+        kprintf("[virtio-gpu] Remapped %u framebuffer pages as Non-Cacheable\n",
+                alloc_pages);
 
         /* Fill fb_pages[] with sequential page addresses for the
          * scatter-gather list used by RESOURCE_ATTACH_BACKING.

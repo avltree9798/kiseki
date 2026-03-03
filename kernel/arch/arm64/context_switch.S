@@ -19,7 +19,7 @@
  * restores them from new context, and returns.
  */
 context_switch:
-    /* Save callee-saved registers to old context */
+    /* Save callee-saved GPRs to old context */
     stp     x19, x20, [x0, #0]
     stp     x21, x22, [x0, #16]
     stp     x23, x24, [x0, #32]
@@ -28,6 +28,12 @@ context_switch:
     stp     x29, x30, [x0, #80]    /* x29=FP, x30=LR */
     mov     x2, sp
     str     x2, [x0, #96]           /* Save SP */
+
+    /* Save callee-saved NEON registers d8-d15 (AAPCS64) */
+    stp     d8,  d9,  [x0, #104]
+    stp     d10, d11, [x0, #120]
+    stp     d12, d13, [x0, #136]
+    stp     d14, d15, [x0, #152]
 
     /*
      * DEBUG: After saving to old_ctx, verify what we just saved.
@@ -47,9 +53,7 @@ context_switch:
     b.hs    .Lsave_x30_bad          /* >= 0x80000000 */
     b       .Lsave_ok
 .Lsave_x30_bad:
-    /* Saved x30 is not in kernel RAM - print warning (non-fatal,
-     * because fork_child_return is a valid x30 that should be in kernel RAM,
-     * and thread_trampoline too. If we see this, something is very wrong.) */
+    /* Saved x30 is not in kernel RAM - print warning (non-fatal) */
     stp     x0, x1, [sp, #-32]!     /* Save old_ctx, new_ctx */
     stp     x3, x4, [sp, #16]       /* Save x30_val, sp_val */
     adr     x0, .Lfmt_save_bad
@@ -60,7 +64,7 @@ context_switch:
     ldp     x0, x1, [sp], #32       /* Restore old_ctx, new_ctx */
 .Lsave_ok:
 
-    /* Restore callee-saved registers from new context */
+    /* Restore callee-saved GPRs from new context */
     ldp     x19, x20, [x1, #0]
     ldp     x21, x22, [x1, #16]
     ldp     x23, x24, [x1, #32]
@@ -69,6 +73,12 @@ context_switch:
     ldp     x29, x30, [x1, #80]
     ldr     x2, [x1, #96]
     mov     sp, x2                   /* Restore SP */
+
+    /* Restore callee-saved NEON registers d8-d15 */
+    ldp     d8,  d9,  [x1, #104]
+    ldp     d10, d11, [x1, #120]
+    ldp     d12, d13, [x1, #136]
+    ldp     d14, d15, [x1, #152]
 
     /*
      * DEBUG: After restore, verify x30 (about to ret to) is a kernel address.
@@ -128,6 +138,12 @@ load_context:
     ldp     x29, x30, [x0, #80]
     ldr     x2, [x0, #96]
     mov     sp, x2                   /* Restore SP */
+
+    /* Restore callee-saved NEON registers d8-d15 */
+    ldp     d8,  d9,  [x0, #104]
+    ldp     d10, d11, [x0, #120]
+    ldp     d12, d13, [x0, #136]
+    ldp     d14, d15, [x0, #152]
 
     ret                              /* Jump to restored LR (x30) */
 

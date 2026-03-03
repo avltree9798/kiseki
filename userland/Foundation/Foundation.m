@@ -120,8 +120,8 @@ extern int    snprintf(char *buf, size_t size, const char *fmt, ...);
 extern int    printf(const char *fmt, ...);
 extern size_t fwrite(const void *ptr, size_t size, size_t nmemb, void *stream);
 
-extern void **__stdoutp;
-#define stdout (*__stdoutp)
+extern void *__stdoutp;
+#define stdout __stdoutp
 
 /* Safe stderr write — bypasses broken FILE* pointer (Bug 21 fix) */
 static void _fnd_stderr_write(const char *s) {

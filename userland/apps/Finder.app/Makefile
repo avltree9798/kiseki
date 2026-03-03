@@ -6,7 +6,7 @@
 # ============================================================================
 
 BUILDDIR  := ../../../build/userland
-APPDIR    := $(BUILDDIR)/Applications/Finder.app
+APPDIR    := $(BUILDDIR)/System/Library/CoreServices/Finder.app
 OBJDIR    := $(BUILDDIR)/obj/Finder
 
 BINARY    := $(APPDIR)/Finder

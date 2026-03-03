@@ -138,33 +138,28 @@ extern void virtio_net_recv(void);
 
 void timer_handler(void)
 {
-    tick_count++;
-
-    /* Rearm: set TVAL for next period */
+    /* Rearm: set TVAL for next period (must be done on every core) */
     write_cntv_tval(timer_interval);
 
     /* Clear any pending status by re-enabling */
     write_cntv_ctl(CTL_ENABLE);
 
     /*
-     * Poll network RX on core 0 every tick (100 Hz = 10ms).
-     *
-     * The VirtIO-net interrupt should handle packet delivery on its
-     * own, but level-triggered IRQ re-delivery can be unreliable in
-     * some QEMU configurations. Polling from the timer tick ensures
-     * packets are never stuck in the RX used ring for more than 10ms.
-     *
-     * This is analogous to Linux NAPI polling from softirq context.
-     * Only core 0 polls since VirtIO SPIs are routed to core 0.
+     * Only CPU 0 increments the global tick counter and polls network.
+     * This avoids non-atomic read-modify-write races on tick_count
+     * from multiple cores, and keeps network polling on the core that
+     * handles VirtIO SPIs.
      */
     {
         struct cpu_data *cd;
         __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
-        if (cd && cd->cpu_id == 0)
+        if (cd && cd->cpu_id == 0) {
+            tick_count++;
             virtio_net_recv();
+        }
     }
 
-    /* Call scheduler tick */
+    /* Call scheduler tick (every core runs its own) */
     sched_tick();
 }
 

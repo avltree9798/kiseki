@@ -6,7 +6,7 @@
 # ============================================================================
 
 BUILDDIR  := ../../../build/userland
-APPDIR    := $(BUILDDIR)/Applications/Dock.app
+APPDIR    := $(BUILDDIR)/System/Library/CoreServices/Dock.app
 OBJDIR    := $(BUILDDIR)/obj/Dock
 
 BINARY    := $(APPDIR)/Dock

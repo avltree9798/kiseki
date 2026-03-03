@@ -1,6 +1,6 @@
 # Kiseki Operating System: Architecture & Design Specification
 
-**Version:** 3.0
+**Version:** 4.0
 **Target Architecture:** ARM64 (AArch64)
 **Primary Hardware:** QEMU `virt` machine (development), Raspberry Pi 4/5 (production)
 **Kernel Type:** Hybrid (Mach microkernel + BSD personality)
@@ -35,17 +35,20 @@ The project embodies a conviction: that the best way to understand a system is t
 
 ## 2. Executive Summary
 
-Kiseki is a Unix-like operating system that runs native macOS ARM64 CLI binaries on non-Apple hardware. It achieves this by implementing a clean-room version of the XNU kernel interfaces - Mach traps and BSD syscalls - while targeting standard virtualised and embedded ARM64 platforms.
+Kiseki is a Unix-like operating system that runs native macOS ARM64 binaries on non-Apple hardware, with a full graphical desktop matching the macOS architecture from kernel to AppKit. It achieves this by implementing a clean-room version of the XNU kernel interfaces - Mach traps and BSD syscalls - while targeting standard virtualised and embedded ARM64 platforms.
 
 The system comprises:
-- A **hybrid kernel** (~22,000 lines of C and ARM64 assembly) implementing the Mach microkernel, BSD personality, Ext4 filesystem, TCP/IP networking, and device drivers
-- A **dynamic linker** (dyld) and **C library** (libSystem.B.dylib, ~4,800 lines) providing the Darwin userland ABI
-- **79 Mach-O userland binaries** including bash, awk, sed, grep, curl, TCC compiler, and a full set of coreutils
+- A **hybrid kernel** (~38,500 lines of C and ARM64 assembly) implementing the Mach microkernel, BSD personality, Ext4 filesystem, TCP/IP networking, IOKit device framework, and device drivers (including VirtIO GPU, VirtIO input, VirtIO block, VirtIO network)
+- A **dynamic linker** (dyld) and **C library** (libSystem.B.dylib, ~7,950 lines) providing the Darwin userland ABI
+- An **Objective-C runtime** (GNUstep libobjc2, ABI v1) and a complete **framework stack**: CoreFoundation, CoreGraphics, CoreText, Foundation, and AppKit
+- A **WindowServer** display compositor communicating with applications via Mach IPC, matching the macOS Quartz architecture
+- **82 Mach-O userland binaries** including bash, awk, sed, grep, curl, TCC compiler, vi, and a full set of coreutils
+- **4 GUI applications**: Dock.app, Finder.app, Terminal.app, SystemUIServer.app — launched by loginwindow after graphical authentication
 - A **comprehensive unit test suite** for libSystem validation
 - A **native C compiler** (TCC) that runs on Kiseki and produces working Mach-O ARM64 binaries
 - A **4-core SMP** scheduler with pre-emptive multitasking
 - A complete **TCP/IP stack** with BSD socket API
-- A **pseudo-terminal** subsystem for remote shell sessions
+- A **pseudo-terminal** subsystem for terminal emulator sessions
 
 ---
 
@@ -56,14 +59,16 @@ The system comprises:
 | Resource | Address / Value |
 |---|---|
 | CPU | Cortex-A72, 4 cores |
-| RAM | `0x40000000` – `0x7FFFFFFF` (1 GB) |
+| RAM | `0x40000000` – `0x13FFFFFFF` (4 GB, `-m 4G`) |
 | Kernel load | `0x40080000` |
 | PL011 UART | `0x09000000`, IRQ 33 |
 | GICv2 Distributor | `0x08000000` |
 | GICv2 CPU Interface | `0x08010000` |
 | VirtIO MMIO | `0x0A000000`, stride `0x200`, 32 transports, IRQ base 48 |
 | PL031 RTC | `0x09010000` |
-| Network | VirtIO-net, user-mode: guest `10.0.2.15`, gateway `10.0.2.2` |
+| VirtIO GPU | MMIO transport, 1280×800 2D framebuffer |
+| VirtIO input | Keyboard (US QWERTY) + tablet (absolute coordinates) |
+| Network | VirtIO-net, vmnet-shared: guest `192.168.64.10`, gateway `192.168.64.1` |
 
 ### 3.2. Raspberry Pi 4 (Production)
 
@@ -86,8 +91,8 @@ The system comprises:
 | Constant | Value |
 |---|---|
 | `MAX_CPUS` | 4 |
-| `KERNEL_STACK_SIZE` | 32 KB per CPU |
-| Secondary core stacks | 16 KB per core |
+| `KERNEL_STACK_SIZE` | 32 KB per CPU (boot stacks and thread stacks) |
+| Secondary core stacks | 32 KB per core (matching `KERNEL_STACK_SIZE`) |
 
 ---
 
@@ -107,28 +112,34 @@ The system comprises:
 
 ### 4.2. Kernel Initialisation (`main.c`)
 
-Seventeen-phase boot, executed sequentially on core 0:
+22-phase boot, executed sequentially on core 0:
 
 | Phase | Subsystem | Details |
 |---|---|---|
 | 1 | UART | `uart_init()`. Prints banner: `Kiseki OS v0.1.0`. |
 | 2 | Interrupts | `gic_init()`, `gic_init_percpu()`, `uart_enable_irq()`. GICv2 initialisation, UART RX interrupt enabled. |
 | 3 | Physical memory | `pmm_init(__heap_start, RAM_BASE + RAM_SIZE)`. Buddy allocator. |
-| 4 | Virtual memory | `vmm_init()`. Page table setup, identity mapping. |
+| 4 | Virtual memory | `vmm_init()`. Page table setup, identity mapping, MAIR (Device/NC/WB). |
 | 5 | Threading | `thread_init()`, `sched_init()`. Thread pool (256), MLFQ scheduler (128 levels). |
-| 6 | Timer | `timer_init(100)`. ARM Generic Timer at 100 Hz. IRQs remain **masked** — the timer hardware is programmed but interrupts stay pending until each thread unmasks them on its own PMM stack (prevents boot stack corruption). |
-| 7 | SMP | `smp_init()`. Wakes secondary cores via PSCI `smc #0`. |
+| 6 | Timer | `timer_init(100)`. ARM Generic Timer at 100 Hz. IRQs remain **masked** — the timer hardware is programmed but interrupts stay pending until each thread unmasks them on its own PMM stack (prevents boot stack corruption). Only CPU 0 increments the global tick counter. |
+| 7 | SMP | `smp_init()`. Wakes secondary cores via PSCI `smc #0`. Each secondary core gets 32 KB boot stack, enables MMU, starts per-CPU scheduler and timer. |
 | 8 | Block device | `blkdev_init()`. VirtIO-blk (QEMU) or eMMC (RPi). |
 | 9 | Buffer cache | `buf_init()`. LRU cache, 256 × 4 KB blocks. |
-| 10 | TTY + PTY | `tty_init()`, `pty_init()`. Console terminal and pseudo-terminal pool (16 pairs). |
+| 10 | VFS + TTY + PTY | `vfs_init()`, `tty_init()`, `pty_init()`. VFS initialisation, console terminal, pseudo-terminal pool (16 pairs). |
 | 11 | Ext4 | `ext4_fs_init()`. Registers Ext4 filesystem type with VFS. |
 | 12 | Root mount | `vfs_mount("ext4", "/", 0, 0)`. Mounts root filesystem. |
 | 12b | Device FS | `devfs_init()`, `vfs_mount("devfs", "/dev", 0, 0)`. Creates `/dev/console`, `/dev/null`, `/dev/zero`, `/dev/urandom`. |
-| 13 | Mach IPC | `ipc_init()`. Port pool (512), IPC space pool (64), kernel IPC space, bootstrap service registry. |
-| 14 | CommPage | `commpage_init()`. Shared kernel-user page at `0xFFFFFFFFFFFFC000`. |
-| 15 | Processes | `proc_init()`. Process table (256 slots), PID 0 (kernel). |
-| 16 | Networking | `net_init()`. TCP/IP stack, socket table (64), VirtIO-net driver, IP/gateway configuration. |
-| 17 | Bootstrap | Creates `kernel_bootstrap_thread` on a PMM-allocated stack, calls `load_context()` to abandon the boot stack forever. The bootstrap thread calls `kernel_init_process()` which loads `/sbin/init` (or `/bin/bash` fallback) as Mach-O and enqueues PID 1 on the run queue for the scheduler to dispatch. The bootstrap thread then calls `thread_exit()`. |
+| 12c | Buffer sync | Starts background kernel thread to flush dirty buffers every 30s. |
+| 13 | Mach IPC | `ipc_init()`. Port pool (512), IPC space pool (64), kernel IPC space, bootstrap service registry. Port queue size: 64 messages. |
+| 14 | IOKit | `iokit_init()`. IOKit subsystem, I/O Registry, kernel bootstrap service registration. |
+| 15 | CommPage | `commpage_init()`. Shared kernel-user page at `0xFFFFFFFFFFFFC000` with sigreturn trampoline, gettimeofday stub, nanotime stub. |
+| 15b | Processes | `proc_init()`. Process table (256 slots), PID 0 (kernel). |
+| 16 | Networking | `net_init()`. TCP/IP stack, socket table (64), VirtIO-net driver, DHCP or static IP/gateway configuration. |
+| 16b | VirtIO GPU | `virtio_gpu_init()`. Probes MMIO transports, creates 2D framebuffer resource, attaches backing pages (remapped as Non-Cacheable), sets scanout. |
+| 16c | IOFramebuffer | Registers IOFramebuffer service in I/O Registry. Wraps VirtIO GPU behind IOKit interface. Initialises framebuffer console (160×50 text grid). |
+| 16d | VirtIO input | `virtio_input_init()`. Probes for keyboard and tablet devices, posts event buffers. |
+| 16e | IOHIDSystem | Registers IOHIDSystem service. HID event ring buffer for WindowServer. |
+| 17 | Bootstrap | Creates `kernel_bootstrap_thread` on a PMM-allocated stack, calls `load_context()` to abandon the boot stack forever. The bootstrap thread calls `kernel_init_process()` which loads `/sbin/init` as Mach-O (with ASLR slide) and enqueues PID 1 on the run queue. The bootstrap thread then calls `thread_exit()`. |
 
 ### 4.3. Secondary Core Boot
 
@@ -141,19 +152,23 @@ Each secondary core, once woken by PSCI:
 ### 4.4. Userland Boot Chain
 
 ```
-/sbin/init (launchd) → launch daemons → /sbin/getty (per TTY) → /bin/login → /bin/bash
+/sbin/init (launchd) → WindowServer + loginwindow + mDNSResponder
+                      → loginwindow authenticates user → GUI session
+                        (Dock, Finder, SystemUIServer, Terminal → bash)
 ```
 
-- **init (launchd)**: PID 1. A proper launchd-style init that:
+- **init (launchd)** (~980 lines): PID 1. A proper launchd-style init that:
   1. Scans `/System/Library/LaunchDaemons/` and `/Library/LaunchDaemons/` for `.plist` files.
   2. Parses each XML plist (~200-line parser handling `<dict>`, `<key>`, `<string>`, `<array>`, `<true/>`, `<false/>`, `<?xml?>`, `<!DOCTYPE>`).
   3. Extracts `Label`, `Program`, `ProgramArguments`, `MachServices`, `KeepAlive`.
   4. **Pre-creates Mach receive ports** for every declared `MachService` and registers them via `bootstrap_register()`. This eliminates race conditions: clients can look up services before daemons start.
-  5. Forks and execs each daemon.
+  5. Forks and execs each daemon (WindowServer, loginwindow, mDNSResponder).
   6. Supports `KeepAlive` — auto-relaunches daemons that exit.
-  7. Spawns getty for terminal login.
+  7. If WindowServer is configured via plist, skips fbcon0 getty (GUI mode). Otherwise spawns getty for text-mode login.
+- **WindowServer** (~1,850 lines): Display compositor. Maps VRAM via IOKit (`IOFramebuffer`), reads HID events via `IOHIDSystem`, composites windows using back-to-front painter's algorithm, communicates with apps via Mach IPC.
+- **loginwindow** (~980 lines): Graphical login screen. Connects to WindowServer, displays username/password fields, authenticates against `/etc/passwd` + `/etc/shadow`. On success, fork/execs the GUI session: Dock.app, Finder.app, SystemUIServer.app, Terminal.app.
 - **mDNSResponder**: DNS resolution daemon. Claims its service port via `bootstrap_check_in()`, receives DNS requests via Mach IPC, performs UDP DNS queries to upstream servers.
-- **getty**: Opens `/dev/console`, sets controlling terminal (`TIOCSCTTY`), prints login prompt, execs login.
+- **getty**: Opens `/dev/console`, sets controlling terminal (`TIOCSCTTY`), prints login prompt, execs login (text-mode fallback, skipped when WindowServer is active).
 - **login**: Reads username/password, authenticates against `/etc/passwd` + `/etc/shadow`, sets UID/GID/groups, execs user's shell.
 - **bash**: Interactive shell with job control, pipelines, redirections.
 
@@ -176,8 +191,8 @@ Kiseki implements a **1:1 threading model**. Each user-space pthread maps to exa
 | `sched_policy` | `int` | `SCHED_OTHER` (0), `SCHED_FIFO` (1), `SCHED_RR` (2) |
 | `quantum` | `int` | Remaining time quantum (ticks) |
 | `cpu` | `int` | CPU core this thread runs on |
-| `context` | `struct cpu_context` | Callee-saved registers (x19–x30, SP) |
-| `kernel_stack` | `uint64_t *` | 16 KB kernel stack (4 pages) |
+| `context` | `struct cpu_context` | Callee-saved registers (x19–x30, SP, d8–d15) |
+| `kernel_stack` | `uint64_t *` | 32 KB kernel stack (8 pages) |
 | `task` | `struct task *` | Owning Mach task (process container) |
 | `continuation` | `uint64_t` | Mach stackless context switch optimisation |
 
@@ -204,7 +219,7 @@ Kiseki implements a **1:1 threading model**. Each user-space pthread maps to exa
   - When quantum expires for `SCHED_OTHER` threads: decrement `effective_priority` by 1, set `need_resched`.
   - Every 100 ticks: boost all waiting threads' `effective_priority` toward their base `priority` by +1 (prevents starvation).
 - **Thread selection (`sched_pick_next`).** Scans from priority 127 down to 0, returns the head thread of the highest non-empty queue. Falls back to idle thread.
-- **Context switch (`sched_switch`).** Saves callee-saved registers (x19–x30, SP), switches `TTBR0_EL1` if the new thread belongs to a different task (different address space), restores new thread's registers.
+- **Context switch (`sched_switch`).** Saves callee-saved registers (x19–x30, SP) and callee-saved NEON registers (d8–d15, per AAPCS64), switches `TTBR0_EL1` if the new thread belongs to a different task (different address space), restores new thread's registers.
 - **Pre-emption.** User pre-emption on return from syscall/interrupt. Kernel pre-emption at defined points (not inside spinlocks).
 
 ### 5.3. SMP
@@ -301,7 +316,7 @@ User code executes `svc #0x80` with the syscall number in register `x16`:
 
 Kiseki implements XNU-compatible Mach IPC with per-task port name spaces and full port right translation across task boundaries.
 
-**Port objects:** 512 kernel port objects in a static pool. Each port has a single receive right holder, a reference count, and a ring buffer message queue (16 messages, 4096 bytes max per message).
+**Port objects:** 512 kernel port objects in a static pool. Each port has a single receive right holder, a reference count, and a ring buffer message queue (64 messages, 4096 bytes max per message).
 
 **Per-task IPC spaces:** Every task gets its own `struct ipc_space` (allocated from a pool of 64) with a 256-entry port name table mapping `mach_port_name_t` to kernel port objects + rights held. Allocated in `kernel_init_process()` (PID 1) and `sys_fork_impl()` (forked children), cleaned up in `proc_exit()`. This matches XNU's `ipc_space_create()`/`ipc_space_destroy()` in `osfmk/ipc/ipc_space.c`.
 
@@ -826,7 +841,7 @@ This ensures environment variables inherited from the parent process are accessi
 
 ### 13.2. libSystem.B.dylib
 
-Freestanding C library (~7,500 lines) providing:
+Freestanding C library (~7,950 lines) providing:
 - **Standard I/O**: `printf`, `fprintf`, `sprintf`, `snprintf`, `vprintf`, `scanf`, `sscanf`, `fscanf`, `puts`, `putchar`, `getchar`, `fopen`, `fclose`, `fread`, `fwrite`, `fgets`, `fputs`, `fgetc`, `fputc`, `ungetc`, `fflush`, `feof`, `ferror`, `clearerr`, `fileno`, `fdopen`, `freopen`, `tmpfile`, `tmpnam`, `remove`, `fseek`, `ftell`, `rewind`, `fgetpos`, `fsetpos`, `setbuf`, `setvbuf`, `getline`, `getdelim`, `popen`, `pclose`.
 - **String/memory**: `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strstr`, `strchr`, `strrchr`, `strdup`, `strtok`, `strtok_r`, `memcpy`, `memmove`, `memset`, `memcmp`, `bzero`.
 - **Conversion**: `atoi`, `atol`, `strtol`, `strtoul`, `strtoll`, `strtoull`, `strtod`.
@@ -846,7 +861,7 @@ Freestanding C library (~7,500 lines) providing:
 
 **TCC compatibility:** libSystem includes alternate variadic function implementations (`_printf_tcc`, `_fprintf_tcc`, etc.) for TCC-compiled code. TCC uses a different calling convention for variadic functions on ARM64 (registers vs stack), and `stdio.h` automatically redirects to these variants when compiled with TCC.
 
-### 13.3. Userland Binaries (79 Mach-O executables)
+### 13.3. Userland Binaries (82 Mach-O executables)
 
 **Shell:** bash (full implementation with lexer, parser, executor, job control, builtins, readline, `time` keyword)
 
@@ -885,13 +900,110 @@ tcc -o hello hello.c
 - Stub generation for lazy symbol binding (dyld compatibility)
 - String constants properly placed in `__DATA,__data` section
 
+### 13.5. IOKit Device Framework
+
+IOKit provides an object-oriented device driver framework modelled after XNU's IOKit, implemented in C with manual vtable dispatch.
+
+**Inheritance hierarchy:**
+```
+io_object → io_registry_entry → io_service → (specific driver)
+                                            → io_user_client → (specific client)
+```
+
+**Key classes:**
+
+| Class | Purpose |
+|---|---|
+| `io_object` | Root of all IOKit objects. Reference counting, class metadata. |
+| `io_registry_entry` | Node in the I/O Registry tree. Properties (key-value pairs). |
+| `io_service` | Base for drivers. Implements `probe()`, `start()`, `stop()`, matching. |
+| `io_user_client` | Per-connection object for user-space access. Handles `IOConnectCallMethod` and `IOConnectMapMemory`. |
+| `io_framebuffer` | Wraps VirtIO GPU. 1280×800 2D framebuffer, flush commands. |
+| `io_hid_system` | HID event ring buffer (keyboard + tablet events for WindowServer). |
+| `io_memory_descriptor` | Describes a range of physical memory (e.g. framebuffer pages). |
+| `io_memory_map` | Maps physical pages into a user task's address space. |
+
+**IOFramebuffer external methods (via `IOConnectCallMethod`):**
+- **0 — GetFramebufferInfo**: Returns width, height, pitch, bpp, pixel format.
+- **1 — FlushRect**: Flushes a dirty rectangle to the VirtIO GPU display.
+- **2 — FlushAll**: Flushes the entire framebuffer.
+
+**IOFramebuffer memory mapping (via `IOConnectMapMemory`):**
+- Memory type 0 maps the physical framebuffer pages into the user task with `kIOMapWriteCombineCache` (Non-Cacheable MAIR attributes).
+
+**IOHIDSystem:**
+- HID event ring buffer shared with WindowServer via Mach IPC.
+- Posts keyboard scan codes (US QWERTY layout) and absolute tablet coordinates from VirtIO input devices.
+- WindowServer polls for events via `IOHIDGetNextEvent`.
+
+**User-space IOKit library:**
+- `IOKit.framework` in userland provides `IOServiceGetMatchingService`, `IOServiceOpen`, `IOConnectCallMethod`, `IOConnectMapMemory` — all implemented via Mach IPC to kernel IOKit ports.
+
+### 13.6. Graphics & GUI Stack
+
+Kiseki implements a complete macOS-style graphics stack from kernel framebuffer to AppKit widgets:
+
+```
+┌─────────────────────────────────────────────────┐
+│               GUI Applications                   │
+│  Dock.app  Finder.app  Terminal.app  SystemUI    │
+├─────────────────────────────────────────────────┤
+│                  AppKit.framework                 │
+│  NSWindow · NSView · NSButton · NSTextField      │
+│  NSScrollView · NSTableView · NSMenu · NSColor   │
+├─────────────────────────────────────────────────┤
+│              Foundation.framework                 │
+│  NSObject · NSString · NSArray · NSDictionary    │
+├─────────────────────────────────────────────────┤
+│           CoreGraphics.framework                  │
+│  CGContext · CGColor · CGFont · CGImage · CGPath  │
+│  CGBitmapContext (BGRA8888, Y-down coordinates)   │
+├─────────────────────────────────────────────────┤
+│            CoreText.framework                     │
+│  CTFont · glyph rendering · built-in bitmap font  │
+├─────────────────────────────────────────────────┤
+│           CoreFoundation.framework                │
+│  CFString · CFArray · CFDictionary · CFData       │
+├─────────────────────────────────────────────────┤
+│           GNUstep libobjc2 runtime                │
+│  ABI v1 · -fobjc-runtime=gnustep-1.9             │
+├─────────────────────────────────────────────────┤
+│               WindowServer                        │
+│  Compositor · Mach IPC · IOKit VRAM mapping       │
+├─────────────────────────────────────────────────┤
+│  IOFramebuffer        IOHIDSystem                 │
+│  VirtIO GPU (1280×800) VirtIO input (kbd+tablet)  │
+└─────────────────────────────────────────────────┘
+```
+
+**WindowServer** (~1,850 lines):
+- Maps VRAM via `IOConnectMapMemory` (IOFramebuffer).
+- Maintains a window list with Z-ordering (back-to-front painter's algorithm).
+- Each application connects via Mach IPC: `bootstrap_look_up("com.apple.windowserver")`.
+- Message protocol: `CREATE_WINDOW`, `DRAW_RECT`, `DRAW_TEXT`, `KEY_EVENT`, `MOUSE_EVENT`, `CLOSE_WINDOW`.
+- Composites dirty regions and flushes to GPU via `IOConnectCallMethod(FlushRect)`.
+- HID event dispatch: keyboard events → focused window; mouse events → window under cursor (hit testing).
+
+**Coordinate system:** All Y-coordinates are Y-down (Y=0 at top of screen/window), matching macOS Quartz coordinate convention when drawing to screen.
+
+**Application architecture:**
+- System apps: `/System/Library/CoreServices/` (Dock.app, Finder.app, SystemUIServer.app).
+- User apps: `/Applications/` (Terminal.app).
+- All GUI apps link AppKit.framework, which handles WindowServer connection, event loop, and widget rendering.
+- AppKit implements retry-with-backoff on `MACH_SEND_NO_BUFFER` for robustness under heavy IPC load.
+
+**Objective-C runtime:**
+- GNUstep libobjc2 compiled with `clang -fobjc-runtime=gnustep-1.9`.
+- Provides `objc_msgSend`, class registration, category loading, protocol conformance.
+- All GUI apps and frameworks (Foundation, AppKit) are compiled as Objective-C (`.m` files).
+
 ---
 
 ## 14. Exception Handling
 
 ### 14.1. Trap Frame
 
-288-byte structure saved on every exception:
+816-byte structure saved on every exception. The GPR block (288 bytes) is always saved; the FP/NEON block (528 bytes) is saved for EL0 traps to preserve user-space floating-point and SIMD state across syscalls and interrupts.
 
 | Offset | Field | Description |
 |---|---|---|
@@ -901,6 +1013,9 @@ tcc -o hello hello.c
 | 264 | `spsr` | Saved Program Status Register |
 | 272 | `esr` | Exception Syndrome Register |
 | 280 | `far` | Fault Address Register |
+| 288 | `fpcr` | Floating-Point Control Register |
+| 296 | `fpsr` | Floating-Point Status Register |
+| 304–816 | `neon[64]` | q0–q31 (128-bit NEON/FP registers, 2 × uint64_t each) |
 
 ### 14.2. Exception Classes
 
@@ -928,30 +1043,55 @@ kiseki/
 ├── Makefile                        # Top-level kernel build + QEMU run
 ├── README.md                       # Project overview
 ├── docs/
-│   └── spec.md                     # This specification
+│   ├── spec.md                     # This specification
+│   └── kiseki-internals.md         # Comprehensive internals guide (~5,485 lines)
 ├── scripts/
 │   └── mkdisk.sh                   # 64 MB ext4 root filesystem builder
-├── kernel/                         # ~21,000 lines
+├── kernel/                         # ~38,500 lines (53 C+ASM files)
 │   ├── arch/arm64/                 # ARM64-specific (boot, vectors, context switch, SMP)
 │   ├── kern/                       # Core kernel (scheduler, processes, VMM, PMM, TTY, PTY, sync)
 │   ├── bsd/                        # BSD personality (syscalls, security)
 │   ├── mach/                       # Mach microkernel (IPC, ports, bootstrap)
+│   ├── iokit/                      # IOKit device framework (IOFramebuffer, IOHIDSystem, IOMemoryDescriptor)
 │   ├── fs/                         # Filesystems (VFS, Ext4, devfs, buffer cache)
 │   ├── net/                        # Networking (sockets, TCP, UDP, IP, ICMP, Ethernet, ARP)
-│   ├── drivers/                    # Device drivers (UART, GIC, timer, VirtIO, eMMC)
-│   └── include/                    # 26 kernel headers
-├── userland/                       # ~45,000 lines
+│   ├── drivers/                    # Device drivers (UART, GIC, timer, VirtIO-{blk,net,gpu,input}, eMMC)
+│   └── include/                    # 42 kernel headers
+├── userland/                       # ~139,000 lines (294 C+H+ObjC files)
 │   ├── Makefile                    # Master userland build
 │   ├── dyld/                       # Dynamic linker
-│   ├── libsystem/                  # libSystem.B.dylib (~4,800 lines)
-│   ├── bin/                        # 60 coreutils + bash + TCC
+│   ├── libsystem/                  # libSystem.B.dylib (~7,950 lines)
+│   ├── libobjc/                    # GNUstep libobjc2 (Objective-C runtime, ABI v1)
+│   ├── CoreFoundation/             # CoreFoundation.framework (CFString, CFArray, CFDictionary, etc.)
+│   ├── CoreGraphics/               # CoreGraphics.framework (~3,200 lines: CGContext, CGColor, CGFont, CGImage)
+│   ├── CoreText/                   # CoreText.framework (CTFont, glyph rendering)
+│   ├── Foundation/                 # Foundation.framework (NSObject, NSString, NSArray, NSDictionary, etc.)
+│   ├── AppKit/                     # AppKit.framework (~3,400 lines: NSWindow, NSView, NSButton, NSTextField, etc.)
+│   ├── IOKit/                      # IOKit.framework (user-space IOKit client library)
+│   ├── bin/                        # 68 coreutils + bash + TCC
 │   │   └── tests/                  # libSystem unit tests (test_libc)
-│   └── sbin/                       # System binaries (init, getty, login, halt, sshd, mDNSResponder)
+│   ├── sbin/                       # System binaries (init, WindowServer, loginwindow, getty, login, halt, sshd, mDNSResponder)
+│   └── apps/                       # GUI applications
+│       ├── Dock.app/               # → /System/Library/CoreServices/Dock.app
+│       ├── Finder.app/             # → /System/Library/CoreServices/Finder.app
+│       ├── SystemUIServer.app/     # → /System/Library/CoreServices/SystemUIServer.app
+│       └── Terminal.app/           # → /Applications/Terminal.app
 ├── config/
 │   └── LaunchDaemons/              # Plist files for system daemons
 └── tests/                          # Unit test framework
 ```
 
+**Runtime filesystem layout (disk image):**
+
+```
+/
+├── System/Library/CoreServices/    # Core system GUI apps (Dock, Finder, SystemUIServer)
+├── Applications/                   # User-facing apps (Terminal)
+├── usr/lib/                        # dyld, libSystem.B.dylib, libobjc.A.dylib, frameworks
+├── bin/, /sbin/                    # 82 Mach-O executables
+├── etc/                            # passwd, shadow, group, profile, resolv.conf
+├── System/Library/LaunchDaemons/   # launchd plists
+└── usr/include/mach/              # Mach headers for TCC
 ---
 
 ## 16. Build System
@@ -975,12 +1115,19 @@ Compiled with macOS `clang`:
 
 libSystem.B.dylib is compiled as a Mach-O shared library (`MH_DYLIB`).
 
+Objective-C frameworks (Foundation, AppKit) compiled with:
+- `clang -fobjc-runtime=gnustep-1.9` — uses GNUstep libobjc2 ABI v1
+
 ### 16.3. Disk Image
 
 `scripts/mkdisk.sh` creates a 64 MB ext4 image with:
-- Standard Unix hierarchy (`/bin`, `/sbin`, `/usr`, `/etc`, `/dev`, `/tmp`, `/var`, `/home`)
-- All 79 Mach-O binaries
+- Standard Unix hierarchy (`/bin`, `/sbin`, `/usr`, `/etc`, `/dev`, `/tmp`, `/var`, `/Users`)
+- All 82 Mach-O binaries
 - `/usr/lib/dyld` and `/usr/lib/libSystem.B.dylib`
+- `/usr/lib/libobjc.A.dylib` — Objective-C runtime
+- Framework bundles under `/usr/lib/` — CoreFoundation, CoreGraphics, CoreText, Foundation, AppKit, IOKit
+- `/System/Library/CoreServices/` — Dock.app, Finder.app, SystemUIServer.app
+- `/Applications/` — Terminal.app
 - `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/profile`, `/etc/resolv.conf`
 - `/System/Library/LaunchDaemons/*.plist` — launchd configuration for system daemons
 - `/Library/LaunchDaemons/` — directory for third-party daemon plists

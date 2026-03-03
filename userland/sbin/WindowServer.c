@@ -75,6 +75,7 @@
 #define WS_EVENT_WINDOW_DEACTIVATE  3021
 #define WS_EVENT_WINDOW_CLOSE       3022
 #define WS_EVENT_WINDOW_RESIZE      3023
+#define WS_EVENT_SCROLL             3030
 
 /* Window ordering */
 #define WS_ORDER_OUT    0
@@ -188,6 +189,14 @@ typedef struct {
     int32_t             window_id;
 } ws_event_window_t;
 
+typedef struct {
+    mach_msg_header_t   header;
+    int32_t             window_id;
+    int32_t             x, y;           /* cursor position in window */
+    int32_t             delta_y;        /* scroll delta: +1=up, -1=down */
+    uint32_t            modifiers;
+} ws_event_scroll_t;
+
 /* Receive buffer — large enough for any message including OOL */
 typedef union {
     mach_msg_header_t   header;
@@ -231,6 +240,7 @@ static inline uint32_t rgb(uint8_t r, uint8_t g, uint8_t b)
 #define HID_EVENT_MOUSE_MOVE    3
 #define HID_EVENT_MOUSE_DOWN    4
 #define HID_EVENT_MOUSE_UP      5
+#define HID_EVENT_SCROLL        6
 
 struct hid_event {
     uint32_t type;
@@ -384,6 +394,7 @@ struct ws_window {
     char            title[64];
     bool            visible;
     bool            is_key;         /* Frontmost / key window */
+    int32_t         level;          /* Window level: <0 = desktop, 0 = normal, >0 = above */
 
     /* Backing store — BGRA pixels, allocated by WindowServer */
     uint32_t       *backing;
@@ -417,6 +428,15 @@ static int32_t  cur_x = 0, cur_y = 0;
 static bool     mouse_is_down = false;
 static int32_t  drag_window_id = -1;     /* Window being dragged by title bar */
 static int32_t  drag_offset_x = 0, drag_offset_y = 0;
+
+/* Double-click detection */
+static uint64_t loop_counter = 0;        /* Incremented each main loop iteration */
+static uint64_t last_click_tick = 0;     /* loop_counter at last MOUSE_DOWN */
+static int32_t  last_click_x = -1000;
+static int32_t  last_click_y = -1000;
+static uint32_t click_count = 0;
+#define DOUBLE_CLICK_TICKS  30   /* ~300ms at typical loop rate */
+#define DOUBLE_CLICK_DIST   10   /* max pixel distance for double-click */
 
 /* Service port */
 static mach_port_t svc_port = MACH_PORT_NULL;
@@ -800,7 +820,7 @@ static void update_key_window(void)
 
     for (int i = 0; i < z_count; i++) {
         struct ws_window *w = find_window(z_order[i]);
-        if (w && w->visible) {
+        if (w && w->visible && w->level >= 0) {
             key_window_id = w->window_id;
             break;
         }
@@ -1066,6 +1086,7 @@ static void handle_order_window(ws_rcv_buffer_t *buf)
         break;
     case WS_ORDER_BACK:
         w->visible = true;
+        w->level = -1;  /* Desktop-level: won't be raised on click */
         z_send_to_back(w->window_id);
         break;
     case WS_ORDER_OUT:
@@ -1488,6 +1509,29 @@ static void send_key_event(struct ws_client *c, int32_t window_id,
              sizeof(evt), 0, MACH_PORT_NULL, 5, MACH_PORT_NULL);
 }
 
+/* Send a scroll event to a client */
+static void send_scroll_event(struct ws_client *c, int32_t window_id,
+                               int32_t wx, int32_t wy,
+                               int32_t delta_y, uint32_t mods)
+{
+    if (!c || c->event_port == MACH_PORT_NULL) return;
+
+    ws_event_scroll_t evt;
+    memset(&evt, 0, sizeof(evt));
+    evt.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    evt.header.msgh_size = sizeof(evt);
+    evt.header.msgh_remote_port = c->event_port;
+    evt.header.msgh_id = WS_EVENT_SCROLL;
+    evt.window_id = window_id;
+    evt.x = wx;
+    evt.y = wy;
+    evt.delta_y = delta_y;
+    evt.modifiers = mods;
+
+    mach_msg(&evt.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+             sizeof(evt), 0, MACH_PORT_NULL, 5, MACH_PORT_NULL);
+}
+
 static bool process_hid(void)
 {
     if (!hid_ring) return false;
@@ -1542,10 +1586,28 @@ static bool process_hid(void)
             mouse_is_down = true;
             drag_window_id = -1;
 
+            /* Double-click detection */
+            {
+                int32_t dx = cur_x - last_click_x;
+                int32_t dy = cur_y - last_click_y;
+                uint64_t dt = loop_counter - last_click_tick;
+                if (dx < 0) dx = -dx;
+                if (dy < 0) dy = -dy;
+                if (dt <= DOUBLE_CLICK_TICKS &&
+                    dx <= DOUBLE_CLICK_DIST && dy <= DOUBLE_CLICK_DIST) {
+                    click_count++;
+                } else {
+                    click_count = 1;
+                }
+                last_click_tick = loop_counter;
+                last_click_x = cur_x;
+                last_click_y = cur_y;
+            }
+
             struct ws_window *hit = window_at_point(cur_x, cur_y);
             if (hit) {
-                /* Bring to front if not already */
-                if (hit->window_id != key_window_id) {
+                /* Bring to front if not already (skip desktop-level windows) */
+                if (hit->window_id != key_window_id && hit->level >= 0) {
                     z_bring_to_front(hit->window_id);
                     update_key_window();
                     compositor_dirty = true;
@@ -1584,7 +1646,7 @@ static bool process_hid(void)
                     int32_t wy = cur_y - hit->y;
                     send_mouse_event(c, hit->window_id, WS_EVENT_MOUSE_DOWN,
                                     wx, wy, cur_x, cur_y,
-                                    ev.buttons, ev.flags, 1);
+                                    ev.buttons, ev.flags, click_count);
                 }
             }
             break;
@@ -1625,6 +1687,22 @@ static bool process_hid(void)
                         send_key_event(c, kw->window_id, msg_id,
                                       ev.keycode, ascii, ev.flags, 0);
                     }
+                }
+            }
+            break;
+        }
+
+        case HID_EVENT_SCROLL: {
+            /* Route scroll to the window under the cursor */
+            struct ws_window *hit = window_at_point(cur_x, cur_y);
+            if (hit) {
+                struct ws_client *c = find_client(hit->conn_id);
+                if (c) {
+                    int32_t wx = cur_x - hit->x;
+                    int32_t wy = cur_y - hit->y;
+                    int32_t delta = (int32_t)ev.keycode;  /* signed scroll delta */
+                    send_scroll_event(c, hit->window_id,
+                                     wx, wy, delta, ev.flags);
                 }
             }
             break;
@@ -1708,6 +1786,7 @@ int main(int argc, char *argv[])
     ws_rcv_buffer_t rcv_buf;
     for (;;) {
         bool did_work = false;
+        loop_counter++;
 
         /* 1. Drain all pending IPC messages (non-blocking poll) */
         for (;;) {

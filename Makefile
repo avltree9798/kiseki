@@ -220,7 +220,7 @@ QEMU        := qemu-system-aarch64
 # hardware virtualization cache coherency issues. HVF on Apple Silicon
 # has stricter cache coherency requirements that cause External Aborts
 # during instruction fetch after fork.
-QEMU_FLAGS  := -M virt -accel tcg -cpu cortex-a72 -smp 1 -m 4G \
+QEMU_FLAGS  := -M virt -accel tcg -cpu cortex-a72 -smp 4 -m 4G \
                -display cocoa \
                -kernel $(KERNEL_ELF) \
                -serial mon:stdio
@@ -280,7 +280,7 @@ test: $(TEST_BINS)
 
 # Run libSystem tests on Kiseki (boots QEMU, runs test_libc, exits)
 # Uses user-mode networking (no sudo needed) for CI compatibility
-QEMU_TEST_FLAGS := -M virt -cpu cortex-a72 -smp 1 -m 1G \
+QEMU_TEST_FLAGS := -M virt -cpu cortex-a72 -smp 2 -m 1G \
                    -nographic \
                    -kernel $(KERNEL_ELF) \
                    -serial mon:stdio \

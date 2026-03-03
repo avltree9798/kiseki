@@ -88,8 +88,11 @@ USR_BIN_PROGS="find xargs id whoami which env du wc yes tcc file"
 # Binaries that go in /sbin (system admin)
 SBIN_PROGS="mount umount chown adduser useradd usermod df sudo init getty halt reboot shutdown sshd mDNSResponder WindowServer loginwindow"
 
-# GUI application bundles (installed to /Applications/Foo.app/Foo)
-GUI_APPS="Dock Finder SystemUIServer Terminal"
+# System application bundles (installed to /System/Library/CoreServices/Foo.app/Foo)
+CORESERVICES_APPS="Dock Finder SystemUIServer"
+
+# User application bundles (installed to /Applications/Foo.app/Foo)
+USER_APPS="Terminal"
 
 # Test binary
 MACHO_HELLO="${PROJDIR}/build/hello"
@@ -227,9 +230,21 @@ populate_linux() {
         echo "  Installed /System/Library/Frameworks/AppKit.framework"
     fi
 
-    # Install GUI application bundles to /Applications
+    # Install CoreServices application bundles to /System/Library/CoreServices
+    sudo mkdir -p "${MOUNT_DIR}/System/Library/CoreServices"
+    for app in ${CORESERVICES_APPS}; do
+        local APP_SRC="${BUILDDIR}/System/Library/CoreServices/${app}.app/${app}"
+        if [ -f "${APP_SRC}" ]; then
+            sudo mkdir -p "${MOUNT_DIR}/System/Library/CoreServices/${app}.app"
+            sudo cp "${APP_SRC}" "${MOUNT_DIR}/System/Library/CoreServices/${app}.app/${app}"
+            sudo chmod 755 "${MOUNT_DIR}/System/Library/CoreServices/${app}.app/${app}"
+            echo "  Installed /System/Library/CoreServices/${app}.app"
+        fi
+    done
+
+    # Install user application bundles to /Applications
     sudo mkdir -p "${MOUNT_DIR}/Applications"
-    for app in ${GUI_APPS}; do
+    for app in ${USER_APPS}; do
         local APP_SRC="${BUILDDIR}/Applications/${app}.app/${app}"
         if [ -f "${APP_SRC}" ]; then
             sudo mkdir -p "${MOUNT_DIR}/Applications/${app}.app"
@@ -446,9 +461,19 @@ DIRS
         echo "write ${AK_SRC} /System/Library/Frameworks/AppKit.framework/Versions/A/AppKit" >> "${CMDS}"
     fi
 
-    # Install GUI application bundles to /Applications
+    # Install CoreServices application bundles to /System/Library/CoreServices
+    echo "mkdir /System/Library/CoreServices" >> "${CMDS}"
+    for app in ${CORESERVICES_APPS}; do
+        local APP_SRC="${BUILDDIR}/System/Library/CoreServices/${app}.app/${app}"
+        if [ -f "${APP_SRC}" ]; then
+            echo "mkdir /System/Library/CoreServices/${app}.app" >> "${CMDS}"
+            echo "write ${APP_SRC} /System/Library/CoreServices/${app}.app/${app}" >> "${CMDS}"
+        fi
+    done
+
+    # Install user application bundles to /Applications
     echo "mkdir /Applications" >> "${CMDS}"
-    for app in ${GUI_APPS}; do
+    for app in ${USER_APPS}; do
         local APP_SRC="${BUILDDIR}/Applications/${app}.app/${app}"
         if [ -f "${APP_SRC}" ]; then
             echo "mkdir /Applications/${app}.app" >> "${CMDS}"

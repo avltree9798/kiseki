@@ -42,6 +42,11 @@
 /*
  * Saved context for context_switch.S
  * Must match the callee-saved register save/restore in context_switch.S.
+ *
+ * Includes callee-saved NEON registers d8-d15 (AAPCS64 requirement).
+ * These are the lower 64 bits of v8-v15; userspace compilers rely on
+ * them being preserved across function calls and thus across context
+ * switches.
  */
 struct cpu_context {
     uint64_t x19;
@@ -57,6 +62,15 @@ struct cpu_context {
     uint64_t x29;   /* FP */
     uint64_t x30;   /* LR (return address) */
     uint64_t sp;
+    /* Callee-saved NEON registers (d8-d15, lower 64 bits of v8-v15) */
+    uint64_t d8;
+    uint64_t d9;
+    uint64_t d10;
+    uint64_t d11;
+    uint64_t d12;
+    uint64_t d13;
+    uint64_t d14;
+    uint64_t d15;
 };
 
 /*

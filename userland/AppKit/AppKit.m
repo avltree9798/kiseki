@@ -230,6 +230,7 @@ typedef unsigned int mach_msg_descriptor_type_t;
 #define MACH_SEND_TIMEOUT       0x00000010
 #define MACH_RCV_TIMEOUT        0x00000100
 #define MACH_RCV_TIMED_OUT      0x10004003
+#define MACH_SEND_NO_BUFFER     0x1000000d
 #define MACH_MSG_TIMEOUT_NONE   ((mach_msg_timeout_t)0)
 #define MACH_MSGH_BITS_COMPLEX  0x80000000u
 #define MACH_MSG_OOL_DESCRIPTOR 1
@@ -488,6 +489,7 @@ extern CFAttributedStringRef CFAttributedStringCreate(CFAllocatorRef alloc, CFSt
 #define WS_EVENT_WINDOW_DEACTIVATE  3021
 #define WS_EVENT_WINDOW_CLOSE       3022
 #define WS_EVENT_WINDOW_RESIZE      3023
+#define WS_EVENT_SCROLL             3030
 
 /* Window ordering */
 #define WS_ORDER_OUT                0
@@ -620,6 +622,14 @@ typedef struct {
     uint32_t            new_width;
     uint32_t            new_height;
 } ws_event_resize_t;
+
+typedef struct {
+    mach_msg_header_t   header;
+    int32_t             window_id;
+    int32_t             x, y;           /* cursor position in window */
+    int32_t             delta_y;        /* scroll delta: +1=up, -1=down */
+    uint32_t            modifiers;
+} ws_event_scroll_t;
 
 /* Receive buffer */
 typedef union {
@@ -1088,6 +1098,8 @@ typedef enum {
     uint32_t             _buttonNumber;
     NSInteger            _clickCount;
     CGPoint              _screenLocation;
+    /* Scroll event fields */
+    CGFloat              _deltaY;
 }
 + (id)_eventWithType:(NSEventType)type
               window:(int32_t)windowNumber
@@ -1105,6 +1117,7 @@ typedef enum {
 - (BOOL)isARepeat;
 - (NSInteger)buttonNumber;
 - (NSInteger)clickCount;
+- (CGFloat)deltaY;
 @end
 
 @implementation NSEvent
@@ -1158,6 +1171,7 @@ typedef enum {
 - (BOOL)isARepeat       { return _isARepeat; }
 - (NSInteger)buttonNumber { return (NSInteger)_buttonNumber; }
 - (NSInteger)clickCount   { return _clickCount; }
+- (CGFloat)deltaY         { return _deltaY; }
 
 @end
 
@@ -1199,6 +1213,20 @@ static NSEvent *_NSEventFromWSMouseEvent(ws_event_mouse_t *msg, NSEventType type
         e->_buttonNumber = msg->button;
         e->_clickCount = (NSInteger)msg->click_count;
         e->_screenLocation = CGPointMake((CGFloat)msg->screen_x, (CGFloat)msg->screen_y);
+    }
+    return e;
+}
+
+/* Helper: create NSEvent from a WindowServer scroll event message */
+static NSEvent *_NSEventFromWSScrollEvent(ws_event_scroll_t *msg) {
+    CGPoint loc = CGPointMake((CGFloat)msg->x, (CGFloat)msg->y);
+    NSEvent *e = [NSEvent _eventWithType:NSEventTypeScrollWheel
+                                  window:msg->window_id
+                                location:loc
+                           modifierFlags:_ws_modifiers_to_ns(msg->modifiers)
+                               timestamp:CFAbsoluteTimeGetCurrent()];
+    if (e) {
+        e->_deltaY = (CGFloat)msg->delta_y;
     }
     return e;
 }
@@ -1502,8 +1530,23 @@ static void _WSDrawRect(int32_t window_id, uint32_t dst_x, uint32_t dst_y,
     msg.height = height;
     msg.src_rowbytes = rowbytes;
 
-    mach_msg_return_t kr = mach_msg(&msg.header, MACH_SEND_MSG, sizeof(msg), 0,
-             MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    mach_msg_return_t kr;
+    for (int retry = 0; retry < 5; retry++) {
+        kr = mach_msg(&msg.header, MACH_SEND_MSG, sizeof(msg), 0,
+                 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        if (kr != MACH_SEND_NO_BUFFER)
+            break;
+        /* Port queue full — yield via nanosleep(1ms) and retry */
+        {
+            struct { long tv_sec; long tv_nsec; } ts = { 0, 1000000 };
+            __asm__ volatile(
+                "mov x0, %0\n"
+                "mov x1, #0\n"
+                "mov x16, #240\n"  /* SYS_nanosleep */
+                "svc #0x80\n"
+                :: "r"(&ts) : "x0","x1","x16","memory");
+        }
+    }
     if (kr != MACH_MSG_SUCCESS) {
         static int draw_fail_count = 0;
         draw_fail_count++;
@@ -1589,6 +1632,7 @@ static BOOL _WSPollEvent(ws_msg_buffer_t *buf, mach_msg_timeout_t timeout_ms) {
 - (void)mouseDragged:(id)event;
 - (void)rightMouseDown:(id)event;
 - (void)rightMouseUp:(id)event;
+- (void)scrollWheel:(id)event;
 - (BOOL)acceptsFirstResponder;
 - (BOOL)becomeFirstResponder;
 - (BOOL)resignFirstResponder;
@@ -1637,6 +1681,11 @@ static BOOL _WSPollEvent(ws_msg_buffer_t *buf, mach_msg_timeout_t timeout_ms) {
 - (void)rightMouseUp:(id)event {
     if (_nextResponder)
         ((void (*)(id, SEL, id))objc_msgSend)(_nextResponder, sel_registerName("rightMouseUp:"), event);
+}
+
+- (void)scrollWheel:(id)event {
+    if (_nextResponder)
+        ((void (*)(id, SEL, id))objc_msgSend)(_nextResponder, sel_registerName("scrollWheel:"), event);
 }
 
 - (BOOL)acceptsFirstResponder { return NO; }
@@ -2236,6 +2285,18 @@ static int       __windowCount = 0;
                 [(NSResponder *)_firstResponder mouseDragged:event];
             }
             break;
+        case NSEventTypeScrollWheel: {
+            /* Hit test to find which view is under the cursor */
+            CGPoint loc = [e locationInWindow];
+            id hitView = [(NSView *)_contentView hitTest:loc];
+            if (hitView) {
+                ((void (*)(id, SEL, id))objc_msgSend)(hitView,
+                    sel_registerName("scrollWheel:"), event);
+            } else if (_firstResponder) {
+                [(NSResponder *)_firstResponder scrollWheel:event];
+            }
+            break;
+        }
         default:
             break;
     }
@@ -2738,6 +2799,8 @@ typedef enum {
             event = _NSEventFromWSMouseEvent((ws_event_mouse_t *)&buf, NSEventTypeMouseMoved);
         } else if (mid == WS_EVENT_MOUSE_DRAGGED) {
             event = _NSEventFromWSMouseEvent((ws_event_mouse_t *)&buf, NSEventTypeLeftMouseDragged);
+        } else if (mid == WS_EVENT_SCROLL) {
+            event = _NSEventFromWSScrollEvent((ws_event_scroll_t *)&buf);
         }
         /* Window events handled in _processWSEvent */
 
@@ -2812,6 +2875,11 @@ typedef enum {
         case WS_EVENT_MOUSE_DRAGGED: {
             NSEvent *e = _NSEventFromWSMouseEvent((ws_event_mouse_t *)buf,
                                                    NSEventTypeLeftMouseDragged);
+            if (e) [self sendEvent:(id)e];
+            break;
+        }
+        case WS_EVENT_SCROLL: {
+            NSEvent *e = _NSEventFromWSScrollEvent((ws_event_scroll_t *)buf);
             if (e) [self sendEvent:(id)e];
             break;
         }

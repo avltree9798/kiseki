@@ -166,17 +166,31 @@ void pty_free(struct pty *pp)
 
 int64_t pty_master_read(struct pty *pp, void *buf, uint64_t count)
 {
-    uint8_t *dst = (uint8_t *)buf;
+    struct proc *p = proc_current();
+    if (!p || !p->p_vmspace)
+        return -EINVAL;
+
+    uint64_t uva = (uint64_t)buf;
     uint32_t nread = 0;
     uint64_t flags;
 
     spin_lock_irqsave(&pp->pt_s2m_lock, &flags);
 
     while (nread < count && pp->pt_s2m_count > 0) {
-        dst[nread] = pp->pt_s2m[pp->pt_s2m_tail];
+        uint8_t byte = pp->pt_s2m[pp->pt_s2m_tail];
         pp->pt_s2m_tail = (pp->pt_s2m_tail + 1) % PTY_BUFSZ;
         pp->pt_s2m_count--;
+
+        /* Must drop lock while copying to userspace */
+        spin_unlock_irqrestore(&pp->pt_s2m_lock, flags);
+
+        uint64_t pa = vmm_translate(p->p_vmspace->pgd, uva + nread);
+        if (pa == 0)
+            return (nread > 0) ? (int64_t)nread : -EFAULT;
+        *(uint8_t *)pa = byte;
         nread++;
+
+        spin_lock_irqsave(&pp->pt_s2m_lock, &flags);
     }
 
     spin_unlock_irqrestore(&pp->pt_s2m_lock, flags);
@@ -193,14 +207,31 @@ int64_t pty_master_read(struct pty *pp, void *buf, uint64_t count)
 
 int64_t pty_master_write(struct pty *pp, const void *buf, uint64_t count)
 {
-    const uint8_t *src = (const uint8_t *)buf;
+    struct proc *p = proc_current();
+    if (!p || !p->p_vmspace)
+        return -EINVAL;
+
+    uint64_t uva = (uint64_t)buf;
     uint32_t nwritten = 0;
     uint64_t flags;
 
     spin_lock_irqsave(&pp->pt_m2s_lock, &flags);
 
     while (nwritten < count && pp->pt_m2s_count < PTY_BUFSZ) {
-        pp->pt_m2s[pp->pt_m2s_head] = src[nwritten];
+        /* Drop lock for user VA translation */
+        spin_unlock_irqrestore(&pp->pt_m2s_lock, flags);
+
+        uint64_t pa = vmm_translate(p->p_vmspace->pgd, uva + nwritten);
+        if (pa == 0)
+            return (nwritten > 0) ? (int64_t)nwritten : -EFAULT;
+        uint8_t byte = *(const uint8_t *)pa;
+
+        spin_lock_irqsave(&pp->pt_m2s_lock, &flags);
+
+        if (pp->pt_m2s_count >= PTY_BUFSZ)
+            break;  /* Buffer filled while we released the lock */
+
+        pp->pt_m2s[pp->pt_m2s_head] = byte;
         pp->pt_m2s_head = (pp->pt_m2s_head + 1) % PTY_BUFSZ;
         pp->pt_m2s_count++;
         nwritten++;
@@ -237,7 +268,11 @@ int64_t pty_master_write(struct pty *pp, const void *buf, uint64_t count)
  * This is the XNU/BSD tsleep/wakeup pattern — the slave reader
  * sleeps on a wait channel and pty_master_write() wakes it.
  */
-static char pty_slave_getc(struct pty *pp)
+/*
+ * Returns 0-255 on success, -1 if interrupted by a pending signal,
+ * or 0x04 (Ctrl-D) if master closed.
+ */
+static int pty_slave_getc(struct pty *pp)
 {
     for (;;) {
         uint64_t flags;
@@ -248,7 +283,7 @@ static char pty_slave_getc(struct pty *pp)
             pp->pt_m2s_tail = (pp->pt_m2s_tail + 1) % PTY_BUFSZ;
             pp->pt_m2s_count--;
             spin_unlock_irqrestore(&pp->pt_m2s_lock, flags);
-            return c;
+            return (unsigned char)c;
         }
 
         spin_unlock_irqrestore(&pp->pt_m2s_lock, flags);
@@ -256,6 +291,15 @@ static char pty_slave_getc(struct pty *pp)
         /* Check if master is gone */
         if (!pp->pt_master_open)
             return 0x04; /* EOF (Ctrl-D) */
+
+        /* Check for actionable pending signals before sleeping.
+         * Only interrupt for signals that would terminate, stop,
+         * or invoke a custom handler — not default-ignore (SIGCHLD etc). */
+        {
+            struct proc *p = proc_current();
+            if (p && signal_has_actionable(p))
+                return -1;  /* Interrupted */
+        }
 
         /*
          * No data available — sleep on &pp->pt_m2s_count until
@@ -309,7 +353,14 @@ int64_t pty_slave_read(struct pty *pp, void *ubuf, uint64_t count)
             tp->t_lineout = 0;
 
             for (;;) {
-                char c = pty_slave_getc(pp);
+                int gc = pty_slave_getc(pp);
+                if (gc < 0) {
+                    /* Interrupted by signal */
+                    if (nread > 0)
+                        break;
+                    return -EINTR;
+                }
+                char c = (char)gc;
 
                 /* Signal generation */
                 if (t->c_lflag & ISIG) {
@@ -461,7 +512,14 @@ int64_t pty_slave_read(struct pty *pp, void *ubuf, uint64_t count)
         if (vmin == 0) vmin = 1;
 
         while (nread < count && (int)nread < vmin) {
-            char c = pty_slave_getc(pp);
+            int gc = pty_slave_getc(pp);
+            if (gc < 0) {
+                /* Interrupted by signal */
+                if (nread > 0)
+                    break;
+                return -EINTR;
+            }
+            char c = (char)gc;
 
             /* Signal generation in raw mode */
             if (t->c_lflag & ISIG) {
@@ -537,6 +595,10 @@ int64_t pty_slave_write(struct pty *pp, const void *ubuf, uint64_t count)
 
         nwritten++;
     }
+
+    /* Wake any master-side reader sleeping on the s2m buffer */
+    if (nwritten > 0)
+        thread_wakeup_on(&pp->pt_s2m_count);
 
     return (int64_t)nwritten;
 }

@@ -360,17 +360,6 @@ void syscall_handler(struct trap_frame *tf)
      */
     int64_t callnum = (int64_t)tf->regs[16];
 
-    /* Syscall tracing — disabled for production, enable for debugging */
-#if 0
-    if (callnum != 4 && callnum != -31 && callnum != -26) {
-        struct thread *_t = current_thread_get();
-        pid_t _p = (_t && _t->task) ? _t->task->pid : -1;
-        kprintf("[sc] PID%d %ld(0x%lx, 0x%lx, 0x%lx) PC=0x%lx\n",
-                _p, callnum, tf->regs[0], tf->regs[1], tf->regs[2],
-                tf->elr);
-    }
-#endif
-
     if (callnum < 0) {
         mach_trap_dispatch(tf, (int32_t)callnum);
         return;
@@ -981,6 +970,11 @@ int sys_kill(struct trap_frame *tf)
     /*
      * Helper: send signal to a single proc.
      * Returns 0 on success, positive errno on error.
+     *
+     * After recording the signal as pending, we wake any sleeping
+     * threads in the target so they get scheduled and signal_check()
+     * fires on their return-to-user path.  Without this, a process
+     * blocked in read()/sleep/etc. would never see the signal.
      */
     #define DO_KILL_ONE(target_proc) do {                               \
         struct proc *_tp = (target_proc);                               \
@@ -998,6 +992,17 @@ int sys_kill(struct trap_frame *tf)
         if (sig > 0) {                                                  \
             /* Record signal as pending */                              \
             sigaddset(&_tp->p_sigacts.pending, sig);                    \
+            /* Wake sleeping threads so signal_check() runs on         \
+             * return-to-user.  Similar to XNU psignal()/thread_abort  \
+             * which interrupts waiting threads.                       */\
+            if (_tp->p_task) {                                          \
+                struct thread *_th = _tp->p_task->threads;              \
+                while (_th) {                                           \
+                    if (_th->state == TH_WAIT)                          \
+                        thread_unblock(_th);                            \
+                    _th = _th->task_next;                               \
+                }                                                       \
+            }                                                           \
         }                                                               \
     } while (0)
 
@@ -1213,15 +1218,12 @@ int sys_read(struct trap_frame *tf)
                  * Reference: XNU pipe_read() checks for signals via
                  * msleep() returning EINTR.
                  */
-                if (pp) {
-                    sigset_t pending = pp->p_sigacts.pending & ~pp->p_sigacts.blocked;
-                    if (pending) {
-                        spin_unlock_irqrestore(&pipe_r->lock, pipe_flags);
-                        if (nread > 0)
-                            break;      /* Return partial read */
-                        syscall_return(tf, -EINTR);
-                        return 0;
-                    }
+                if (pp && signal_has_actionable(pp)) {
+                    spin_unlock_irqrestore(&pipe_r->lock, pipe_flags);
+                    if (nread > 0)
+                        break;      /* Return partial read */
+                    syscall_return(tf, -EINTR);
+                    return 0;
                 }
                 /*
                  * Block: atomically release the pipe lock and enter
@@ -1928,20 +1930,10 @@ static int sys_ioctl(struct trap_frame *tf)
     uint64_t arg        = tf->regs[2];
 
     /*
-     * Console TTY: fds 0, 1, 2 when they are console sentinels
-     * (no backing vnode). All terminal ioctls go through the TTY layer.
-     */
-    if ((fd == 0 || fd == 1 || fd == 2) && !vfs_fd_has_vnode(fd)) {
-        struct tty *tp = tty_get_console();
-        int err = tty_ioctl(tp, cmd, arg);
-        if (err != 0)
-            return err;
-        syscall_return(tf, 0);
-        return 0;
-    }
-
-    /*
-     * PTY slave fd: route to the PTY's slave TTY for ioctl.
+     * PTY fd: route to the PTY's slave TTY for ioctl.
+     * Must be checked BEFORE the console sentinel check, because PTY
+     * slave fds (e.g. after dup2(slave,0)) also lack a backing vnode
+     * and would incorrectly match the console path.
      */
     {
         int pty_ioctl_side;
@@ -1954,6 +1946,20 @@ static int sys_ioctl(struct trap_frame *tf)
             syscall_return(tf, 0);
             return 0;
         }
+    }
+
+    /*
+     * Console TTY: fds 0, 1, 2 when they are console sentinels
+     * (no backing vnode and no PTY). All terminal ioctls go through
+     * the TTY layer.
+     */
+    if ((fd == 0 || fd == 1 || fd == 2) && !vfs_fd_has_vnode(fd)) {
+        struct tty *tp = tty_get_console();
+        int err = tty_ioctl(tp, cmd, arg);
+        if (err != 0)
+            return err;
+        syscall_return(tf, 0);
+        return 0;
     }
 
     /*
@@ -3793,6 +3799,16 @@ int signal_send(struct task *target_task, int sig)
     /* Set the pending bit */
     sigaddset(&p->p_sigacts.pending, sig);
 
+    /* Wake sleeping threads so signal_check() runs on return-to-user */
+    if (p->p_task) {
+        struct thread *th = p->p_task->threads;
+        while (th) {
+            if (th->state == TH_WAIT)
+                thread_unblock(th);
+            th = th->task_next;
+        }
+    }
+
     return 0;
 }
 
@@ -3812,6 +3828,15 @@ void signal_send_pgid(pid_t pgid, int sig)
             p->p_state != PROC_ZOMBIE &&
             p->p_pgrp == pgid) {
             sigaddset(&p->p_sigacts.pending, sig);
+            /* Wake sleeping threads so signal_check() fires */
+            if (p->p_task) {
+                struct thread *th = p->p_task->threads;
+                while (th) {
+                    if (th->state == TH_WAIT)
+                        thread_unblock(th);
+                    th = th->task_next;
+                }
+            }
         }
     }
 }
@@ -3860,6 +3885,48 @@ static const char sig_default_action[NSIG] = {
     [SIGUSR1]   = 'T',
     [SIGUSR2]   = 'T',
 };
+
+/*
+ * signal_has_actionable - Check if any pending signal would actually
+ * terminate, stop, or invoke a custom handler.
+ *
+ * Returns false for signals that are SIG_IGN or have default action 'I'
+ * (ignore) like SIGCHLD, SIGURG, SIGWINCH, etc.  Used by blocking reads
+ * so we don't spuriously return EINTR for benign signals.
+ */
+bool signal_has_actionable(struct proc *p)
+{
+    if (p == NULL)
+        return false;
+
+    struct sigacts *sa = &p->p_sigacts;
+    sigset_t deliverable = sa->pending & ~sa->blocked;
+    if (deliverable == 0)
+        return false;
+
+    for (int i = 1; i < NSIG; i++) {
+        if (!(deliverable & (1u << i)))
+            continue;
+
+        sig_handler_t handler = sa->actions[i].sa_handler;
+
+        /* Explicitly ignored */
+        if (handler == SIG_IGN)
+            continue;
+
+        /* Custom handler — always actionable */
+        if (handler != SIG_DFL)
+            return true;
+
+        /* Default action: only actionable if T, C, or S */
+        char action = (i < NSIG) ? sig_default_action[i] : 'T';
+        if (action == 'T' || action == 'C' || action == 'S')
+            return true;
+
+        /* Default 'I' (ignore) or 'R' (continue) — not actionable */
+    }
+    return false;
+}
 
 /*
  * signal_check - Check for and deliver pending signals.

@@ -295,7 +295,7 @@ typedef struct {
 #define MACH_MSG_SIZE_MAX           4096
 
 /* Message queue capacity per port */
-#define PORT_MSG_QUEUE_SIZE         32
+#define PORT_MSG_QUEUE_SIZE         64
 
 /* Maximum ports per task name space */
 #define TASK_PORT_TABLE_SIZE        256

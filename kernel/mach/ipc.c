@@ -567,8 +567,8 @@ ipc_kmsg_copyin_ool_descriptor(struct vm_space *sender_space,
             {
                 static uint64_t oom_count = 0;
                 if (oom_count < 3 || (oom_count & (oom_count - 1)) == 0)
-                    kprintf("[ipc] copyin_ool: OOM at page %lu/%lu (occurrence %lu)\n",
-                            i, npages, ++oom_count);
+                    kprintf("[ipc] copyin_ool: OOM at page %lu/%lu (occurrence %lu, free: %lu)\n",
+                            i, npages, ++oom_count, pmm_get_free_pages());
                 else
                     oom_count++;
             }

@@ -12,6 +12,12 @@
 /* ============================================================================
  * Macro: Save all registers to a trap frame on the kernel stack.
  * After: x0 = pointer to trap_frame.
+ *
+ * For EL0 (user) traps, we also save the full FP/NEON state (FPCR, FPSR,
+ * q0-q31). This is required because userspace code uses NEON instructions
+ * (the compiler generates them freely), and another process running while
+ * this one is blocked will clobber the NEON registers. The kernel itself
+ * is compiled with -mgeneral-regs-only so EL1 traps don't need NEON save.
  * ============================================================================ */
 .macro SAVE_REGS el
     sub     sp, sp, #TF_SIZE
@@ -49,11 +55,38 @@
     mrs     x0, far_el1
     str     x0, [sp, #TF_FAR]
 
+    .if \el == 0
+        /* Save FP/NEON state for userspace traps */
+        mrs     x0, fpcr
+        str     x0, [sp, #TF_FPCR]
+        mrs     x0, fpsr
+        str     x0, [sp, #TF_FPSR]
+
+        /* Save q0-q31 (128-bit NEON registers) using stp (pairs of 128-bit) */
+        stp     q0,  q1,  [sp, #(TF_NEON_BASE + 0 * 16)]
+        stp     q2,  q3,  [sp, #(TF_NEON_BASE + 2 * 16)]
+        stp     q4,  q5,  [sp, #(TF_NEON_BASE + 4 * 16)]
+        stp     q6,  q7,  [sp, #(TF_NEON_BASE + 6 * 16)]
+        stp     q8,  q9,  [sp, #(TF_NEON_BASE + 8 * 16)]
+        stp     q10, q11, [sp, #(TF_NEON_BASE + 10 * 16)]
+        stp     q12, q13, [sp, #(TF_NEON_BASE + 12 * 16)]
+        stp     q14, q15, [sp, #(TF_NEON_BASE + 14 * 16)]
+        stp     q16, q17, [sp, #(TF_NEON_BASE + 16 * 16)]
+        stp     q18, q19, [sp, #(TF_NEON_BASE + 18 * 16)]
+        stp     q20, q21, [sp, #(TF_NEON_BASE + 20 * 16)]
+        stp     q22, q23, [sp, #(TF_NEON_BASE + 22 * 16)]
+        stp     q24, q25, [sp, #(TF_NEON_BASE + 24 * 16)]
+        stp     q26, q27, [sp, #(TF_NEON_BASE + 26 * 16)]
+        stp     q28, q29, [sp, #(TF_NEON_BASE + 28 * 16)]
+        stp     q30, q31, [sp, #(TF_NEON_BASE + 30 * 16)]
+    .endif
+
     mov     x0, sp
 .endm
 
 /* ============================================================================
  * Macro: Restore all registers and return from exception.
+ * For EL0 traps, also restores the full FP/NEON state.
  * ============================================================================ */
 .macro RESTORE_REGS el
     ldr     x0, [sp, #TF_ELR]
@@ -64,6 +97,30 @@
     .if \el == 0
         ldr     x0, [sp, #TF_SP]
         msr     sp_el0, x0
+
+        /* Restore FP/NEON state for userspace */
+        ldr     x0, [sp, #TF_FPCR]
+        msr     fpcr, x0
+        ldr     x0, [sp, #TF_FPSR]
+        msr     fpsr, x0
+
+        /* Restore q0-q31 */
+        ldp     q0,  q1,  [sp, #(TF_NEON_BASE + 0 * 16)]
+        ldp     q2,  q3,  [sp, #(TF_NEON_BASE + 2 * 16)]
+        ldp     q4,  q5,  [sp, #(TF_NEON_BASE + 4 * 16)]
+        ldp     q6,  q7,  [sp, #(TF_NEON_BASE + 6 * 16)]
+        ldp     q8,  q9,  [sp, #(TF_NEON_BASE + 8 * 16)]
+        ldp     q10, q11, [sp, #(TF_NEON_BASE + 10 * 16)]
+        ldp     q12, q13, [sp, #(TF_NEON_BASE + 12 * 16)]
+        ldp     q14, q15, [sp, #(TF_NEON_BASE + 14 * 16)]
+        ldp     q16, q17, [sp, #(TF_NEON_BASE + 16 * 16)]
+        ldp     q18, q19, [sp, #(TF_NEON_BASE + 18 * 16)]
+        ldp     q20, q21, [sp, #(TF_NEON_BASE + 20 * 16)]
+        ldp     q22, q23, [sp, #(TF_NEON_BASE + 22 * 16)]
+        ldp     q24, q25, [sp, #(TF_NEON_BASE + 24 * 16)]
+        ldp     q26, q27, [sp, #(TF_NEON_BASE + 26 * 16)]
+        ldp     q28, q29, [sp, #(TF_NEON_BASE + 28 * 16)]
+        ldp     q30, q31, [sp, #(TF_NEON_BASE + 30 * 16)]
     .endif
 
     ldp     x0, x1, [sp, #(0 * 8)]

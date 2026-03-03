@@ -2375,9 +2375,6 @@ void dyld_main(const struct mach_header_64 *main_mh,
     main_func_t entry = (main_func_t)main_addr;
 
     int ret = entry((int)argc, argv, envp, apple);
-    dyld_puts("dyld: main() returned ");
-    dyld_put_dec(ret);
-    dyld_puts("\n");
 
     /*
      * main() returned — call libc exit() to flush stdio buffers.

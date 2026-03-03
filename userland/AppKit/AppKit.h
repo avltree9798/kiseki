@@ -176,6 +176,7 @@ typedef enum {
 - (BOOL)isARepeat;
 - (NSInteger)buttonNumber;
 - (NSInteger)clickCount;
+- (CGFloat)deltaY;
 
 @end
 
@@ -195,6 +196,7 @@ typedef enum {
 - (void)mouseDragged:(id)event;
 - (void)rightMouseDown:(id)event;
 - (void)rightMouseUp:(id)event;
+- (void)scrollWheel:(id)event;
 - (BOOL)acceptsFirstResponder;
 - (BOOL)becomeFirstResponder;
 - (BOOL)resignFirstResponder;

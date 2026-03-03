@@ -99,7 +99,7 @@ static struct thread *alloc_thread(void)
              * the thread was still running on it.
              */
             if (th->state == TH_TERM && th->kernel_stack) {
-                pmm_free_pages((uint64_t)th->kernel_stack, 2);
+                pmm_free_pages((uint64_t)th->kernel_stack, 3);  /* 2^3 = 8 pages = 32KB */
                 th->kernel_stack = NULL;
                 th->kernel_stack_size = 0;
             }
@@ -177,8 +177,8 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg,
     if (!th)
         return NULL;
 
-    /* Allocate kernel stack (4 pages = 16KB) */
-    uint64_t stack_pa = pmm_alloc_pages(2);  /* 2^2 = 4 pages */
+    /* Allocate kernel stack (8 pages = 32KB = KERNEL_STACK_SIZE) */
+    uint64_t stack_pa = pmm_alloc_pages(3);  /* 2^3 = 8 pages = 32KB */
     if (!stack_pa) {
         th->tid = 0;
         th->state = TH_TERM;
@@ -186,7 +186,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg,
     }
 
     th->kernel_stack = (uint64_t *)stack_pa;
-    th->kernel_stack_size = 4 * PAGE_SIZE;
+    th->kernel_stack_size = KERNEL_STACK_SIZE;
     th->priority = priority;
     th->effective_priority = priority;
     th->sched_policy = SCHED_OTHER;
@@ -251,10 +251,20 @@ void thread_block(const char *reason)
 
 void thread_unblock(struct thread *th)
 {
-    if (th->state != TH_WAIT)
+    /*
+     * Use atomic compare-and-swap on th->state to prevent the
+     * double-enqueue race on SMP: two cores calling thread_unblock()
+     * on the same thread simultaneously could both pass a simple
+     * "if (state != TH_WAIT) return" check and both enqueue.
+     *
+     * Only the core that successfully CAS's TH_WAIT -> TH_RUN proceeds.
+     */
+    int expected = TH_WAIT;
+    if (!__atomic_compare_exchange_n(&th->state, &expected, TH_RUN,
+                                     /*weak=*/0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
 
-    th->state = TH_RUN;
     th->wait_channel = NULL;
     th->wait_reason = NULL;
     th->wakeup_tick = 0;
@@ -351,12 +361,28 @@ void thread_sleep_on_locked(void *chan, const char *reason,
  */
 void thread_wakeup_on(void *chan)
 {
+    /*
+     * Collect matching threads under lock, then unblock outside the lock.
+     * This prevents races where another core is simultaneously modifying
+     * th->state / th->wait_channel. The thread_lock serializes access
+     * to the thread_pool scan. thread_unblock() uses atomic CAS so it
+     * is safe to call after releasing the lock.
+     */
+    struct thread *to_wake[MAX_THREADS];
+    int nwake = 0;
+    uint64_t flags;
+
+    spin_lock_irqsave(&thread_lock, &flags);
     for (int i = 0; i < MAX_THREADS; i++) {
         struct thread *th = &thread_pool[i];
         if (th->state == TH_WAIT && th->wait_channel == chan) {
-            thread_unblock(th);
+            to_wake[nwake++] = th;
         }
     }
+    spin_unlock_irqrestore(&thread_lock, flags);
+
+    for (int i = 0; i < nwake; i++)
+        thread_unblock(to_wake[i]);
 }
 
 /*
@@ -504,7 +530,9 @@ void sched_init_percpu(void)
     cd->current_thread = cd->idle_thread;
     set_cpu_data(cd);
     
-    /* Mark this CPU as online now that initialization is complete */
+    /* Ensure all initialization writes are globally visible before
+     * marking online — other cores check cd->online in load balancing */
+    __asm__ volatile("dmb ish" ::: "memory");
     cd->online = true;
 }
 
@@ -1001,8 +1029,12 @@ void sched_tick(void)
 
     cd->total_ticks++;
 
-    /* Check for sleeping threads to wake up */
-    sched_wakeup_sleepers();
+    /* Only CPU 0 checks the sleep queue — avoids heavy contention on
+     * sleep_lock from all cores scanning the queue every tick. The
+     * global tick_count is only incremented by CPU 0 (in timer_handler),
+     * so having CPU 0 do the wakeup check is natural. */
+    if (cd->cpu_id == 0)
+        sched_wakeup_sleepers();
 
     struct thread *th = cd->current_thread;
     if (!th || th == cd->idle_thread) {
@@ -1153,8 +1185,8 @@ struct thread *thread_create_user(struct task *task, uint64_t entry,
     if (!th)
         return NULL;
 
-    /* Allocate kernel stack (4 pages = 16KB) */
-    uint64_t stack_pa = pmm_alloc_pages(2);  /* 2^2 = 4 pages */
+    /* Allocate kernel stack (8 pages = 32KB = KERNEL_STACK_SIZE) */
+    uint64_t stack_pa = pmm_alloc_pages(3);  /* 2^3 = 8 pages = 32KB */
     if (!stack_pa) {
         th->tid = 0;
         th->state = TH_TERM;
@@ -1162,7 +1194,7 @@ struct thread *thread_create_user(struct task *task, uint64_t entry,
     }
 
     th->kernel_stack = (uint64_t *)stack_pa;
-    th->kernel_stack_size = 4 * PAGE_SIZE;
+    th->kernel_stack_size = KERNEL_STACK_SIZE;
     th->priority = priority;
     th->effective_priority = priority;
     th->sched_policy = SCHED_OTHER;
@@ -1187,8 +1219,7 @@ struct thread *thread_create_user(struct task *task, uint64_t entry,
      */
     uint64_t kstack_top = stack_pa + th->kernel_stack_size;
 
-    /* Use the real TF_SIZE from machine/trap.h (36 * 8 = 288 bytes) */
-    /* trap_frame: 31 regs (x0-x30) + sp + elr + spsr + esr + far */
+    /* TF_SIZE from machine/trap.h: 816 bytes (GPRs + FPCR/FPSR + q0-q31) */
     uint64_t tf_base = kstack_top - TF_SIZE;
     struct trap_frame *user_tf = (struct trap_frame *)tf_base;
 

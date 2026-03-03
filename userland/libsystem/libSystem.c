@@ -1118,18 +1118,18 @@ static FILE _stderr_file = { 2, _F_WRITE | _F_UNBUF,   NULL, 0, 0, 0, EOF };
 
 /*
  * Export under both standard and Apple names.
- * macOS <stdio.h> defines: #define stdin __stdinp, etc.
- * The macOS convention is that __stdinp/etc are FILE ** (pointer-to-pointer)
- * so that `#define stderr (*__stderrp)` yields a FILE *.
- * Client code declares: extern void **__stderrp; #define stderr (*__stderrp)
+ * macOS SDK <stdio.h> defines:
+ *   extern FILE *__stdinp;   #define stdin  __stdinp
+ *   extern FILE *__stdoutp;  #define stdout __stdoutp
+ *   extern FILE *__stderrp;  #define stderr __stderrp
+ *
+ * So __stdinp/etc must be FILE * (single pointer) directly pointing
+ * to the FILE struct.  Client code compiled with the macOS SDK will
+ * load __stdoutp as a FILE * and pass it to fputs/fprintf/etc.
  */
-static FILE *_stdin_ptr  = &_stdin_file;
-static FILE *_stdout_ptr = &_stdout_file;
-static FILE *_stderr_ptr = &_stderr_file;
-
-EXPORT FILE **__stdinp  = &_stdin_ptr;
-EXPORT FILE **__stdoutp = &_stdout_ptr;
-EXPORT FILE **__stderrp = &_stderr_ptr;
+EXPORT FILE *__stdinp  = &_stdin_file;
+EXPORT FILE *__stdoutp = &_stdout_file;
+EXPORT FILE *__stderrp = &_stderr_file;
 
 /* Also export the standard names (single pointer) for code that uses them directly */
 EXPORT FILE *stdin  = &_stdin_file;

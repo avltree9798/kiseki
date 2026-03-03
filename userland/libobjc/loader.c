@@ -69,7 +69,6 @@ static void init_runtime(void)
 		if (_dispatch_end_NSAutoReleasePool != 0) {
 			_dispatch_end_NSAutoReleasePool = objc_autoreleasePoolPop;
 		}
-		fprintf(stderr, "[libobjc] runtime initialised\n");
 	}
 }
 
@@ -429,15 +428,6 @@ OBJC_PUBLIC void __objc_exec_class(struct objc_module_abi_8 *module)
 				(struct objc_class_gsv1 *)_syms->definitions[4];
 			if (_cls4 && _cls4->name) {
 				const char *n = _cls4->name;
-				if (n[0] == '\0') {
-					fprintf(stderr, "[libobjc] *** ENTRY CHECK: class[4] ALREADY CORRUPT at entry! "
-						"bytes: %02x %02x %02x %02x at %p\n",
-						(unsigned char)n[0], (unsigned char)n[1],
-						(unsigned char)n[2], (unsigned char)n[3], n);
-				} else {
-					fprintf(stderr, "[libobjc] ENTRY CHECK: class[4] OK name=\"%.10s\" at %p\n",
-						n, n);
-				}
 			}
 		}
 	}
@@ -478,14 +468,6 @@ OBJC_PUBLIC void __objc_exec_class(struct objc_module_abi_8 *module)
 			(struct objc_class_gsv1 *)symbols->definitions[4];
 		if (_cls4b && _cls4b->name) {
 			const char *n = _cls4b->name;
-			if (n[0] == '\0') {
-				fprintf(stderr, "[libobjc] *** POST-SELREG: class[4] CORRUPT! "
-					"bytes: %02x %02x %02x %02x at %p\n",
-					(unsigned char)n[0], (unsigned char)n[1],
-					(unsigned char)n[2], (unsigned char)n[3], n);
-			} else {
-				fprintf(stderr, "[libobjc] POST-SELREG: class[4] OK name=\"%.10s\"\n", n);
-			}
 		}
 	}
 
@@ -495,23 +477,6 @@ OBJC_PUBLIC void __objc_exec_class(struct objc_module_abi_8 *module)
 	{
 		void *raw_def = symbols->definitions[defs];
 		struct objc_class_gsv1 *raw_cls = (struct objc_class_gsv1 *)raw_def;
-		fprintf(stderr, "[libobjc] class[%u] raw=%p name_ptr=%p name=\"%s\"\n",
-			i, raw_def, (void*)raw_cls->name,
-			raw_cls->name ? raw_cls->name : "(null)");
-		/* Bug 17b: If name appears empty but pointer is non-NULL, dump raw bytes */
-		if (raw_cls->name && raw_cls->name[0] == '\0') {
-			const unsigned char *nb = (const unsigned char *)raw_cls->name;
-			fprintf(stderr, "[libobjc]   EMPTY NAME bytes: %02x %02x %02x %02x %02x %02x %02x %02x at %p\n",
-				nb[0], nb[1], nb[2], nb[3], nb[4], nb[5], nb[6], nb[7],
-				(void*)nb);
-			/* Also check 16 bytes before to see if there's a page boundary issue */
-			const unsigned char *before = nb - 16;
-			fprintf(stderr, "[libobjc]   -16 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-				before[0], before[1], before[2], before[3],
-				before[4], before[5], before[6], before[7],
-				before[8], before[9], before[10], before[11],
-				before[12], before[13], before[14], before[15]);
-		}
 		Class upgraded = objc_upgrade_class(raw_def);
 		objc_load_class(upgraded);
 		defs++;
@@ -545,8 +510,5 @@ OBJC_PUBLIC void __objc_exec_class(struct objc_module_abi_8 *module)
 			objc_send_load_message(class);
 		}
 	}
-	fprintf(stderr, "[libobjc] loaded module %s (%u classes, %lu selectors)\n",
-		module->name ? module->name : "?",
-		symbols->class_count, symbols->selector_count);
 }
 #endif

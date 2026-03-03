@@ -138,6 +138,7 @@ void mutex_init(mutex_t *mtx)
 {
     mtx->locked = 0;
     mtx->owner = NULL;
+    spin_init(&mtx->wait_lock);
     mtx->waiters_head = NULL;
     mtx->waiters_tail = NULL;
 }
@@ -164,10 +165,9 @@ void mutex_lock(mutex_t *mtx)
             __asm__ volatile("yield");
         }
 
-        /* Still can't get it — enqueue and block */
-        /* Use a simple spinlock-protected wait queue on the mutex */
-        /* Disable IRQs to safely manipulate the wait list */
-        flags = irq_save();
+        /* Still can't get it — enqueue and block.
+         * Use the mutex's wait_lock spinlock (SMP-safe). */
+        spin_lock_irqsave(&mtx->wait_lock, &flags);
 
         th->wait_next = NULL;
         if (mtx->waiters_tail) {
@@ -177,7 +177,7 @@ void mutex_lock(mutex_t *mtx)
         }
         mtx->waiters_tail = th;
 
-        irq_restore(flags);
+        spin_unlock_irqrestore(&mtx->wait_lock, flags);
 
         /* Block — scheduler picks the next thread */
         thread_block("mutex_lock");
@@ -193,27 +193,34 @@ void mutex_lock(mutex_t *mtx)
 
 void mutex_unlock(mutex_t *mtx)
 {
-    mtx->owner = NULL;
-    __asm__ volatile("dmb ish" ::: "memory");
-    mtx->locked = 0;
+    /*
+     * SMP-safe unlock: check for waiters BEFORE releasing the lock.
+     * If a waiter exists, hand ownership directly (locked stays 1)
+     * to prevent another core from stealing the mutex in the gap.
+     */
+    uint64_t flags;
+    spin_lock_irqsave(&mtx->wait_lock, &flags);
 
-    /* Wake up first waiter from queue */
-    uint64_t flags = irq_save();
     struct thread *waiter = mtx->waiters_head;
     if (waiter) {
+        /* Direct handoff: transfer ownership without releasing locked.
+         * This prevents the race where another core sees locked==0
+         * and steals the mutex before we re-set locked=1. */
         mtx->waiters_head = waiter->wait_next;
         if (mtx->waiters_head == NULL)
             mtx->waiters_tail = NULL;
         waiter->wait_next = NULL;
-    }
-    irq_restore(flags);
 
-    if (waiter) {
-        /* The waiter's mutex_lock will set mtx->locked on wakeup.
-         * We need to pre-acquire for the waiter so no one steals it. */
-        mtx->locked = 1;
-        mtx->owner = waiter;
+        mtx->owner = waiter;  /* locked stays 1 */
+        spin_unlock_irqrestore(&mtx->wait_lock, flags);
+
         thread_unblock(waiter);
+    } else {
+        /* No waiters: release the lock */
+        mtx->owner = NULL;
+        __asm__ volatile("dmb ish" ::: "memory");
+        mtx->locked = 0;
+        spin_unlock_irqrestore(&mtx->wait_lock, flags);
     }
 }
 

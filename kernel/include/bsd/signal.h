@@ -153,6 +153,7 @@ struct sigacts {
 struct task;
 struct thread;
 struct trap_frame;
+struct proc;
 
 /*
  * signal_init - Initialize signal state for a task
@@ -189,6 +190,16 @@ void signal_send_pgid(pid_t pgid, int sig);
  * Returns true if a signal was delivered.
  */
 bool signal_check(struct thread *th, struct trap_frame *tf);
+
+/*
+ * signal_has_actionable - Check if any pending signal would be acted upon.
+ *
+ * Returns true if there is a pending, unblocked signal whose disposition
+ * is NOT "ignore" (neither SIG_IGN nor default-ignore like SIGCHLD/SIGURG).
+ * Used by blocking reads (tty_getc, pty_slave_getc) to decide whether to
+ * return EINTR — we don't want to interrupt reads for benign signals.
+ */
+bool signal_has_actionable(struct proc *p);
 
 /*
  * signal_return - Clean up after a signal handler returns (sigreturn)

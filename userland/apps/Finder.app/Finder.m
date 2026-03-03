@@ -529,48 +529,47 @@ static id _FinderDrawRect(id self, SEL _cmd, CGRect dirtyRect) {
     CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0, 1.0);
     CGContextFillRect(ctx, CGRectMake(0, 0, W, H));
 
-    /* --- Header bar at top --- */
-    CGFloat headerTop = H - HEADER_H;
+    /* --- Header bar at top (Y-down: Y=0 is top of window) --- */
+    CGFloat headerBottom = HEADER_H;
 
     /* Header background */
     CGContextSetRGBFillColor(ctx, 0.94, 0.94, 0.94, 1.0);
-    CGContextFillRect(ctx, CGRectMake(0, headerTop, W, HEADER_H));
+    CGContextFillRect(ctx, CGRectMake(0, 0, W, HEADER_H));
 
     /* Header separator */
     CGContextSetRGBFillColor(ctx, 0.78, 0.78, 0.78, 1.0);
-    CGContextFillRect(ctx, CGRectMake(0, headerTop, W, 1));
+    CGContextFillRect(ctx, CGRectMake(0, headerBottom - 1, W, 1));
 
     /* Back button (< arrow) — left side of header */
     if (strcmp(g_current_path, "/") != 0) {
         CGContextSetRGBFillColor(ctx, 0.20, 0.47, 0.95, 1.0);
-        CGContextShowTextAtPoint(ctx, 8.0, headerTop + 8.0, "< Back", 6);
+        CGContextShowTextAtPoint(ctx, 8.0, 8.0, "< Back", 6);
     }
 
-    /* Path text — centred in header */
+    /* Path text — in header */
     CGContextSetRGBFillColor(ctx, 0.25, 0.25, 0.25, 1.0);
     size_t pathlen = strlen(g_current_path);
     if (pathlen > 50) pathlen = 50;
     CGFloat pathX = SIDEBAR_W + 16.0;
-    CGContextShowTextAtPoint(ctx, pathX, headerTop + 8.0,
+    CGContextShowTextAtPoint(ctx, pathX, 8.0,
                              g_current_path, pathlen);
 
-    /* --- Sidebar background --- */
-    CGFloat contentH = headerTop;
+    /* --- Sidebar background (Y-down: starts at headerBottom) --- */
     CGContextSetRGBFillColor(ctx, 0.95, 0.95, 0.95, 1.0);
-    CGContextFillRect(ctx, CGRectMake(0, 0, SIDEBAR_W, contentH));
+    CGContextFillRect(ctx, CGRectMake(0, headerBottom, SIDEBAR_W, H - headerBottom));
 
     /* Sidebar separator */
     CGContextSetRGBFillColor(ctx, 0.82, 0.82, 0.82, 1.0);
-    CGContextFillRect(ctx, CGRectMake(SIDEBAR_W, 0, 1, contentH));
+    CGContextFillRect(ctx, CGRectMake(SIDEBAR_W, headerBottom, 1, H - headerBottom));
 
     /* Sidebar title: "Favourites" */
     CGContextSetRGBFillColor(ctx, 0.50, 0.50, 0.50, 1.0);
-    CGContextShowTextAtPoint(ctx, 8.0, contentH - 18.0, "Favourites", 10);
+    CGContextShowTextAtPoint(ctx, 8.0, headerBottom + 10.0, "Favourites", 10);
 
     /* Sidebar favourite items */
     for (int i = 0; i < sidebar_favourite_count; i++) {
-        CGFloat iy = contentH - 36.0 - (CGFloat)i * 20.0;
-        if (iy < 0) break;
+        CGFloat iy = headerBottom + 28.0 + (CGFloat)i * 20.0;
+        if (iy + 16 > H) break;
 
         /* Highlight if this is the current path */
         if (strcmp(sidebar_favourites[i], g_current_path) == 0) {
@@ -596,9 +595,9 @@ static id _FinderDrawRect(id self, SEL _cmd, CGRect dirtyRect) {
         CGContextShowTextAtPoint(ctx, 24.0, iy, display, dlen);
     }
 
-    /* --- Main content area: file listing --- */
+    /* --- Main content area: file listing (Y-down) --- */
     CGFloat listX = SIDEBAR_W + ITEM_PAD_X;
-    CGFloat listTop = contentH - 4.0;
+    CGFloat listStartY = headerBottom + 4.0;
     CGFloat listW = W - SIDEBAR_W - ITEM_PAD_X * 2;
 
     /* Column headers */
@@ -606,25 +605,25 @@ static id _FinderDrawRect(id self, SEL _cmd, CGRect dirtyRect) {
     CGFloat sizeColX = W - 80.0;
 
     CGContextSetRGBFillColor(ctx, 0.50, 0.50, 0.50, 1.0);
-    CGContextShowTextAtPoint(ctx, nameColX, listTop - 12.0, "Name", 4);
-    CGContextShowTextAtPoint(ctx, sizeColX, listTop - 12.0, "Size", 4);
+    CGContextShowTextAtPoint(ctx, nameColX, listStartY + 4.0, "Name", 4);
+    CGContextShowTextAtPoint(ctx, sizeColX, listStartY + 4.0, "Size", 4);
 
     /* Header underline */
     CGContextSetRGBFillColor(ctx, 0.85, 0.85, 0.85, 1.0);
-    CGContextFillRect(ctx, CGRectMake(SIDEBAR_W + 1, listTop - 18.0, listW + ITEM_PAD_X, 1));
+    CGContextFillRect(ctx, CGRectMake(SIDEBAR_W + 1, listStartY + 18.0, listW + ITEM_PAD_X, 1));
 
-    CGFloat rowY = listTop - 22.0;
-    int visible_rows = (int)((rowY) / ITEM_HEIGHT);
+    CGFloat rowY = listStartY + 22.0;
+    int visible_rows = (int)((H - rowY) / ITEM_HEIGHT);
 
     for (int i = g_scroll_offset; i < g_entry_count && (i - g_scroll_offset) < visible_rows; i++) {
-        CGFloat iy = rowY - (CGFloat)(i - g_scroll_offset) * ITEM_HEIGHT;
-        if (iy < 0) break;
+        CGFloat iy = rowY + (CGFloat)(i - g_scroll_offset) * ITEM_HEIGHT;
+        if (iy + ITEM_HEIGHT > H) break;
 
         FinderEntry *ent = &g_entries[i];
 
         /* Selection highlight */
         if (i == g_selected_idx) {
-            CGContextSetRGBFillColor(ctx, 0.20, 0.47, 0.95, 0.20);
+            CGContextSetRGBFillColor(ctx, 0.20, 0.47, 0.95, 0.40);
             CGContextFillRect(ctx, CGRectMake(SIDEBAR_W + 1, iy - 2, W - SIDEBAR_W - 1, ITEM_HEIGHT));
         }
 
@@ -646,7 +645,7 @@ static id _FinderDrawRect(id self, SEL _cmd, CGRect dirtyRect) {
             CGContextSetRGBFillColor(ctx, 0.30, 0.60, 0.95, 1.0);
             CGContextFillRect(ctx, iconRect);
             CGContextSetRGBFillColor(ctx, 0.25, 0.50, 0.85, 1.0);
-            CGContextFillRect(ctx, CGRectMake(listX, iy + ICON_SIZE,
+            CGContextFillRect(ctx, CGRectMake(listX, iy - 3,
                                                ICON_SIZE * 0.45, 3));
         } else if (ent->is_symlink) {
             CGContextSetRGBFillColor(ctx, 0.30, 0.80, 0.80, 1.0);
@@ -710,10 +709,10 @@ static id _FinderMouseDown(id self, SEL _cmd, id theEvent) {
     CGPoint loc = [event locationInWindow];
 
     CGFloat H = (CGFloat)FINDER_WIN_H;
-    CGFloat headerTop = H - HEADER_H;
+    CGFloat headerBottom = HEADER_H;
 
-    /* Check if click is in header area */
-    if (loc.y >= headerTop) {
+    /* Check if click is in header area (Y-down: header is Y=0..HEADER_H) */
+    if (loc.y < headerBottom) {
         if (loc.x < SIDEBAR_W && strcmp(g_current_path, "/") != 0) {
             finder_navigate_parent();
             [(NSView *)self setNeedsDisplay:YES];
@@ -721,11 +720,10 @@ static id _FinderMouseDown(id self, SEL _cmd, id theEvent) {
         }
     }
 
-    /* Check if click is in sidebar */
-    if (loc.x < SIDEBAR_W && loc.y < headerTop) {
-        CGFloat contentH = headerTop;
+    /* Check if click is in sidebar (Y-down) */
+    if (loc.x < SIDEBAR_W && loc.y >= headerBottom) {
         for (int i = 0; i < sidebar_favourite_count; i++) {
-            CGFloat iy = contentH - 36.0 - (CGFloat)i * 20.0;
+            CGFloat iy = headerBottom + 28.0 + (CGFloat)i * 20.0;
             if (loc.y >= iy - 2 && loc.y < iy + 16) {
                 finder_navigate_to(sidebar_favourites[i]);
                 [(NSView *)self setNeedsDisplay:YES];
@@ -734,10 +732,10 @@ static id _FinderMouseDown(id self, SEL _cmd, id theEvent) {
         }
     }
 
-    /* Check if click is in file listing area */
+    /* Check if click is in file listing area (Y-down) */
     if (loc.x > SIDEBAR_W) {
-        CGFloat listTop = headerTop - 22.0;
-        int clicked_row = (int)((listTop - loc.y) / ITEM_HEIGHT);
+        CGFloat rowY = headerBottom + 22.0;
+        int clicked_row = (int)((loc.y - rowY) / ITEM_HEIGHT);
         int clicked_idx = g_scroll_offset + clicked_row;
 
         if (clicked_idx >= 0 && clicked_idx < g_entry_count) {
@@ -787,8 +785,8 @@ static id _FinderKeyDown(id self, SEL _cmd, id theEvent) {
     } else if (keyCode == KEY_DOWN_CODE) {
         if (g_selected_idx < g_entry_count - 1) {
             g_selected_idx++;
-            CGFloat headerTop = (CGFloat)FINDER_WIN_H - HEADER_H;
-            int visible_rows = (int)((headerTop - 22.0) / ITEM_HEIGHT);
+            CGFloat rowY = HEADER_H + 22.0;
+            int visible_rows = (int)(((CGFloat)FINDER_WIN_H - rowY) / ITEM_HEIGHT);
             if (g_selected_idx >= g_scroll_offset + visible_rows)
                 g_scroll_offset = g_selected_idx - visible_rows + 1;
             changed = YES;
@@ -807,6 +805,44 @@ static id _FinderKeyDown(id self, SEL _cmd, id theEvent) {
         [(NSView *)self setNeedsDisplay:YES];
     }
 
+    return nil;
+}
+
+/* ============================================================================
+ * _FinderScrollWheel — Scroll wheel handler for Finder view
+ *
+ * Adjusts g_scroll_offset based on scroll delta and triggers redraw.
+ * delta > 0 means scroll up (show earlier entries), delta < 0 means
+ * scroll down (show later entries).
+ * ============================================================================ */
+
+static id _FinderScrollWheel(id self, SEL _cmd, id event) {
+    (void)_cmd;
+
+    NSEvent *nsEvent = (NSEvent *)event;
+    CGFloat deltaY = [nsEvent deltaY];
+
+    /* Calculate visible rows */
+    CGFloat rowY = HEADER_H + 22.0;
+    int visible_rows = (int)(((CGFloat)FINDER_WIN_H - rowY) / ITEM_HEIGHT);
+    if (visible_rows < 1) visible_rows = 1;
+
+    int max_offset = g_entry_count - visible_rows;
+    if (max_offset < 0) max_offset = 0;
+
+    if (deltaY > 0) {
+        /* Scroll up — show earlier entries */
+        g_scroll_offset -= 3;
+        if (g_scroll_offset < 0)
+            g_scroll_offset = 0;
+    } else if (deltaY < 0) {
+        /* Scroll down — show later entries */
+        g_scroll_offset += 3;
+        if (g_scroll_offset > max_offset)
+            g_scroll_offset = max_offset;
+    }
+
+    [(NSView *)self setNeedsDisplay:YES];
     return nil;
 }
 
@@ -839,6 +875,8 @@ static id _finderAppDidFinishLaunching(id self, SEL _cmd, id notification) {
                     (IMP)_FinderMouseDown, "v@:@");
     class_addMethod(FinderView, @selector(keyDown:),
                     (IMP)_FinderKeyDown, "v@:@");
+    class_addMethod(FinderView, @selector(scrollWheel:),
+                    (IMP)_FinderScrollWheel, "v@:@");
     objc_registerClassPair(FinderView);
 
     g_finderView = [[FinderView alloc]

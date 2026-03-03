@@ -228,8 +228,16 @@ int tty_ioctl(struct tty *tp, unsigned long cmd, uint64_t data)
         tp->t_flags |= TTY_CTTY;
         {
             struct thread *cur = current_thread_get();
-            if (cur && cur->task)
+            if (cur && cur->task) {
                 tp->t_session = cur->task->pid;
+                /* Set the foreground pgrp to the caller's pgrp.
+                 * Without this, t_pgrp stays 0 and bash's job_init()
+                 * loop sees tcgetpgrp() != getpgrp(), sends itself
+                 * SIGTTIN, and stops immediately. */
+                struct proc *cp = proc_current();
+                if (cp)
+                    tp->t_pgrp = cp->p_pgrp;
+            }
         }
         return 0;
 
@@ -410,7 +418,11 @@ void tty_input_char(char c)
  * the idle thread (which does WFI) while waiting, allowing the host/QEMU
  * to process I/O (network packets, serial input) without vCPU starvation.
  */
-static char tty_getc(struct tty *tp)
+/*
+ * Returns 0-255 on success, -1 if interrupted by a pending signal.
+ * Callers must check for -1 and return EINTR.
+ */
+static int tty_getc(struct tty *tp)
 {
     for (;;) {
         /* Check ring buffer first */
@@ -418,7 +430,7 @@ static char tty_getc(struct tty *tp)
             char c = tp->t_rawbuf[tp->t_rawtail];
             tp->t_rawtail = (tp->t_rawtail + 1) % (int)sizeof(tp->t_rawbuf);
             tp->t_rawcount--;
-            return c;
+            return (unsigned char)c;
         }
 
         /*
@@ -431,7 +443,19 @@ static char tty_getc(struct tty *tp)
          */
         if (tp == tty_get_console() && uart_rx_ready()) {
             char c = uart_getc();
-            return c;
+            return (unsigned char)c;
+        }
+
+        /*
+         * Check for actionable pending signals before sleeping.
+         * Only interrupt the read for signals that would terminate,
+         * stop, or invoke a custom handler — not for benign signals
+         * like SIGCHLD (default ignore).
+         */
+        {
+            struct proc *p = proc_current();
+            if (p && signal_has_actionable(p))
+                return -1;  /* Interrupted */
         }
 
         /*
@@ -473,7 +497,14 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
             tp->t_lineout = 0;
 
             for (;;) {
-                char c = tty_getc(tp);
+                int gc = tty_getc(tp);
+                if (gc < 0) {
+                    /* Interrupted by signal — return EINTR or partial read */
+                    if (nread > 0)
+                        break;
+                    return -EINTR;
+                }
+                char c = (char)gc;
 
                 /* Signal generation (ISIG) — use tp->t_pgrp (foreground pgrp) */
                 if (t->c_lflag & ISIG) {
@@ -641,7 +672,14 @@ int64_t tty_read(struct tty *tp, void *ubuf, uint64_t count)
         if (vmin == 0) vmin = 1;
 
         while (nread < count && (int)nread < vmin) {
-            char c = tty_getc(tp);
+            int gc = tty_getc(tp);
+            if (gc < 0) {
+                /* Interrupted by signal */
+                if (nread > 0)
+                    break;
+                return -EINTR;
+            }
+            char c = (char)gc;
 
             /* Signal generation in raw mode — use tp->t_pgrp */
             if (t->c_lflag & ISIG) {

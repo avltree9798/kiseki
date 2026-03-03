@@ -33,6 +33,7 @@
 #define HID_EVENT_MOUSE_MOVE    3       /* Mouse/tablet cursor moved */
 #define HID_EVENT_MOUSE_DOWN    4       /* Mouse button pressed */
 #define HID_EVENT_MOUSE_UP      5       /* Mouse button released */
+#define HID_EVENT_SCROLL        6       /* Scroll wheel (delta in keycode field, signed) */
 
 /* ============================================================================
  * HID Event Structure

@@ -44,11 +44,13 @@ typedef struct {
     volatile uint32_t locked;
     volatile uint32_t _pad;
     struct thread *owner;           /* Current owner (for priority inheritance) */
+    spinlock_t wait_lock;           /* Protects waiters list (SMP-safe) */
     struct thread *waiters_head;    /* Queue of threads waiting */
     struct thread *waiters_tail;
 } mutex_t;
 
-#define MUTEX_INIT { .locked = 0, .owner = NULL, .waiters_head = NULL, .waiters_tail = NULL }
+#define MUTEX_INIT { .locked = 0, .owner = NULL, .wait_lock = SPINLOCK_INIT, \
+                     .waiters_head = NULL, .waiters_tail = NULL }
 
 void mutex_init(mutex_t *mtx);
 void mutex_lock(mutex_t *mtx);

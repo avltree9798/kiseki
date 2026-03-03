@@ -896,6 +896,18 @@ void fbconsole_putc(char c)
     bool do_flush;
 
     spin_lock_irqsave(&fbconsole_lock, &irqflags);
+    /*
+     * Re-check fb_active inside the lock to close TOCTOU race:
+     * fbconsole_disable() sets fb_active=false under the same lock,
+     * so a concurrent disable between the fast check above and this
+     * point is now caught. Without this, a kprintf in-flight during
+     * WindowServer startup could write stale text pixels to the
+     * framebuffer after the compositor has taken over.
+     */
+    if (!fb_active) {
+        spin_unlock_irqrestore(&fbconsole_lock, irqflags);
+        return;
+    }
     bool needs_flush = fbconsole_putc_locked(c);
     do_flush = needs_flush && take_dirty_snapshot(&snap_top, &snap_bottom);
     spin_unlock_irqrestore(&fbconsole_lock, irqflags);
@@ -917,6 +929,10 @@ void fbconsole_flush(void)
     bool do_flush;
 
     spin_lock_irqsave(&fbconsole_lock, &irqflags);
+    if (!fb_active) {
+        spin_unlock_irqrestore(&fbconsole_lock, irqflags);
+        return;
+    }
     do_flush = take_dirty_snapshot(&snap_top, &snap_bottom);
     spin_unlock_irqrestore(&fbconsole_lock, irqflags);
 

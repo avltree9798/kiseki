@@ -84,10 +84,10 @@ extern int    vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 extern int    fprintf(void *stream, const char *fmt, ...);
 extern size_t fwrite(const void *ptr, size_t size, size_t nmemb, void *stream);
 
-extern void **__stderrp;
-extern void **__stdoutp;
-#define stderr (*__stderrp)
-#define stdout (*__stdoutp)
+extern void *__stderrp;
+extern void *__stdoutp;
+#define stderr __stderrp
+#define stdout __stdoutp
 
 extern void qsort(void *base, size_t nmemb, size_t size,
                    int (*compar)(const void *, const void *));

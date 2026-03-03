@@ -30,6 +30,15 @@ typedef __builtin_va_list   va_list;
 #define va_end(ap)          __builtin_va_end(ap)
 #define va_arg(ap, type)    __builtin_va_arg(ap, type)
 
+/*
+ * SMP serialization: prevent interleaved output from multiple cores.
+ * Uses a simple spinlock with IRQ save to ensure entire kprintf calls
+ * are atomic. This is critical for readable debug output on SMP.
+ */
+#include <kern/sync.h>
+
+static spinlock_t kprintf_lock = SPINLOCK_INIT;
+
 /* --- Internal helpers --- */
 
 static void print_char(char c)
@@ -301,43 +310,64 @@ static void uart_vprintf(const char *fmt, va_list ap)
 
 void kputc(char c)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&kprintf_lock, &flags);
     print_char(c);
+    spin_unlock_irqrestore(&kprintf_lock, flags);
 }
 
 void kputs(const char *s)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&kprintf_lock, &flags);
     print_string(s);
+    spin_unlock_irqrestore(&kprintf_lock, flags);
 }
 
 void kprintf(const char *fmt, ...)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&kprintf_lock, &flags);
+
     va_list ap;
     va_start(ap, fmt);
     kvprintf(fmt, ap);
     va_end(ap);
+
+    spin_unlock_irqrestore(&kprintf_lock, flags);
 }
 
 void uart_printf(const char *fmt, ...)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&kprintf_lock, &flags);
+
     va_list ap;
     va_start(ap, fmt);
     uart_vprintf(fmt, ap);
     va_end(ap);
+
+    spin_unlock_irqrestore(&kprintf_lock, flags);
 }
 
 void panic(const char *fmt, ...)
 {
+    /* Disable interrupts immediately — no lock needed during panic
+     * (we might already be holding kprintf_lock, and other cores
+     * will be halted shortly anyway). */
+    __asm__ volatile("msr daifset, #0xF");
+
     va_list ap;
     va_start(ap, fmt);
 
-    kprintf("\n*** KERNEL PANIC ***\n");
+    /* Direct output, bypassing lock to avoid deadlock */
+    print_string("\n*** KERNEL PANIC ***\n");
     kvprintf(fmt, ap);
-    kprintf("\n*** System halted ***\n");
+    print_string("\n*** System halted ***\n");
 
     va_end(ap);
 
-    /* Disable interrupts and halt all cores */
-    __asm__ volatile("msr daifset, #0xF");  /* Mask all interrupts */
+    /* Halt all cores */
     for (;;) {
         __asm__ volatile("wfi");
     }

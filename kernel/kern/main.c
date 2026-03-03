@@ -366,7 +366,8 @@ static void kernel_bootstrap_thread_func(void *arg __unused)
      * the run queue. It returns normally — the scheduler will pick up
      * init_thread and dispatch it to init_thread_return → eret → EL0.
      */
-    kprintf("[bootstrap] Launching PID 1...\n");
+    kprintf("[bootstrap] Launching PID 1... (free: %lu pages / %lu MB)\n",
+            pmm_get_free_pages(), (pmm_get_free_pages() * PAGE_SIZE) >> 20);
     kernel_init_process();
 
     kprintf("[bootstrap] PID 1 enqueued. Bootstrap thread exiting.\n");

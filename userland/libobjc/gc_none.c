@@ -6,46 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ---- raw_write diagnostic: direct svc #0x80 write to stderr ---- */
-static void _gc_raw_write(const char *s)
-{
-	unsigned long len = 0;
-	const char *p = s;
-	while (*p++) len++;
-
-	register long x16 __asm__("x16") = 4;   /* SYS_write */
-	register long x0  __asm__("x0")  = 2;   /* fd=stderr */
-	register long x1  __asm__("x1")  = (long)s;
-	register long x2  __asm__("x2")  = (long)len;
-	__asm__ volatile("svc #0x80"
-		: "+r"(x0)
-		: "r"(x16), "r"(x1), "r"(x2)
-		: "memory", "cc");
-}
-
-static void _gc_raw_write_hex(unsigned long val)
-{
-	char buf[19]; /* "0x" + 16 hex + NUL */
-	buf[0] = '0'; buf[1] = 'x';
-	for (int i = 15; i >= 0; i--) {
-		int nibble = val & 0xf;
-		buf[2 + i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
-		val >>= 4;
-	}
-	buf[18] = '\0';
-	_gc_raw_write(buf);
-}
-/* ---- end raw_write ---- */
-
 static id allocate_class(Class cls, size_t extraBytes)
 {
 	size_t size = cls->instance_size + extraBytes + sizeof(intptr_t);
-
-	_gc_raw_write("[gc_none] allocate_class size=");
-	_gc_raw_write_hex(size);
-	_gc_raw_write(" cls=");
-	_gc_raw_write_hex((unsigned long)cls);
-	_gc_raw_write("\n");
 
 	intptr_t *addr =
 #ifdef _WIN32
@@ -57,12 +20,8 @@ static id allocate_class(Class cls, size_t extraBytes)
 		calloc(1, size);
 #endif
 
-	_gc_raw_write("[gc_none] calloc returned ");
-	_gc_raw_write_hex((unsigned long)addr);
-	_gc_raw_write("\n");
-
 	if (addr == NULL) {
-		_gc_raw_write("[gc_none] FATAL: calloc returned NULL! OOM\n");
+		fprintf(stderr, "[gc_none] FATAL: calloc returned NULL (size=%zu)! OOM\n", size);
 		return (id)0;
 	}
 	return (id)(addr + 1);

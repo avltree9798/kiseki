@@ -5140,9 +5140,6 @@ static int sys_openpty_sc(struct trap_frame *tf)
         return EINVAL;
     }
 
-    kprintf("[openpty] allocated pty%d: master_fd=%d slave_fd=%d\n",
-            pp->pt_index, master_fd, slave_fd);
-
     syscall_return(tf, 0);
     return 0;
 }

@@ -737,6 +737,27 @@ int64_t tty_write(struct tty *tp, const void *ubuf, uint64_t count)
     struct termios *t = &tp->t_termios;
     uint64_t nwritten = 0;
 
+    /*
+     * Serialise console TTY output with kprintf.
+     *
+     * The console TTY (t_putc == uart_putc) shares the UART with
+     * kprintf, which protects its own output with kprintf_lock.
+     * Without this, userspace write() to /dev/console interleaves
+     * character-by-character with kernel kprintf output, producing
+     * garbled lines on the serial console.
+     *
+     * Hold the lock for the entire write so the full message appears
+     * atomically. This is the same pattern as XNU's cnputc_locked /
+     * cons_putc_locked serialisation.
+     *
+     * PTY-backed TTYs (t_putc != uart_putc) don't need this — their
+     * output goes to the PTY master buffer, not the UART.
+     */
+    bool is_console = (tp->t_putc == uart_putc);
+    uint64_t kp_flags = 0;
+    if (is_console)
+        kprintf_lock_acquire(&kp_flags);
+
     for (uint64_t i = 0; i < count; i++) {
         uint64_t pa = vmm_translate(p->p_vmspace->pgd, uva + i);
         if (pa == 0)
@@ -758,6 +779,9 @@ int64_t tty_write(struct tty *tp, const void *ubuf, uint64_t count)
 
         nwritten++;
     }
+
+    if (is_console)
+        kprintf_lock_release(kp_flags);
 
     /*
      * Flush the framebuffer console if this TTY writes to it.

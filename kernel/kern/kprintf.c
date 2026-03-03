@@ -308,6 +308,16 @@ static void uart_vprintf(const char *fmt, va_list ap)
 
 /* --- Public API --- */
 
+void kprintf_lock_acquire(uint64_t *flags)
+{
+    spin_lock_irqsave(&kprintf_lock, flags);
+}
+
+void kprintf_lock_release(uint64_t flags)
+{
+    spin_unlock_irqrestore(&kprintf_lock, flags);
+}
+
 void kputc(char c)
 {
     uint64_t flags;

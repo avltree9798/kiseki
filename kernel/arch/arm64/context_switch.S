@@ -2,8 +2,8 @@
  * Kiseki OS - ARM64 Context Switch
  *
  * Saves and restores thread register state for the scheduler.
- * Saves callee-saved registers (x19-x30), SP, and restores them
- * on the new thread's context.
+ * Saves callee-saved registers (x19-x30, SP, d8-d15) and restores
+ * them on the new thread's context.
  */
 
 .section .text
@@ -12,10 +12,10 @@
 /*
  * context_switch(old_ctx, new_ctx)
  *
- * x0 = pointer to old thread's saved register context (uint64_t[32])
- * x1 = pointer to new thread's saved register context (uint64_t[32])
+ * x0 = pointer to old thread's saved register context (struct cpu_context)
+ * x1 = pointer to new thread's saved register context (struct cpu_context)
  *
- * Saves callee-saved registers (x19-x30, SP) to old context,
+ * Saves callee-saved registers (x19-x30, SP, d8-d15) to old context,
  * restores them from new context, and returns.
  */
 context_switch:
@@ -35,35 +35,6 @@ context_switch:
     stp     d12, d13, [x0, #136]
     stp     d14, d15, [x0, #152]
 
-    /*
-     * DEBUG: After saving to old_ctx, verify what we just saved.
-     * x30 saved at [x0, #88], SP saved at [x0, #96].
-     * They should both be kernel addresses (0x40000000-0x80000000).
-     */
-    ldr     x3, [x0, #88]           /* x3 = saved x30 */
-    ldr     x4, [x0, #96]           /* x4 = saved SP */
-    /* Check saved x30 is in kernel RAM [0x40000000, 0x80000000) */
-    mov     x5, #0x4000
-    lsl     x5, x5, #16             /* x5 = 0x40000000 */
-    cmp     x3, x5
-    b.lo    .Lsave_x30_bad          /* < 0x40000000 */
-    mov     x5, #0x8000
-    lsl     x5, x5, #16             /* x5 = 0x80000000 */
-    cmp     x3, x5
-    b.hs    .Lsave_x30_bad          /* >= 0x80000000 */
-    b       .Lsave_ok
-.Lsave_x30_bad:
-    /* Saved x30 is not in kernel RAM - print warning (non-fatal) */
-    stp     x0, x1, [sp, #-32]!     /* Save old_ctx, new_ctx */
-    stp     x3, x4, [sp, #16]       /* Save x30_val, sp_val */
-    adr     x0, .Lfmt_save_bad
-    mov     x1, x3                   /* saved x30 */
-    mov     x2, x4                   /* saved SP */
-    bl      kprintf
-    ldp     x3, x4, [sp, #16]
-    ldp     x0, x1, [sp], #32       /* Restore old_ctx, new_ctx */
-.Lsave_ok:
-
     /* Restore callee-saved GPRs from new context */
     ldp     x19, x20, [x1, #0]
     ldp     x21, x22, [x1, #16]
@@ -80,10 +51,13 @@ context_switch:
     ldp     d12, d13, [x1, #136]
     ldp     d14, d15, [x1, #152]
 
+#ifdef DEBUG
     /*
-     * DEBUG: After restore, verify x30 (about to ret to) is a kernel address.
+     * Debug-only: verify x30 (about to ret to) is a kernel address.
      * Kernel RAM: [0x40000000, 0x80000000)
      * If x30 is outside this range, we have a fatal corruption bug.
+     * This converts an unpredictable crash into a clean panic with
+     * diagnostic output.  Compiled out in release builds.
      */
     mov     x2, #0x4000
     lsl     x2, x2, #16             /* x2 = 0x40000000 */
@@ -97,8 +71,7 @@ context_switch:
 
 .Lrestore_x30_bad:
     /* FATAL: x30 after restore is not a kernel address.
-     * Print and panic. We need a valid stack for kprintf.
-     * SP was just restored from new context - use it as-is. */
+     * Print and panic. SP was just restored from new context. */
     stp     x29, x30, [sp, #-16]!
     mov     x1, x30                  /* arg1 = bad x30 */
     mov     x2, sp                   /* arg2 = current SP */
@@ -111,6 +84,8 @@ context_switch:
     bl      panic
 
 .Lrestore_ok:
+#endif /* DEBUG */
+
     ret                              /* Return via restored LR (x30) */
 
 /* ============================================================================
@@ -147,12 +122,12 @@ load_context:
 
     ret                              /* Jump to restored LR (x30) */
 
-/* Format strings in rodata */
+#ifdef DEBUG
+/* Format strings in rodata (debug builds only) */
 .section .rodata
-.Lfmt_save_bad:
-    .asciz "[CTX_ASM] WARNING: saved old x30=0x%lx sp=0x%lx NOT in kernel RAM!\n"
 .Lfmt_restore_bad:
     .asciz "\n!!! CTX_ASM FATAL: restored x30=0x%lx sp=0x%lx x19=0x%lx x29=0x%lx !!!\n"
 .Lfmt_restore_panic:
     .asciz "context_switch: restored x30 is not a kernel address"
 .section .text
+#endif /* DEBUG */

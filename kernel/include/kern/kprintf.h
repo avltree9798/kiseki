@@ -50,4 +50,18 @@ void uart_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  */
 void panic(const char *fmt, ...) __noreturn __attribute__((format(printf, 1, 2)));
 
+/*
+ * kprintf_lock_acquire / kprintf_lock_release
+ *
+ * Acquire/release the kprintf output serialization lock.  Used by
+ * tty_write() on the console TTY (UART-backed) so that userspace
+ * writes to /dev/console don't interleave with kernel kprintf output
+ * on the serial line.
+ *
+ * The caller passes a pointer to a uint64_t that receives the saved
+ * IRQ flags (same pattern as spin_lock_irqsave).
+ */
+void kprintf_lock_acquire(uint64_t *flags);
+void kprintf_lock_release(uint64_t flags);
+
 #endif /* _KERN_KPRINTF_H */

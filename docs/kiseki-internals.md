@@ -2,9 +2,21 @@
 
 ### A Comprehensive Guide to Building a macOS-Compatible Operating System from Scratch
 
-**Target audience:** Security engineers with zero systems-development experience but comfortable reading C and Python code. Limited ARM64 assembly knowledge assumed — all assembly is explained inline.
+**Target audience:** Software engineers comfortable reading C code but with no systems-programming or OS-development background. Every concept — from CPU privilege levels to page tables to Mach ports — is explained from first principles. No prior knowledge of ARM64 assembly, kernel development, or operating system theory is assumed.
 
 **Codebase reference:** All line numbers and code references point to the Kiseki repository as of the latest commit on `origin/main`. Where relevant, XNU source code from [apple-oss-distributions/xnu](https://github.com/apple-oss-distributions/xnu/) is cited for comparison.
+
+**Codebase statistics:**
+
+| Component | Files | Lines of Code |
+|-----------|------:|-------------:|
+| Kernel C source | 50 | 37,850 |
+| Kernel assembly (ARM64) | 3 | 717 |
+| Kernel headers | 42 | 9,478 |
+| Userland C/ObjC source | 167 | 114,968 |
+| Userland assembly | 8 | ~600 |
+| Userland headers | 127 | ~8,000 |
+| **Total** | **~397** | **~171,600** |
 
 ---
 
@@ -15,96 +27,129 @@
   - [1.2 Architecture at a Glance](#12-architecture-at-a-glance)
   - [1.3 How macOS Works (The 10,000-Foot View)](#13-how-macos-works-the-10000-foot-view)
   - [1.4 Hardware Target](#14-hardware-target)
+  - [1.5 Codebase Map](#15-codebase-map)
 - [Chapter 2: ARM64 Boot & Early Initialisation](#chapter-2-arm64-boot--early-initialisation)
-  - [2.1 Exception Levels and the Boot Sequence](#21-exception-levels-and-the-boot-sequence)
-  - [2.2 The Vector Table](#22-the-vector-table)
-  - [2.3 Context Switching](#23-context-switching)
-  - [2.4 The 17-Phase Kernel Bootstrap](#24-the-17-phase-kernel-bootstrap)
-  - [2.5 Secondary Core Bring-Up (SMP)](#25-secondary-core-bring-up-smp)
+  - [2.1 Five Foundational Concepts](#21-five-foundational-concepts)
+  - [2.2 The Boot Sequence (boot.S)](#22-the-boot-sequence-boots)
+  - [2.3 The Vector Table (vectors.S)](#23-the-vector-table-vectorss)
+  - [2.4 Context Switching (context_switch.S)](#24-context-switching-context_switchs)
+  - [2.5 The 17-Phase Kernel Bootstrap (kmain)](#25-the-17-phase-kernel-bootstrap-kmain)
+  - [2.6 Secondary Core Bring-Up (SMP)](#26-secondary-core-bring-up-smp)
 - [Chapter 3: Physical & Virtual Memory](#chapter-3-physical--virtual-memory)
-  - [3.1 The Buddy Allocator (PMM)](#31-the-buddy-allocator-pmm)
-  - [3.2 ARM64 Page Tables](#32-arm64-page-tables)
-  - [3.3 Kernel Address Space Setup](#33-kernel-address-space-setup)
-  - [3.4 User Address Spaces](#34-user-address-spaces)
-  - [3.5 Copy-on-Write](#35-copy-on-write)
-  - [3.6 The VM Map](#36-the-vm-map)
+  - [3.1 Why Virtual Memory Exists](#31-why-virtual-memory-exists)
+  - [3.2 The Buddy Allocator (PMM)](#32-the-buddy-allocator-pmm)
+  - [3.3 ARM64 Page Tables](#33-arm64-page-tables)
+  - [3.4 Kernel Address Space Setup](#34-kernel-address-space-setup)
+  - [3.5 User Address Spaces](#35-user-address-spaces)
+  - [3.6 Copy-on-Write (COW)](#36-copy-on-write-cow)
+  - [3.7 The VM Map](#37-the-vm-map)
 - [Chapter 4: Threads, Scheduling & Synchronisation](#chapter-4-threads-scheduling--synchronisation)
-  - [4.1 Thread Representation](#41-thread-representation)
-  - [4.2 The MLFQ Scheduler](#42-the-mlfq-scheduler)
-  - [4.3 SMP Load Balancing](#43-smp-load-balancing)
-  - [4.4 Spinlocks, Mutexes & Condition Variables](#44-spinlocks-mutexes--condition-variables)
-  - [4.5 The Timer Driver](#45-the-timer-driver)
-- [Chapter 5: Processes — Fork, Exec, Exit](#chapter-5-processes--fork-exec-exit)
-  - [5.1 The Process Table](#51-the-process-table)
-  - [5.2 fork()](#52-fork)
-  - [5.3 execve()](#53-execve)
-  - [5.4 exit() and wait4()](#54-exit-and-wait4)
-  - [5.5 Signals](#55-signals)
+  - [4.1 What Is a Thread?](#41-what-is-a-thread)
+  - [4.2 Thread Representation](#42-thread-representation)
+  - [4.3 The MLFQ Scheduler](#43-the-mlfq-scheduler)
+  - [4.4 SMP Load Balancing](#44-smp-load-balancing)
+  - [4.5 Spinlocks, Mutexes & Condition Variables](#45-spinlocks-mutexes--condition-variables)
+  - [4.6 The Timer Driver](#46-the-timer-driver)
+- [Chapter 5: Processes -- Fork, Exec, Exit](#chapter-5-processes----fork-exec-exit)
+  - [5.1 The Process Structure](#51-the-process-structure)
+  - [5.2 Fork](#52-fork)
+  - [5.3 Exec](#53-exec)
+  - [5.4 Exit](#54-exit)
+  - [5.5 Wait](#55-wait)
+  - [5.6 The First User Process (PID 1)](#56-the-first-user-process-pid-1)
+  - [5.7 File Descriptors](#57-file-descriptors)
 - [Chapter 6: Mach IPC](#chapter-6-mach-ipc)
-  - [6.1 Ports, Rights & Names](#61-ports-rights--names)
-  - [6.2 Message Anatomy](#62-message-anatomy)
-  - [6.3 mach_msg_trap — The Send/Receive Path](#63-mach_msg_trap--the-sendreceive-path)
-  - [6.4 Out-of-Line Memory Descriptors](#64-out-of-line-memory-descriptors)
-  - [6.5 The Bootstrap Server](#65-the-bootstrap-server)
-- [Chapter 7: BSD Syscalls & Security](#chapter-7-bsd-syscalls--security)
-  - [7.1 Syscall Calling Convention](#71-syscall-calling-convention)
-  - [7.2 The Syscall Table](#72-the-syscall-table)
-  - [7.3 Unix DAC & Credentials](#73-unix-dac--credentials)
-- [Chapter 8: Filesystem — VFS, Ext4, Buffer Cache](#chapter-8-filesystem--vfs-ext4-buffer-cache)
+  - [6.1 Core Concepts](#61-core-concepts)
+  - [6.2 Kernel Data Structures](#62-kernel-data-structures)
+  - [6.3 The Message Header](#63-the-message-header)
+  - [6.4 The mach_msg_trap Flow](#64-the-mach_msg_trap-flow)
+  - [6.5 Out-of-Line (OOL) Memory](#65-out-of-line-ool-memory)
+  - [6.6 IOKit Kobject Dispatch](#66-iokit-kobject-dispatch)
+  - [6.7 Bootstrap Services](#67-bootstrap-services)
+  - [6.8 Mach Traps Summary](#68-mach-traps-summary)
+- [Chapter 7: BSD Syscalls & POSIX Interface](#chapter-7-bsd-syscalls--posix-interface)
+  - [7.1 The Trap Handler](#71-the-trap-handler)
+  - [7.2 BSD Syscall Catalogue](#72-bsd-syscall-catalogue)
+  - [7.3 How a Syscall Works End-to-End](#73-how-a-syscall-works-end-to-end)
+  - [7.4 Path Resolution](#74-path-resolution)
+  - [7.5 Signal Delivery](#75-signal-delivery)
+  - [7.6 Demand Paging in the Trap Handler](#76-demand-paging-in-the-trap-handler)
+  - [7.7 Security: DAC Permission Checks](#77-security-dac-permission-checks)
+- [Chapter 8: Filesystem -- VFS, Ext4, Buffer Cache](#chapter-8-filesystem----vfs-ext4-buffer-cache)
   - [8.1 The VFS Layer](#81-the-vfs-layer)
-  - [8.2 The Buffer Cache](#82-the-buffer-cache)
-  - [8.3 Ext4 On-Disk Layout](#83-ext4-on-disk-layout)
-  - [8.4 Ext4 Read Path — Extents & Indirect Blocks](#84-ext4-read-path--extents--indirect-blocks)
-  - [8.5 Ext4 Write Path](#85-ext4-write-path)
-  - [8.6 devfs](#86-devfs)
+  - [8.2 The Ext4 Filesystem Driver](#82-the-ext4-filesystem-driver)
+  - [8.3 The Buffer Cache](#83-the-buffer-cache)
+  - [8.4 The Device Filesystem (devfs)](#84-the-device-filesystem-devfs)
+  - [8.5 How It All Fits Together](#85-how-it-all-fits-together)
 - [Chapter 9: Networking — TCP/IP Stack](#chapter-9-networking--tcpip-stack)
-  - [9.1 The Network Stack Overview](#91-the-network-stack-overview)
+  - [9.1 Stack Overview](#91-stack-overview)
   - [9.2 Ethernet & ARP](#92-ethernet--arp)
-  - [9.3 IPv4](#93-ipv4)
-  - [9.4 TCP](#94-tcp)
-  - [9.5 UDP & DHCP](#95-udp--dhcp)
+  - [9.3 IPv4 & ICMP](#93-ipv4--icmp)
+  - [9.4 UDP & DHCP](#94-udp--dhcp)
+  - [9.5 TCP](#95-tcp)
   - [9.6 BSD Sockets](#96-bsd-sockets)
 - [Chapter 10: IOKit & Device Drivers](#chapter-10-iokit--device-drivers)
-  - [10.1 IOKit Object Model](#101-iokit-object-model)
-  - [10.2 The I/O Registry](#102-the-io-registry)
-  - [10.3 Driver Matching](#103-driver-matching)
-  - [10.4 IOFramebuffer — The GPU Driver](#104-ioframebuffer--the-gpu-driver)
-  - [10.5 IOHIDSystem — Input Events](#105-iohidsystem--input-events)
-  - [10.6 VirtIO Drivers](#106-virtio-drivers)
-  - [10.7 GICv2 — The Interrupt Controller](#107-gicv2--the-interrupt-controller)
-- [Chapter 11: Userland — dyld, libSystem, crt0](#chapter-11-userland--dyld-libsystem-crt0)
+  - [10.1 What Is IOKit?](#101-what-is-iokit)
+  - [10.2 The IOKit Object Model](#102-the-iokit-object-model)
+  - [10.3 The I/O Registry](#103-the-io-registry)
+  - [10.4 Driver Matching & Lifecycle](#104-driver-matching--lifecycle)
+  - [10.5 IOUserClient & External Methods](#105-iouserclient--external-methods)
+  - [10.6 IOFramebuffer -- The GPU Driver](#106-ioframebuffer----the-gpu-driver)
+  - [10.7 IOHIDSystem -- Input Events](#107-iohidsystem----input-events)
+  - [10.8 VirtIO Transport Layer](#108-virtio-transport-layer)
+  - [10.9 VirtIO GPU Protocol](#109-virtio-gpu-protocol)
+  - [10.10 VirtIO Block, Network & Input](#1010-virtio-block-network--input)
+  - [10.11 GICv2 -- The Interrupt Controller](#1011-gicv2----the-interrupt-controller)
+  - [10.12 PL011 UART](#1012-pl011-uart)
+  - [10.13 TTY Subsystem](#1013-tty-subsystem)
+  - [10.14 Pseudo-Terminals (PTY)](#1014-pseudo-terminals-pty)
+  - [10.15 Framebuffer Console](#1015-framebuffer-console)
+  - [10.16 Comparison with XNU/macOS IOKit](#1016-comparison-with-xnumacos-iokit)
+- [Chapter 11: Userland -- dyld, libSystem, crt0](#chapter-11-userland----dyld-libsystem-crt0)
   - [11.1 The Mach-O Binary Format](#111-the-mach-o-binary-format)
-  - [11.2 dyld — The Dynamic Linker](#112-dyld--the-dynamic-linker)
-  - [11.3 libSystem.B.dylib](#113-libsystembdylib)
+  - [11.2 dyld -- The Dynamic Linker](#112-dyld----the-dynamic-linker)
+  - [11.3 libSystem.B.dylib -- The C Library](#113-libsystembdylib----the-c-library)
   - [11.4 crt0 and Program Startup](#114-crt0-and-program-startup)
+  - [11.5 The Objective-C Runtime (libobjc)](#115-the-objective-c-runtime-libobjc)
 - [Chapter 12: WindowServer & GUI Architecture](#chapter-12-windowserver--gui-architecture)
   - [12.1 WindowServer Overview](#121-windowserver-overview)
   - [12.2 The IPC Protocol](#122-the-ipc-protocol)
   - [12.3 Window Compositing](#123-window-compositing)
   - [12.4 Input Event Dispatch](#124-input-event-dispatch)
-  - [12.5 The Built-In VT100 Terminal](#125-the-built-in-vt100-terminal)
-  - [12.6 loginwindow](#126-loginwindow)
-  - [12.7 init — The launchd-Style PID 1](#127-init--the-launchd-style-pid-1)
-- [Chapter 13: Framework Stack — CF through AppKit](#chapter-13-framework-stack--cf-through-appkit)
+  - [12.5 loginwindow -- Session Management](#125-loginwindow----session-management)
+  - [12.6 init -- The launchd-Style PID 1](#126-init----the-launchd-style-pid-1)
+- [Chapter 13: Framework Stack -- CoreFoundation through AppKit](#chapter-13-framework-stack----corefoundation-through-appkit)
   - [13.1 The Freestanding Pattern](#131-the-freestanding-pattern)
   - [13.2 CoreFoundation](#132-corefoundation)
   - [13.3 CoreGraphics](#133-coregraphics)
   - [13.4 CoreText](#134-coretext)
   - [13.5 Foundation](#135-foundation)
   - [13.6 AppKit](#136-appkit)
-  - [13.7 Toll-Free Bridging](#137-toll-free-bridging)
-  - [13.8 The ObjC Runtime & objc_msgSend](#138-the-objc-runtime--objc_msgsend)
-- [Chapter 14: Applications — Finder, Terminal, Dock](#chapter-14-applications--finder-terminal-dock)
-  - [14.1 Application Architecture](#141-application-architecture)
-  - [14.2 Dock.app](#142-dockapp)
-  - [14.3 Finder.app](#143-finderapp)
-  - [14.4 Terminal.app](#144-terminalapp)
-  - [14.5 SystemUIServer.app](#145-systemuiserverapp)
+  - [13.7 The Objective-C Runtime (libobjc)](#137-the-objective-c-runtime-libobjc)
+- [Chapter 14: Applications](#chapter-14-applications)
+  - [14.1 Application Architecture -- Common Patterns](#141-application-architecture----common-patterns)
+  - [14.2 Dock.app -- Desktop & Dock Bar](#142-dockapp----desktop--dock-bar)
+  - [14.3 Finder.app -- File Browser](#143-finderapp----file-browser)
+  - [14.4 Terminal.app -- VT100 Terminal Emulator](#144-terminalapp----vt100-terminal-emulator)
+  - [14.5 SystemUIServer.app -- Menu Bar Clock](#145-systemuiserverapp----menu-bar-clock)
 - [Chapter 15: Build System & Toolchain](#chapter-15-build-system--toolchain)
-  - [15.1 The COMDAT-Stripping Pipeline](#151-the-comdat-stripping-pipeline)
-  - [15.2 TBD Stubs & GNUstep ABI v1](#152-tbd-stubs--gnustep-abi-v1)
-  - [15.3 The Disk Image](#153-the-disk-image)
-  - [15.4 QEMU Configuration](#154-qemu-configuration)
+  - [15.1 Build Overview -- `make world`](#151-build-overview----make-world)
+  - [15.2 Kernel Build -- Bare-Metal ELF](#152-kernel-build----bare-metal-elf)
+  - [15.3 Userland Build -- Mach-O with macOS Clang](#153-userland-build----mach-o-with-macos-clang)
+  - [15.4 The COMDAT-Stripping Pipeline](#154-the-comdat-stripping-pipeline)
+  - [15.5 Disk Image Creation -- mkdisk.sh](#155-disk-image-creation----mkdisksh)
+  - [15.6 QEMU Launch](#156-qemu-launch)
+  - [15.7 Debug and Test Targets](#157-debug-and-test-targets)
+  - [15.8 Build Output Summary](#158-build-output-summary)
+- [Chapter 16: Security Audit & Hardening](#chapter-16-security-audit--hardening)
+  - [16.1 Memory Safety](#161-memory-safety)
+  - [16.2 Access Control](#162-access-control)
+  - [16.3 Authentication](#163-authentication)
+  - [16.4 Network Security](#164-network-security)
+  - [16.5 Kernel Attack Surface](#165-kernel-attack-surface)
+  - [16.6 Information Disclosure](#166-information-disclosure)
+  - [16.7 Physical and Side-Channel Attacks](#167-physical-and-side-channel-attacks)
+  - [16.8 Security Hardening Roadmap](#168-security-hardening-roadmap)
 
 ---
 
@@ -112,136 +157,109 @@
 
 ### 1.1 What Is Kiseki?
 
-Kiseki (奇跡, Japanese for "miracle") is a from-scratch operating system for ARM64 that faithfully reimplements the architecture of Apple's macOS — from the Mach/BSD hybrid kernel up through the Objective-C GUI frameworks. It is not a port of XNU or Darwin; every line of code is original, written to behave identically to macOS where it matters for binary compatibility and security understanding.
+Kiseki (Japanese for "miracle") is a from-scratch operating system for ARM64 that faithfully reimplements the architecture of Apple's macOS — from the Mach/BSD hybrid kernel up through the Objective-C GUI frameworks. It is not a port of XNU or Darwin; every line of code is original, written to behave identically to macOS where it matters for binary-format compatibility and architectural understanding.
 
-The codebase comprises roughly **22,000 lines of kernel C and assembly** and **45,000 lines of userland code**, producing a system that boots on QEMU's `virt` machine (and Raspberry Pi 4) with:
+The system boots on QEMU's `virt` machine (and Raspberry Pi 4) with:
 
-- A Mach + BSD hybrid kernel with 100+ syscalls and 10 Mach traps
-- 4-core SMP with an MLFQ scheduler
-- ARM64 4-level page tables with copy-on-write fork
-- Full Mach IPC with per-task port namespaces and OOL memory descriptors
-- A read/write ext4 filesystem with extent trees
-- A TCP/IP networking stack with DHCP, ARP, ICMP
-- A dynamic linker (`dyld`) that loads Mach-O binaries
-- A complete C library (`libSystem.B.dylib`, ~7,900 lines)
-- An IOKit driver framework with VirtIO GPU, input, block, and network drivers
-- A Quartz-like WindowServer compositor
-- CoreFoundation, CoreGraphics, CoreText, Foundation, and AppKit frameworks
-- Four GUI applications: Dock, Finder, Terminal, and SystemUIServer
-- 65+ command-line utilities including `bash` and a native C compiler (`tcc`)
+- A **Mach + BSD hybrid kernel** with 102 syscalls and 12 Mach traps
+- **4-core SMP** with an MLFQ scheduler (128 priority levels)
+- ARM64 **4-level page tables** with copy-on-write fork
+- Full **Mach IPC** with per-task port namespaces and out-of-line memory descriptors
+- A read/write **ext4 filesystem** with extent trees and a 256-slot buffer cache
+- A **TCP/IP networking stack** with DHCP, ARP, ICMP, UDP, and TCP
+- A **dynamic linker** (`dyld`) that loads Mach-O binaries with chained fixups
+- A complete **C library** (`libSystem.B.dylib`, 7,948 lines)
+- An **IOKit driver framework** with VirtIO GPU, input, block, and network drivers
+- A **Quartz-like WindowServer** compositor with cursor, menu bar, and Z-ordered windows
+- **Six frameworks**: CoreFoundation, CoreGraphics, CoreText, Foundation, AppKit, and IOKit (userland)
+- **Four GUI applications**: Dock, Finder, Terminal, and SystemUIServer
+- **65+ command-line utilities** including `bash` and a native C compiler (`tcc`)
+- An **SSH server** with Curve25519 key exchange
 
 The goal is not to run unmodified macOS binaries (that would require Apple's proprietary code), but to build a system that is **structurally identical** to macOS — so that studying Kiseki teaches you exactly how macOS works, from the syscall ABI to the Mach message format to the way AppKit dispatches events.
 
-**Why should a security engineer care?**
-
-If you want to find vulnerabilities in macOS, you need to understand how the kernel handles Mach messages, how `mach_msg_trap` copies OOL descriptors across address spaces, how the VM subsystem manages copy-on-write pages, how IOKit user clients validate external method arguments. These are exactly the attack surfaces that have produced CVEs like:
-
-- **CVE-2021-30858** (use-after-free in IPC port lifecycle)
-- **CVE-2023-32434** (integer overflow in vm_map)
-- **CVE-2024-23296** (IOKit user client type confusion)
-
-Kiseki implements all of these subsystems. By reading this book, you will understand the exact code paths that an attacker targets — because you will have written equivalent code yourself.
-
 ### 1.2 Architecture at a Glance
 
-The following diagram shows the major components and their relationships:
-
-```mermaid
-graph TB
-    subgraph "User Space"
-        Apps["GUI Apps<br/>(Dock, Finder, Terminal, SystemUIServer)"]
-        AppKit["AppKit.framework"]
-        Foundation["Foundation.framework"]
-        CoreText["CoreText.framework"]
-        CoreGraphics["CoreGraphics.framework"]
-        CoreFoundation["CoreFoundation.framework"]
-        libobjc["libobjc.A.dylib<br/>(GNUstep libobjc2)"]
-        libSystem["libSystem.B.dylib<br/>(C library + Mach wrappers)"]
-        dyld["dyld<br/>(Dynamic Linker)"]
-        WS["WindowServer"]
-        LW["loginwindow"]
-        Init["init (PID 1)<br/>(launchd-style)"]
-        CLI["CLI Tools<br/>(bash, cat, ls, tcc, ...)"]
-    end
-
-    subgraph "Kernel Space"
-        subgraph "Mach Layer"
-            IPC["Mach IPC<br/>(ports, messages, OOL)"]
-            Tasks["Tasks & Threads"]
-            VMM["Virtual Memory<br/>(4-level page tables, COW)"]
-            PMM["Physical Memory<br/>(Buddy Allocator)"]
-            Sched["MLFQ Scheduler<br/>(128 levels, 4 CPUs)"]
-        end
-        subgraph "BSD Layer"
-            Syscalls["100+ BSD Syscalls"]
-            VFS["VFS + Ext4 + devfs"]
-            Net["TCP/IP Stack"]
-            Proc["Process Model<br/>(fork/exec/exit)"]
-            Security["Unix DAC<br/>(credentials, permissions)"]
-            Signals["POSIX Signals"]
-        end
-        subgraph "IOKit"
-            IOService["IOService<br/>(matching, lifecycle)"]
-            IORegistry["I/O Registry<br/>(device tree)"]
-            IOFB["IOFramebuffer"]
-            IOHID["IOHIDSystem"]
-            IOUserClient["IOUserClient<br/>(external methods)"]
-        end
-        subgraph "Drivers"
-            VirtGPU["VirtIO GPU"]
-            VirtInput["VirtIO Input"]
-            VirtBlk["VirtIO Block"]
-            VirtNet["VirtIO Net"]
-            GIC["GICv2"]
-            Timer["ARM Generic Timer"]
-        end
-        subgraph "Architecture"
-            Boot["boot.S<br/>(EL2→EL1 drop)"]
-            Vectors["vectors.S<br/>(exception table)"]
-            CtxSwitch["context_switch.S"]
-        end
-    end
-
-    Apps --> AppKit --> Foundation --> CoreFoundation
-    AppKit --> CoreGraphics --> CoreFoundation
-    AppKit --> CoreText --> CoreGraphics
-    Foundation --> libobjc
-    AppKit --> libobjc
-    CoreFoundation --> libSystem
-    libobjc --> libSystem
-    libSystem --> |"svc #0x80"| Syscalls
-    libSystem --> |"svc #0x80 (x16 < 0)"| IPC
-    WS --> |"IOKit Mach IPC"| IOFB
-    WS --> |"Shared Memory"| IOHID
-    Apps --> |"Mach IPC"| WS
-    LW --> |"Mach IPC"| WS
-    Init --> |"fork+exec"| WS
-    Init --> |"fork+exec"| LW
-    Init --> |"bootstrap_register"| IPC
-    Syscalls --> Proc
-    Syscalls --> VFS
-    Syscalls --> Net
-    Syscalls --> Security
-    Proc --> Tasks
-    Tasks --> Sched
-    Sched --> CtxSwitch
-    VMM --> PMM
-    IPC --> VMM
-    VFS --> VirtBlk
-    Net --> VirtNet
-    IOFB --> VirtGPU
-    IOHID --> VirtInput
-    IOService --> IORegistry
-    IOUserClient --> IOService
-    VirtGPU --> GIC
-    VirtInput --> GIC
-    Timer --> GIC
-    Boot --> Vectors
+```
++=======================================================================+
+|                         User Space (EL0)                              |
+|                                                                       |
+|  +----------+ +----------+ +----------+ +-------------------+         |
+|  | Dock.app | |Finder.app| |Terminal  | |SystemUIServer.app |         |
+|  +----+-----+ +----+-----+ +----+-----+ +---------+---------+         |
+|       |            |            |                 |                   |
+|  +----+------------+------------+-----------------+-------------+     |
+|  |                     AppKit.framework                         |     |
+|  |              (NSApplication, NSWindow, NSView)               |     |
+|  +-----------------------------+--------------------------------+     |
+|  | Foundation.framework        | CoreText.framework             |     |
+|  | (NSString, NSArray)         | (CTFont, CTLine)               |     |
+|  +-----------------------------+--------------------------------+     |
+|  |                  CoreGraphics.framework                      |     |
+|  |           (CGContext, CGPath, CGColor, CGImage)              |     |
+|  +--------------------------------------------------------------+     |
+|  |                  CoreFoundation.framework                    |     |
+|  |       (CFString, CFArray, CFDictionary, CFRunLoop)           |     |
+|  +-----------------------------+--------------------------------+     |
+|  | libobjc.A.dylib             | IOKit.framework (user)         |     |
+|  | (GNUstep libobjc2)          | (IOServiceOpen, etc.)          |     |
+|  +-----------------------------+--------------------------------+     |
+|  |                libSystem.B.dylib (C library)                 |     |
+|  |       malloc, printf, read, write, mach_msg, ...             |     |
+|  +--------------------------------------------------------------+     |
+|  |                     dyld (dynamic linker)                    |     |
+|  |          Mach-O loading, symbol binding, fixups              |     |
+|  +----------------------------+---+-----------------------------+     |
+|                               |                                       |
+|  +---------------+ +----------+----+ +------------------+             |
+|  | WindowServer  | |  loginwindow  | |   init (PID 1)   |             |
+|  | (compositor)  | | (session mgr) | |  (launchd-style) |             |
+|  +-------+-------+ +--------------+  +------------------+             |
+|          |                svc #0x80                                   |
++==========+============================================================+
+|          |              Kernel Space (EL1)                            |
+|          v                                                            |
+|  +-----------------------------------------------------------------+  |
+|  |                     Trap Handler (trap.c)                       |  |
+|  |        x16 > 0 --> BSD syscall    x16 < 0 --> Mach trap         |  |
+|  +------------------------------+----------------------------------+  |
+|  |       Mach Layer             |          BSD Layer               |  |
+|  |  +---------------------+    |  +----------------------------+   |  |
+|  |  | Mach IPC            |    |  | 102 BSD Syscalls           |   |  |
+|  |  | (ports, msgs,       |    |  | (open, read, write,        |   |  |
+|  |  |  OOL, bootstrap)    |    |  |  fork, exec, mmap, ...)    |   |  |
+|  |  +---------------------+    |  +----------------------------+   |  |
+|  |  | Tasks & Threads     |    |  | VFS + Ext4 + devfs         |   |  |
+|  |  +---------------------+    |  +----------------------------+   |  |
+|  |  | Virtual Memory      |    |  | TCP/IP + BSD Sockets       |   |  |
+|  |  | (4-level PT,        |    |  +----------------------------+   |  |
+|  |  |  COW, vm_map)       |    |  | Process Model              |   |  |
+|  |  +---------------------+    |  | (fork/exec/exit/signals)   |   |  |
+|  |  | Physical Memory     |    |  +----------------------------+   |  |
+|  |  | (Buddy Alloc)       |    |  | TTY + PTY                  |   |  |
+|  |  +---------------------+    |  +----------------------------+   |  |
+|  |  | MLFQ Scheduler      |    |                                   |  |
+|  |  | (128 levels,        |    |                                   |  |
+|  |  |  4 CPUs, IPI)       |    |                                   |  |
+|  |  +---------------------+    |                                   |  |
+|  +------------------------------+----------------------------------+  |
+|  |                           IOKit                                 |  |
+|  |  IOService --> IOUserClient --> IOFramebuffer / IOHIDSystem     |  |
+|  |  IOMemoryDescriptor, IOWorkLoop, I/O Registry                   |  |
+|  +-----------------------------------------------------------------+  |
+|  |                         Drivers                                 |  |
+|  |  VirtIO GPU | VirtIO Block | VirtIO Net | VirtIO Input          |  |
+|  |  GICv2      | ARM Timer    | PL011 UART | Framebuffer Console   |  |
+|  +-----------------------------------------------------------------+  |
+|  |                      Architecture                               |  |
+|  |  boot.S | vectors.S | context_switch.S | linker-qemu.ld         |  |
+|  +-----------------------------------------------------------------+  |
++=======================================================================+
 ```
 
 ### 1.3 How macOS Works (The 10,000-Foot View)
 
-Before diving into Kiseki's implementation, let's establish how a real macOS system is structured. If you already know this, skip ahead — but most security engineers have a fuzzy picture of the layers, so let's make it concrete.
+Before diving into Kiseki's implementation, let's establish how a real macOS system is structured. If you already know this, skip ahead — but most software engineers have a fuzzy picture of the layers.
 
 **macOS is not a monolithic kernel.** It is a **hybrid** of two very different operating system traditions:
 
@@ -251,20 +269,20 @@ Before diving into Kiseki's implementation, let's establish how a real macOS sys
 
 Apple's kernel, **XNU** ("X is Not Unix"), welds these together. A single kernel image contains both the Mach layer and the BSD layer. Every process is simultaneously a Mach task (with a port namespace and threads) and a BSD process (with a PID, file descriptors, and credentials). The syscall entry point (`svc #0x80` on ARM64) inspects register `x16`:
 
-- **Positive x16** → BSD syscall (e.g., `x16=4` → `write()`)
-- **Negative x16** → Mach trap (e.g., `x16=-31` → `mach_msg_trap()`)
+- **Positive x16** -> BSD syscall (e.g., `x16=4` -> `write()`)
+- **Negative x16** -> Mach trap (e.g., `x16=-31` -> `mach_msg_trap()`)
 
 This duality is the heart of macOS, and it is the heart of Kiseki.
 
-> **XNU reference:** The syscall dispatch lives in [`bsd/dev/arm/systemcalls.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/dev/arm/systemcalls.c) and [`osfmk/arm64/sleh.c`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/sleh.c). In Kiseki, the equivalent is `kernel/kern/trap.c` (line 169, `trap_sync_el0`).
+> **XNU reference:** The syscall dispatch lives in `bsd/dev/arm/systemcalls.c` and `osfmk/arm64/sleh.c`. In Kiseki, the equivalent is `kernel/kern/trap.c:169` (`trap_sync_el0`).
 
 **Above the kernel**, macOS provides:
 
 - **`dyld`** — the dynamic linker that loads Mach-O executables and their dependent `.dylib` files
-- **`libSystem.B.dylib`** — the C library (wrapping `libsystem_c`, `libsystem_kernel`, `libsystem_malloc`, etc.)
+- **`libSystem.B.dylib`** — the C library (wrapping libsystem_c, libsystem_kernel, libsystem_malloc, etc.)
 - **`launchd`** (PID 1) — the init system that reads property lists and launches daemons
 - **WindowServer** — the display compositor (a userland process, not in-kernel)
-- **CoreFoundation → CoreGraphics → CoreText → Foundation → AppKit** — the framework stack
+- **CoreFoundation -> CoreGraphics -> CoreText -> Foundation -> AppKit** — the framework stack
 
 Kiseki reimplements all of these.
 
@@ -291,5078 +309,7432 @@ The QEMU `virt` machine provides:
 
 | Component | Address / IRQ | Kiseki Driver |
 |-----------|--------------|---------------|
-| ARM Generic Timer | PPI #27 | `kernel/drivers/timer/timer.c` |
-| GICv2 (interrupt controller) | `0x08000000` (GICD), `0x08010000` (GICC) | `kernel/drivers/gic/gicv2.c` |
-| PL011 UART | `0x09000000`, SPI #33 | `kernel/drivers/uart/uart.c` |
-| VirtIO MMIO (8 slots) | `0x0A000000`+, SPI #48+ | `kernel/drivers/virtio/` |
-| RAM | `0x40000000` — `0x13FFFFFFF` (4 GB) | Managed by PMM + VMM |
+| ARM Generic Timer | PPI #27 | `kernel/drivers/timer/timer.c` (182 lines) |
+| GICv2 (interrupt controller) | GICD `0x08000000`, GICC `0x08010000` | `kernel/drivers/gic/gicv2.c` (150 lines) |
+| PL011 UART | `0x09000000`, SPI #33 | `kernel/drivers/uart/pl011.c` (174 lines) |
+| VirtIO MMIO (32 slots) | `0x0A000000`+, SPI #48+ | `kernel/drivers/virtio/` |
+| RAM | `0x40000000` - `0x13FFFFFFF` (4 GB) | Managed by PMM + VMM |
 
-> **Why TCG instead of HVF?** Apple Silicon's hardware virtualisation (HVF) has cache-coherency issues that cause External Abort exceptions during instruction fetch after `fork()`. The `tcg` (software emulation) accelerator avoids this at the cost of speed. See `Makefile:run` target.
+> **Why TCG instead of HVF?** Apple Silicon's hardware virtualisation (HVF) has cache-coherency issues that cause External Abort exceptions during instruction fetch after `fork()`. The `tcg` (software emulation) accelerator avoids this at the cost of speed.
 
-The kernel is loaded as an ELF at physical address `0x40080000` (the first 512 KB of RAM is reserved for QEMU's device tree blob). The linker script (`kernel/arch/arm64/linker-qemu.ld`) places `.text` first (with `boot.S` at the entry point), followed by `.rodata`, `.data`, `.bss`, a 128 KB stack area (32 KB × 4 cores), and the heap start marker.
+The kernel is loaded as an ELF at physical address `0x40080000` (the first 512 KB of RAM is reserved for QEMU's device tree blob). The linker script (`kernel/arch/arm64/linker-qemu.ld`, 95 lines) places `.text` first (with `boot.S` at the entry point), followed by `.rodata`, `.data`, `.bss`, a 128 KB stack area (32 KB x 4 cores), and the heap start marker.
 
-```mermaid
-graph LR
-    subgraph "Physical Memory Layout (QEMU virt, 4 GB)"
-        A["0x00000000<br/>MMIO Region"] --- B["0x40000000<br/>RAM Start<br/>(DTB here)"]
-        B --- C["0x40080000<br/>Kernel .text"]
-        C --- D[".rodata / .data / .bss"]
-        D --- E["Kernel Stacks<br/>(32KB × 4)"]
-        E --- F["__heap_start<br/>→ Buddy Allocator"]
-        F --- G["0x13FFFFFFF<br/>RAM End (4 GB)"]
-    end
+```
+Physical Memory Layout (QEMU virt, 4 GB)
+
+              +---------------------------+
+0x00000000    |   MMIO Region             |  GIC, UART, VirtIO
+              +---------------------------+
+0x40000000    |   Device Tree Blob        |  512 KB reserved by QEMU
+              +---------------------------+
+0x40080000    |   Kernel .text            |  Code (boot.S entry point at top)
+              |   Kernel .rodata          |  Read-only data
+              |   Kernel .data            |  Initialised globals
+              |   Kernel .bss             |  Uninitialised globals (zeroed by boot.S)
+              |   Boot Stacks             |  32 KB x 4 cores = 128 KB
+              +---------------------------+
+              |   __heap_start            |  Everything below here is managed by
+              |                           |  the PMM (free pages / buddy allocator)
+              |          ...              |
+              |                           |
+0x13FFFFFFF   +---------------------------+  RAM End (4 GB)
 ```
 
-Kiseki also supports the **Raspberry Pi 4** (BCM2711, GIC-400, eMMC) via an alternate linker script (`linker-raspi4.ld`, base `0x80000`) and platform-specific UART/eMMC drivers.
+Kiseki also supports the **Raspberry Pi 4** (BCM2711, GIC-400, eMMC) via an alternate linker script and platform-specific UART/eMMC drivers.
+
+### 1.5 Codebase Map
+
+```
+kiseki/
+├── kernel/                          # Kernel source (53 files, ~48,000 lines)
+│   ├── arch/arm64/
+│   │   ├── boot.S                   # Entry point, EL2->EL1 drop (181 lines)
+│   │   ├── vectors.S                # Exception vector table (403 lines)
+│   │   ├── context_switch.S         # Thread context switch (133 lines)
+│   │   ├── smp.c                    # PSCI secondary core startup (71 lines)
+│   │   └── linker-qemu.ld           # Linker script (95 lines)
+│   ├── kern/
+│   │   ├── main.c                   # kmain() bootstrap (458 lines)
+│   │   ├── trap.c                   # Exception handlers (839 lines)
+│   │   ├── vmm.c                    # Virtual memory manager (1,492 lines)
+│   │   ├── pmm.c                    # Physical memory buddy allocator (387 lines)
+│   │   ├── sched.c                  # MLFQ scheduler (1,313 lines)
+│   │   ├── sync.c                   # Spinlocks, mutexes, condvars (410 lines)
+│   │   ├── proc.c                   # Process management, fork/exec (1,801 lines)
+│   │   ├── tty.c                    # TTY line discipline (801 lines)
+│   │   ├── pty.c                    # Pseudo-terminals (604 lines)
+│   │   ├── macho.c                  # Mach-O loader (839 lines)
+│   │   ├── commpage.c               # CommPage (signal trampoline) (514 lines)
+│   │   ├── kprintf.c                # Kernel printf with SMP lock (384 lines)
+│   │   ├── fbconsole.c              # Framebuffer text console (1,116 lines)
+│   │   └── font8x16.c              # Bitmap font data (798 lines)
+│   ├── mach/
+│   │   └── ipc.c                    # Mach IPC (ports, msgs, OOL) (2,485 lines)
+│   ├── bsd/
+│   │   ├── syscalls.c               # All 102 BSD syscalls (5,416 lines)
+│   │   └── security.c              # DAC permissions, SUID (247 lines)
+│   ├── fs/
+│   │   ├── vfs.c                    # Virtual filesystem layer (1,454 lines)
+│   │   ├── ext4/ext4.c              # Ext4 driver (2,836 lines)
+│   │   ├── buf.c                    # Buffer cache (416 lines)
+│   │   └── devfs.c                  # Device filesystem (548 lines)
+│   ├── net/
+│   │   ├── eth.c                    # Ethernet + ARP (555 lines)
+│   │   ├── ip.c                     # IPv4 (319 lines)
+│   │   ├── tcp.c                    # TCP (785 lines)
+│   │   ├── udp.c                    # UDP (148 lines)
+│   │   ├── dhcp.c                   # DHCP client (399 lines)
+│   │   ├── icmp.c                   # ICMP (152 lines)
+│   │   └── socket.c                # BSD socket syscalls (1,021 lines)
+│   ├── iokit/                       # IOKit framework (11 files, ~4,900 lines)
+│   │   ├── io_registry.c            # I/O Registry + matching (423 lines)
+│   │   ├── io_service.c             # IOService lifecycle (457 lines)
+│   │   ├── io_user_client.c          # External method dispatch (359 lines)
+│   │   ├── io_framebuffer.c         # IOFramebuffer driver (788 lines)
+│   │   ├── io_hid_system.c          # IOHIDSystem (input events) (457 lines)
+│   │   ├── io_memory_descriptor.c   # User-space memory mapping (355 lines)
+│   │   ├── iokit_mach.c             # Mach IPC bridge for IOKit (977 lines)
+│   │   └── ...                      # io_object, io_property, io_work_loop
+│   ├── drivers/
+│   │   ├── virtio/virtio_gpu.c       # VirtIO GPU 2D (1,137 lines)
+│   │   ├── virtio/virtio_blk.c      # VirtIO block (582 lines)
+│   │   ├── virtio/virtio_input.c    # VirtIO keyboard+tablet (959 lines)
+│   │   ├── net/virtio_net.c         # VirtIO network (573 lines)
+│   │   ├── gic/gicv2.c             # GICv2 interrupt controller (150 lines)
+│   │   ├── timer/timer.c           # ARM Generic Timer (182 lines)
+│   │   └── uart/pl011.c            # PL011 UART (174 lines)
+│   └── include/                     # 42 kernel headers (~9,500 lines)
+│
+├── userland/                        # Userland source (175 files, ~124,000 lines)
+│   ├── dyld/dyld.c                  # Dynamic linker (2,438 lines)
+│   ├── libsystem/libSystem.c        # C library (7,948 lines)
+│   ├── libobjc/                     # GNUstep ObjC runtime (~100 files)
+│   ├── CoreFoundation/              # CFString, CFArray, CFRunLoop (4,841 lines)
+│   ├── CoreGraphics/                # CGContext, bitmap rendering (3,162 lines)
+│   ├── CoreText/                    # Font rendering (1,961 lines)
+│   ├── Foundation/                  # NSObject, NSString, bridging (1,616 lines)
+│   ├── AppKit/                      # NSWindow, NSView, WS IPC (3,410 lines)
+│   ├── IOKit/                       # IOKit user library (977 lines)
+│   ├── sbin/
+│   │   ├── WindowServer.c            # Display compositor (1,854 lines)
+│   │   ├── init.c                    # PID 1 process manager (978 lines)
+│   │   ├── loginwindow.c            # Login UI + session (980 lines)
+│   │   ├── sshd.c                   # SSH server (1,657 lines)
+│   │   └── mDNSResponder.c          # DNS daemon (561 lines)
+│   ├── apps/
+│   │   ├── Dock.app/Dock.m          # Desktop + dock bar (271 lines)
+│   │   ├── Finder.app/Finder.m      # File browser (925 lines)
+│   │   ├── Terminal.app/Terminal.m   # VT100 terminal (1,071 lines)
+│   │   └── SystemUIServer.app/      # Menu bar clock (289 lines)
+│   └── bin/                          # 60+ coreutils (cat, ls, grep, ...)
+│
+├── scripts/mkdisk.sh                # Ext4 disk image builder (835 lines)
+├── Makefile                         # Root build system (359 lines)
+├── include/sys/syscall.h            # Shared syscall numbers (181 lines)
+└── docs/                            # This book
+```
 
 ---
 
 ## Chapter 2: ARM64 Boot & Early Initialisation
 
-Before we look at boot code, we need to understand five foundational concepts that everything else builds on. If you have done exploit development on x86, some of these will be familiar — but the ARM64 terminology is different, and the details matter.
+This chapter covers everything that happens from the moment the CPU powers on to the moment the first user process is running. We will walk through three assembly files (`boot.S`, `vectors.S`, `context_switch.S`) and one C file (`main.c`) line by line. By the end, you will understand:
 
-#### Concept 1: Privilege Levels (Exception Levels)
+- What exception levels are and why they matter
+- How a kernel drops from hypervisor mode to kernel mode
+- How the CPU knows where to jump when a syscall or interrupt happens
+- How threads are created and context-switched
+- The 17 phases of kernel bootstrap, in dependency order
+- How secondary CPU cores are brought online
 
-A CPU does not treat all code equally. Your web browser should not be able to overwrite kernel memory or reprogram the interrupt controller. To enforce this, ARM64 processors have four **Exception Levels** (ELs), numbered 0 to 3. Think of them as concentric security rings — higher numbers mean more privilege:
+### 2.1 Five Foundational Concepts
 
-| Level | Who Runs Here | What They Can Do |
-|-------|--------------|-----------------|
-| **EL0** | Your apps (Safari, Terminal, malware) | Access own memory only. Cannot touch hardware registers. Must ask the kernel for everything via syscalls. |
-| **EL1** | The OS kernel (XNU on macOS, Kiseki) | Full control over memory mapping, hardware devices, interrupt handling. Can read/write any physical address. |
-| **EL2** | Hypervisor (used by VMs) | Can intercept and virtualise EL1 operations. Controls which physical memory the kernel can see. |
-| **EL3** | Secure Monitor (TrustZone/SEP) | Highest privilege. Controls the boundary between "secure world" and "normal world". |
+Before we can read a single line of assembly, we need to establish five concepts that every operating system depends on. If you've never worked below the level of `printf()`, this section is for you. None of this is ARM64-specific — every modern CPU has equivalents.
 
-On macOS, your apps run at EL0, XNU runs at EL1, and Apple's Secure Enclave Processor firmware uses EL3. Kiseki follows the same split: user processes at EL0, kernel at EL1.
+#### Concept 1: Exception Levels (Privilege Rings)
 
-The key rule: **code at a lower EL cannot directly access resources at a higher EL.** An EL0 process cannot read kernel memory, modify page tables, or disable interrupts. The only way to cross the EL boundary is through a controlled gate — which brings us to the next concept.
+A CPU does not treat all code equally. It has a built-in notion of **privilege** — a piece of code can either be "trusted" (allowed to touch any hardware register, any memory address, any instruction) or "untrusted" (restricted to a safe sandbox). This is how your OS prevents a buggy web browser from overwriting kernel memory.
 
-#### Concept 2: Syscalls — How User Code Talks to the Kernel
-
-When your program calls `read(fd, buf, 100)`, the C library does not magically access the disk. Instead, it executes a special CPU instruction that **traps** into the kernel:
+ARM64 calls these privilege tiers **Exception Levels (ELs)**:
 
 ```
-User code (EL0)                    Kernel (EL1)
-─────────────────                  ─────────────
-mov x16, #3         // syscall number for read()
-mov x0, fd          // arg 1: file descriptor
-mov x1, buf         // arg 2: buffer address
-mov x2, 100         // arg 3: byte count
-svc #0x80           // ← THIS INSTRUCTION TRAPS TO EL1
-                     ────────────────────────────────►
-                           trap_sync_el0() runs
-                           reads x16 → "oh, it's read()"
-                           does the actual disk I/O
-                           puts result in x0
-                     ◄────────────────────────────────
-// x0 now contains        eret  // return to user
-// bytes read (or error)
+  ┌──────────────────────────────────────────────────────────────┐
+  │  EL3  Secure Monitor                                         │
+  │  ARM TrustZone firmware. Kiseki never runs here.             │
+  ├──────────────────────────────────────────────────────────────┤
+  │  EL2  Hypervisor                                             │
+  │  VMMs like QEMU's KVM. QEMU starts the kernel here.          │
+  ├──────────────────────────────────────────────────────────────┤
+  │  EL1  Kernel (Supervisor)                                    │
+  │  The OS kernel. Full hardware access. Kiseki lives here.     │
+  ├──────────────────────────────────────────────────────────────┤
+  │  EL0  User                                                   │
+  │  Applications. No direct hardware access.                    │
+  └──────────────────────────────────────────────────────────────┘
+           Higher privilege ▲                  ▼ Lower privilege
 ```
 
-The `svc` instruction (Supervisor Call) is ARM64's equivalent of x86's `syscall`/`int 0x80`. It causes the processor to:
-1. Save the current PC (program counter) into a special register called `ELR_EL1` (Exception Link Register)
-2. Save the current processor state (interrupt mask, flags) into `SPSR_EL1`
-3. Switch from EL0 to EL1
-4. Jump to a predefined address in the **vector table** (more on this shortly)
+**Key rule: You can only move "up" (to higher privilege) through a hardware-defined mechanism called an exception.** A user program cannot simply jump to kernel code. It must execute a special instruction (`svc` on ARM64, `syscall` on x86), which causes the CPU to automatically:
 
-The kernel handles the request, then executes `eret` (Exception Return) to atomically switch back to EL0 and resume the user program.
+1. Save the current program counter (PC) and processor state
+2. Switch to the higher exception level
+3. Jump to a fixed address (the **vector table** — see Concept 5)
 
-On macOS/Kiseki, the convention is: syscall number goes in register `x16`, arguments in `x0`–`x5`, return value in `x0`. If there is an error, the kernel sets the carry flag in SPSR and puts a positive errno in `x0`.
+Going "down" (from kernel to user) is done with the `eret` (Exception Return) instruction, which reverses the process.
 
-#### Concept 3: Interrupts — Hardware Talking to the Kernel
+> **x86 equivalent:** EL0 ≈ Ring 3, EL1 ≈ Ring 0. x86 has Ring 1 and Ring 2, but nobody uses them. ARM's EL2 is like Intel VT-x root mode.
 
-While your process is running, hardware events happen asynchronously: the timer fires, a network packet arrives, a key is pressed. These are **interrupts** (or IRQs — Interrupt Requests).
+> **Why does QEMU start at EL2?** QEMU's `virt` machine emulates a hypervisor-capable system. The firmware hands control to the kernel at EL2 because real hardware (like a Raspberry Pi) starts at EL2 as well. The kernel must immediately drop itself to EL1 — running an OS kernel at EL2 would work, but would prevent ever using virtualisation features.
 
-When an interrupt occurs, the CPU does almost the same thing as with `svc`:
-1. Saves PC and processor state
-2. Switches to EL1 (if it was at EL0) or stays at EL1 (if the kernel was already running)
-3. Jumps to the interrupt entry in the vector table
+**How to read the current exception level in code:**
 
-The kernel's interrupt handler identifies which device caused the interrupt (by reading the GIC — Generic Interrupt Controller), calls the appropriate driver, then returns to whatever was interrupted.
-
-The critical difference from syscalls: **interrupts are asynchronous** — they can happen at any point during execution, between any two instructions. This is why interrupt handlers must be extremely careful about what data they touch, and why the kernel must save ALL registers (not just a few).
-
-#### Concept 4: Page Faults — When Memory Doesn't Exist (Yet)
-
-When code accesses a virtual address that has no valid mapping in the page table, the CPU generates a **page fault** (called a "Data Abort" or "Instruction Abort" on ARM64). This is another trip to EL1, just like a syscall or interrupt.
-
-Page faults are not always errors. The kernel uses them intentionally for three purposes:
-
-1. **Demand paging**: The kernel promised a process 8 MB of stack, but didn't actually allocate physical pages yet. When the process first touches a new stack page, the fault handler allocates a physical page and creates the mapping.
-
-2. **Copy-on-Write**: After `fork()`, parent and child share pages marked read-only. When either writes, the fault handler copies the page and gives the writer their own private copy.
-
-3. **Real errors (SIGSEGV)**: If the process accesses an address it never mapped, the fault handler delivers `SIGSEGV` and kills the process.
-
-The page fault handler must examine the faulting address and the type of fault to decide which case applies. This logic is in `trap_sync_el0()` in `kernel/kern/trap.c`.
-
-#### Concept 5: The Vector Table — Where the CPU Jumps
-
-All three of the above events (syscalls, interrupts, page faults) are collectively called **exceptions** in ARM64 terminology. When any exception occurs, the CPU needs to know *where to jump*. This is configured via the **Vector Base Address Register** (`VBAR_EL1`) — a register that points to a table of 16 entry points, one for each combination of:
-
-- **Exception type**: Synchronous (syscall, fault) vs IRQ vs FIQ vs SError
-- **Origin**: From same EL (kernel) vs from lower EL (user)
-- **ISA**: AArch64 vs AArch32
-
-We'll see the exact layout in §2.2.
-
-With these five concepts established, let's look at how Kiseki boots.
-
-### 2.1 Exception Levels and the Boot Sequence
-
-When QEMU boots an ARM64 kernel, it starts execution at **EL2** (the hypervisor level). The very first thing the kernel must do is drop down to EL1 — the level where an OS kernel is supposed to run. This is a one-way transition: once you leave EL2, you cannot return to it without taking an exception.
-
-> **XNU reference:** Apple's iBoot hands off to XNU at EL1 directly (EL2 setup is done by iBoot/SecureROM). Kiseki handles EL2→EL1 itself because QEMU starts at EL2.
-
-The boot sequence lives in `kernel/arch/arm64/boot.S` (181 lines). Here is the complete flow:
-
-```mermaid
-flowchart TD
-    A["_start (boot.S:22)<br/>Read MPIDR_EL1 → core ID"] --> B{Core 0?}
-    B -->|No| S["_secondary_spin<br/>WFE loop"]
-    B -->|Yes| C{CurrentEL?}
-    C -->|EL3| HALT["_halt (WFI loop)"]
-    C -->|EL2| D["_from_el2 (boot.S:41)<br/>Configure HCR_EL2.RW=1<br/>Clear CPTR_EL2<br/>SPSR_EL2=0x3C5<br/>ELR_EL2=_at_el1<br/>ERET"]
-    C -->|EL1| E["_at_el1 (boot.S:61)"]
-    D --> E
-    E --> F["Disable MMU & caches<br/>(SCTLR_EL1 = 0)"]
-    F --> G["Enable FP/SIMD<br/>(CPACR_EL1.FPEN=0b11)"]
-    G --> H["Load VBAR_EL1 = _vectors"]
-    H --> I["Set SP = __stack_top"]
-    I --> J["Zero BSS<br/>(__bss_start → __bss_end)"]
-    J --> K["bl kmain"]
+```c
+// ARM64 system register: CurrentEL
+// Bits [3:2] encode the level:  EL0=0b00, EL1=0b01, EL2=0b10, EL3=0b11
+// But the register value is shifted left by 2:
+//   EL0 → 0x0, EL1 → 0x4, EL2 → 0x8, EL3 → 0xC
+mrs     x0, CurrentEL       // Move from System Register to x0
+and     x0, x0, #0xC        // Mask to bits [3:2]
+cmp     x0, #0x8            // Compare with 0x8 (EL2)
 ```
 
-Let's walk through the critical steps:
+This is exactly what `boot.S:31-33` does.
 
-**Step 1: Core identification** (`boot.S:23-26`)
+#### Concept 2: System Calls (Trapping Into the Kernel)
+
+When your C program calls `write(fd, buf, len)`, the C library does NOT call a kernel function directly. It cannot — the kernel is at EL1 and your program is at EL0. Instead, the C library executes:
 
 ```asm
-mrs     x0, mpidr_el1       // Read Multiprocessor Affinity Register
-and     x0, x0, #0xFF       // Extract Aff0 (core number within cluster)
-cbnz    x0, _secondary_spin // If not core 0, go to sleep (WFE loop)
+mov     x16, #4          // x16 = syscall number (SYS_write = 4)
+mov     x0, x1           // x0 = fd  (first argument)
+mov     x1, x2           // x1 = buf (second argument)
+mov     x2, x3           // x2 = len (third argument)
+svc     #0x80            // Supervisor Call — trap to EL1
 ```
 
-`MPIDR_EL1` is an ARM system register that tells each core its own ID. On a 4-core system, core 0 gets `Aff0=0`, core 1 gets `Aff0=1`, etc. Only core 0 runs the boot code; the others spin in a low-power `WFE` (Wait For Event) loop until the kernel explicitly wakes them later.
+The `svc #0x80` instruction is the **system call trap**. It causes the CPU to:
 
-**Step 2: Exception level check** (`boot.S:30-38`)
+1. Save the current PC to `ELR_EL1` (Exception Link Register) — this is the address to return to
+2. Save the current processor state to `SPSR_EL1` (Saved Program Status Register)
+3. Set the exception class in `ESR_EL1` to `EC=0x15` (SVC from AArch64)
+4. Jump to the kernel's synchronous exception vector (at offset `+0x400` in the vector table)
+5. The exception level changes from EL0 to EL1 — the kernel is now in control
+
+The kernel reads `x16` to determine which syscall was requested, calls the appropriate handler, puts the return value in `x0`, and executes `eret` to return to EL0.
+
+```
+User (EL0)                              Kernel (EL1)
+┌─────────────────┐                    ┌─────────────────────────┐
+│ mov x16, #4     │                    │                         │
+│ mov x0, fd      │                    │                         │
+│ svc #0x80 ──────┼───── TRAP ────────►│ trap_sync_el0(tf)       │
+│                 │                    │   EC == SVC?            │
+│                 │                    │   x16 > 0 → BSD syscall │
+│                 │                    │   x16 < 0 → Mach trap   │
+│                 │                    │   call sys_write(...)   │
+│                 │                    │   tf->regs[0] = result  │
+│ // x0 = result  │◄──── eret ─────────│   return                │
+│ // continues... │                    │                         │
+└─────────────────┘                    └─────────────────────────┘
+```
+
+> **Kiseki-specific:** Kiseki uses the same convention as macOS/XNU: `svc #0x80` with the syscall number in `x16`. Positive `x16` → BSD syscall. Negative `x16` → Mach trap. The dispatch code is in `kernel/kern/trap.c:169`.
+
+> **x86 equivalent:** `syscall` instruction (fast) or `int 0x80` (legacy). Linux puts the syscall number in `rax` instead of a separate register.
+
+#### Concept 3: Interrupts (Hardware Knocking on the Door)
+
+A **system call** is a *synchronous* exception — the program explicitly asks to enter the kernel. An **interrupt** (IRQ) is *asynchronous* — the hardware demands the CPU's attention at an unpredictable time.
+
+Examples of interrupts:
+- The **timer** fires every 10ms to trigger a scheduler tick
+- The **disk** has finished reading a block of data
+- The **network card** has received a packet
+- The **keyboard** has a key press event
+
+When an interrupt fires, the CPU does almost the same thing as for a syscall: it saves the current state and jumps to the vector table. But it jumps to a *different* vector entry (the IRQ vector instead of the synchronous vector), and the kernel calls a different handler (`trap_irq_el0` instead of `trap_sync_el0`).
+
+```
+User (EL0)                              Kernel (EL1)
+┌─────────────────┐                    ┌──────────────────────────┐
+│ add x0, x1, x2  │                    │                          │
+│ // working...   │                    │                          │
+│ ldr x3, [x4]  ──┼───── IRQ!! ──────>│ trap_irq_el0(tf)         │
+│                 │    (timer fired)   │   gic_ack_interrupt()    │
+│                 │                    │   timer_handler()        │
+│                 │                    │   sched_tick()           │
+│                 │                    │   gic_end_interrupt()    │
+│ // resumes here │◄──── eret ─────────│   return                 │
+│ str x3, [x5]    │                    │                          │
+└─────────────────┘                    └──────────────────────────┘
+```
+
+The user program doesn't even know it was interrupted — the kernel saves and restores all registers perfectly. From the program's perspective, `ldr x3, [x4]` and `str x3, [x5]` appear to execute back-to-back.
+
+> **Masking interrupts:** The kernel can temporarily disable interrupts using the `DAIF` flags in the processor state register. `msr daifset, #0x2` masks IRQs (the `I` bit). `msr daifclr, #0x2` unmasks them. This is critical during context switches and spinlock-protected sections where being interrupted would cause corruption.
+
+#### Concept 4: Page Faults (Memory Traps)
+
+When a program accesses a virtual address, the **MMU** (Memory Management Unit) translates it to a physical address using **page tables** (covered in Chapter 3). But sometimes the translation fails:
+
+- The page isn't mapped (e.g., first access to a `malloc`'d region)
+- The page is read-only and the program tried to write (e.g., copy-on-write after `fork()`)
+- The page is at address 0 (null pointer dereference)
+
+When this happens, the CPU generates a **Data Abort** (for loads/stores) or **Instruction Abort** (for code fetch). The mechanism is identical to a syscall — save state, jump to the vector table, enter the kernel at EL1. The kernel reads:
+
+- `ESR_EL1` — the Exception Syndrome Register, which tells you *what kind* of fault
+- `FAR_EL1` — the Fault Address Register, which tells you *what address* was accessed
+
+The kernel then decides: is this a legitimate fault (allocate a page, do copy-on-write) or a bug (segfault → kill the process)?
+
+```
+Classification of traps by ESR_EL1.EC (Exception Class):
+
+ EC       Meaning                         Kiseki handler
+────────────────────────────────────────────────────────────
+ 0x15     SVC from AArch64 (syscall)      trap.c → bsd_syscall() / mach_trap()
+ 0x20     Instruction Abort (from EL0)    trap.c → handle_page_fault()
+ 0x21     Instruction Abort (from EL1)    trap.c → panic (kernel bug)
+ 0x24     Data Abort (from EL0)           trap.c → handle_page_fault()
+ 0x25     Data Abort (from EL1)           trap.c → panic (kernel bug)
+ 0x22     PC Alignment Fault              trap.c → kill process (SIGBUS)
+ 0x26     SP Alignment Fault              trap.c → kill process (SIGBUS)
+ 0x3C     BRK (debugger breakpoint)       trap.c → kill process (SIGTRAP)
+```
+
+> **These constants are defined in `kernel/include/machine/trap.h:41-49`.**
+
+#### Concept 5: The Vector Table (Where the CPU Jumps)
+
+All three mechanisms above — syscalls, interrupts, and page faults — end up at the same place: the **exception vector table**. This is a fixed-format table that the kernel places in memory and registers with the CPU via the `VBAR_EL1` (Vector Base Address Register) system register.
+
+ARM64's vector table has **16 entries**, each exactly **128 bytes** (32 instructions). The entries are organized in a 4×4 grid:
+
+```
+                          Synchronous    IRQ          FIQ         SError
+                         ┌────────────┬────────────┬────────────┬────────────┐
+ From current EL,        │  +0x000    │  +0x080    │  +0x100    │  +0x180    │
+ using SP_EL0 (unused)   │ (unused)   │ (unused)   │ (unused)   │ (unused)   │
+                         ├────────────┼────────────┼────────────┼────────────┤
+ From current EL,        │  +0x200    │  +0x280    │  +0x300    │  +0x380    │
+ using SP_ELx (kernel)   │ EL1 sync   │ EL1 IRQ    │ (unused)   │ (unused)   │
+                         ├────────────┼────────────┼────────────┼────────────┤
+ From lower EL,          │  +0x400    │  +0x480    │  +0x500    │  +0x580    │
+ AArch64 (user mode)     │ EL0 sync ★ │ EL0 IRQ ★  │ (unused)   │ (unused)   │
+                         ├────────────┼────────────┼────────────┼────────────┤
+ From lower EL,          │  +0x600    │  +0x680    │  +0x700    │  +0x780    │
+ AArch32 (not used)      │ (unused)   │ (unused)   │ (unused)   │ (unused)   │
+                         └────────────┴────────────┴────────────┴────────────┘
+                          ★ = the hot paths (syscalls and timer ticks from user mode)
+```
+
+Each 128-byte slot is too small for a full handler, so Kiseki (like XNU) just places a `b` (branch) instruction in each slot that jumps to an out-of-line handler:
 
 ```asm
-mrs     x0, CurrentEL       // Read current exception level
-and     x0, x0, #0xC        // Mask to EL field (bits 3:2)
-cmp     x0, #0x8            // 0x8 = EL2
-b.eq    _from_el2
-cmp     x0, #0x4            // 0x4 = EL1
-b.eq    _at_el1
-b       _halt                // EL3 or EL0 → halt
+// vectors.S:171 — EL0 synchronous exception (syscalls, page faults)
+.balign 128; b _handle_el0_sync
 ```
 
-The `CurrentEL` register encodes the exception level in bits 3:2: `0x4` = EL1, `0x8` = EL2, `0xC` = EL3. QEMU starts at EL2, so we take the `_from_el2` path.
+The out-of-line handler calls `SAVE_REGS`, invokes the C handler, then calls `RESTORE_REGS` and `eret`.
 
-**Step 3: The EL2→EL1 drop** (`boot.S:41-58`)
+> **x86 equivalent:** The IDT (Interrupt Descriptor Table) serves the same purpose. Each IDT entry points to a handler. The ARM64 vector table is simpler — fixed 128-byte slots at fixed offsets instead of variable-length descriptors.
 
-This is the most architecturally significant part of the boot sequence. On ARM64, you cannot simply "switch" exception levels — you must configure the *return state* and execute `ERET` (Exception Return), which atomically transitions to the level specified in `SPSR_EL2`:
+---
+
+**Summary of the five concepts:**
+
+| # | Concept | Mechanism | Direction | ARM64 instruction |
+|---|---------|-----------|-----------|------------------|
+| 1 | Exception Levels | CPU privilege tiers | — | `mrs CurrentEL` |
+| 2 | System Calls | App requests kernel service | EL0 -> EL1 | `svc #0x80` |
+| 3 | Interrupts | Hardware demands attention | any → EL1 | (automatic) |
+| 4 | Page Faults | Bad memory access | any → EL1 | (automatic) |
+| 5 | Vector Table | Where the CPU jumps for all of the above | — | `msr vbar_el1, x0` |
+
+All five of these will appear in the next sections. Now let's read the actual code.
+
+### 2.2 The Boot Sequence (boot.S)
+
+**File:** `kernel/arch/arm64/boot.S` (181 lines)
+
+When QEMU's firmware finishes initialising the virtual machine, it sets the program counter to the kernel's entry point (`_start`, placed at physical address `0x40080000` by the linker script) and begins executing. At this moment:
+
+- We are at **EL2** (hypervisor level)
+- The **MMU is off** — all addresses are physical
+- **Caches are off** — every memory access goes to RAM
+- **Interrupts are masked** — we're alone, no timer ticks
+- **All cores are running** — cores 1-3 will also reach `_start`
+
+The boot code must: identify which core we are, park all non-primary cores, drop from EL2 to EL1, configure essential system registers, set up a stack, clear BSS, and call `kmain()`. Let's walk through it.
+
+#### Step 1: Identify the Core (lines 22-26)
+
+```asm
+_start:
+    mrs     x0, mpidr_el1          // Read Multiprocessor Affinity Register
+    and     x0, x0, #0xFF          // Extract Aff0 (core number: 0, 1, 2, 3)
+    cbnz    x0, _secondary_spin    // If not core 0, go to sleep
+```
+
+**Why this matters:** On a 4-core system, QEMU starts *all four cores* executing `_start` simultaneously. Only core 0 should proceed with boot — the others would race on BSS clearing, stack setup, and `kmain()`, corrupting everything. So cores 1-3 are sent to `_secondary_spin` (line 171), which is an infinite `wfe` (Wait For Event) loop — a low-power sleep state. They will be woken up later by PSCI in Phase 7 (§2.6).
+
+> **`MPIDR_EL1`** is the "Multiprocessor ID Register." On QEMU's `virt` machine, the lowest byte (`Aff0`) contains the core number (0-3). On real hardware the encoding is more complex (cluster IDs, etc.), but for QEMU this suffices.
+
+#### Step 2: Check Current Exception Level (lines 30-38)
+
+```asm
+    mrs     x0, CurrentEL
+    and     x0, x0, #0xC          // EL2=0x8, EL1=0x4
+    cmp     x0, #0x8
+    b.eq    _from_el2              // We're at EL2 → need to drop
+    cmp     x0, #0x4
+    b.eq    _at_el1                // Already at EL1 → skip drop
+    b       _halt                  // EL3? Not expected → halt
+```
+
+QEMU starts at EL2. A Raspberry Pi 4 (with its default firmware) starts at EL1. This code handles both.
+
+#### Step 3: Drop from EL2 to EL1 (lines 41-58)
+
+This is the most subtle part of boot. We need to convince the CPU to lower its own privilege level. The trick: we set up a *fake exception return*.
 
 ```asm
 _from_el2:
-    // 1. Tell hardware that EL1 runs AArch64 (not AArch32)
-    mov     x0, #(1 << 31)      // HCR_EL2.RW = 1 (AArch64 at EL1)
+    // 1. Tell EL1 to use AArch64 (not AArch32)
+    mov     x0, #(1 << 31)        // HCR_EL2.RW = 1 → AArch64 at EL1
     msr     hcr_el2, x0
 
-    // 2. Don't trap FP/SIMD instructions to EL2
-    msr     cptr_el2, xzr        // Clear all trap bits
+    // 2. Allow EL1 and EL0 to use FP/SIMD (don't trap)
+    msr     cptr_el2, xzr         // Clear all trap bits
 
-    // 3. Set the "return" state: DAIF masked, EL1h mode
-    mov     x0, #0x3C5           // SPSR: D=1 A=1 I=1 F=1, M[4:0]=00101 (EL1h)
+    // 3. Set the "return state" — what EL and flags to have after eret
+    mov     x0, #0x3C5            // SPSR = D|A|I|F masked, M[4:0]=00101 (EL1h)
     msr     spsr_el2, x0
 
-    // 4. Set the "return" address to our EL1 code
+    // 4. Set the "return address" — where to jump after eret
     adr     x0, _at_el1
     msr     elr_el2, x0
 
-    // 5. Drop to EL1
+    // 5. Execute the exception return
     eret
 ```
 
-The `SPSR_EL2` value `0x3C5` is carefully chosen:
-- Bits 9:6 (`DAIF`) = `0b1111` — all exceptions masked (we don't want interrupts during early boot)
-- Bits 4:0 (`M`) = `0b00101` — EL1h mode (using SP_EL1, not SP_EL0)
+**Let's unpack the magic number `0x3C5`:**
 
-After `ERET`, the processor is at EL1, running at `_at_el1`, with interrupts masked.
+```
+Bit field breakdown of SPSR_EL2 = 0x3C5 = 0b0000_0000_0000_0000_0000_0011_1100_0101
 
-**Step 4: EL1 configuration** (`boot.S:61-99`)
+  Bit 9 (D): 1 = Debug exceptions masked
+  Bit 8 (A): 1 = SError masked
+  Bit 7 (I): 1 = IRQ masked
+  Bit 6 (F): 1 = FIQ masked
+  Bits [4:0] (M): 00101 = EL1h (EL1 using SP_EL1)
 
-At EL1, the kernel:
-1. **Disables the MMU** by clearing `SCTLR_EL1` bits 0 (M), 2 (C), 12 (I) — we need the MMU off during early boot because page tables aren't set up yet
-2. **Enables FP/SIMD** by setting `CPACR_EL1.FPEN` = `0b11` — without this, any floating-point instruction would trap
-3. **Installs the exception vector table** at `VBAR_EL1` — pointing to `_vectors` in `vectors.S`
-4. **Sets up the kernel stack** — loads `__stack_top` from the linker script into SP
-5. **Zeroes the BSS section** — the C language requires uninitialised globals to be zero
+So: "return to EL1, using the EL1 stack pointer, with all interrupts masked."
+```
 
-**Step 5: Jump to C** (`boot.S:101`)
+The `eret` instruction atomically:
+1. Loads the PC from `ELR_EL2` (→ `_at_el1`)
+2. Loads the processor state from `SPSR_EL2` (→ EL1h, interrupts masked)
+3. We are now at EL1
+
+> **Why not just stay at EL2?** EL2 is designed for hypervisors. Page table formats differ at EL2 (stage-2 only), many system registers are unavailable, and EL2 cannot trap from EL0 (user processes) directly. Every OS kernel runs at EL1.
+
+#### Step 4: Configure System Registers at EL1 (lines 61-82)
+
+Now at EL1, we configure the hardware for kernel operation:
 
 ```asm
-    bl      kmain            // Call kernel's C entry point
-    b       _halt            // If kmain returns, halt
+_at_el1:
+    // Disable MMU and caches (we're running with physical addresses)
+    mrs     x0, sctlr_el1
+    bic     x0, x0, #(1 << 0)     // M=0: MMU off
+    bic     x0, x0, #(1 << 2)     // C=0: Data cache off
+    bic     x0, x0, #(1 << 12)    // I=0: Instruction cache off
+    msr     sctlr_el1, x0
+    isb                             // Instruction Sync Barrier
+
+    // Enable FP/SIMD for EL1 and EL0
+    mov     x0, #(3 << 20)         // CPACR_EL1.FPEN = 0b11
+    msr     cpacr_el1, x0
+    isb
+
+    // Install the exception vector table
+    ldr     x0, =_vectors
+    msr     vbar_el1, x0
+    isb
 ```
 
-From this point, the kernel runs in C. The `kmain()` function in `kernel/kern/main.c` orchestrates the remaining 17 phases of boot (covered in §2.4).
+**Three critical things happen here:**
 
-> **Key difference from macOS:** On real Apple hardware, the firmware (iBoot) does the EL2→EL1 transition and much of the hardware initialisation before handing off to XNU. Kiseki does it all in `boot.S` because QEMU provides no firmware.
+1. **MMU/caches off:** The MMU will be turned on later in Phase 4 (`vmm_init()`). Until then, every address is physical. The caches are off because we haven't set up the memory attribute tables yet (MAIR_EL1, TCR_EL1). Accessing cached memory without proper configuration would cause undefined behaviour.
 
-### 2.2 The Vector Table
+2. **FP/SIMD enabled:** Without `CPACR_EL1.FPEN = 0b11`, any floating-point or NEON instruction (including compiler-generated ones in user programs) would trap with `EC=0x7`. The kernel itself is compiled with `-mgeneral-regs-only` to avoid FP/SIMD, but user programs use it freely.
 
-Every ARM64 processor has a **vector table** — a block of code that the hardware jumps to when an exception occurs. Exceptions include syscalls (`SVC`), page faults, IRQs, and alignment faults. The table address is stored in `VBAR_EL1` (Vector Base Address Register).
+3. **Vector table installed:** The `_vectors` label (from `vectors.S`) is loaded into `VBAR_EL1`. From this point on, any exception (syscall, IRQ, page fault) will jump to the appropriate slot in this table.
 
-The ARM architecture mandates a specific layout: 16 entries, each 128 bytes apart, organised in 4 groups of 4:
+> **`isb` (Instruction Synchronisation Barrier):** System register writes take effect "sometime in the future" -- the CPU's pipeline might still be executing instructions fetched under the old settings. `isb` flushes the pipeline, guaranteeing that subsequent instructions see the new register values. After writing `VBAR_EL1`, we *must* `isb` before any exception could occur, or the CPU might jump to the *old* vector table.
 
-```mermaid
-graph TB
-    subgraph "ARM64 Vector Table Layout (2048 bytes, aligned)"
-        direction LR
-        subgraph "Current EL, SP_EL0 (unused)"
-            V0["Sync"] --- V1["IRQ"] --- V2["FIQ"] --- V3["SError"]
-        end
-        subgraph "Current EL, SP_ELx (kernel exceptions)"
-            V4["Sync → _handle_el1h_sync"] --- V5["IRQ → _handle_el1h_irq"] --- V6["FIQ"] --- V7["SError"]
-        end
-        subgraph "Lower EL, AArch64 (user exceptions)"
-            V8["Sync → _handle_el0_sync"] --- V9["IRQ → _handle_el0_irq"] --- V10["FIQ"] --- V11["SError"]
-        end
-        subgraph "Lower EL, AArch32 (unused)"
-            V12["Sync"] --- V13["IRQ"] --- V14["FIQ"] --- V15["SError"]
-        end
-    end
-```
-
-Kiseki's vector table is in `kernel/arch/arm64/vectors.S` (346 lines). Only 4 of the 16 entries are used:
-
-| Vector | When | Handler |
-|--------|------|---------|
-| EL1 Sync | Page fault or bug *while in kernel* | `trap_sync_el1()` — diagnose and panic |
-| EL1 IRQ | Hardware interrupt while in kernel | `trap_irq_el1()` — dispatch IRQ, maybe reschedule |
-| EL0 Sync | **Syscall** (`SVC #0x80`) or page fault from user | `trap_sync_el0()` — the main entry point for all user→kernel transitions |
-| EL0 IRQ | Hardware interrupt while in user mode | `trap_irq_el0()` — dispatch IRQ, check signals, maybe reschedule |
-
-All other vectors point to `_vec_unhandled`, which dumps registers and panics.
-
-**The Trap Frame**
-
-When an exception occurs, the hardware saves the faulting PC in `ELR_EL1` and the processor state in `SPSR_EL1`, but it does *not* save general-purpose registers. That's the kernel's job. Kiseki's `SAVE_REGS` macro builds a **trap frame** on the kernel stack — a 288-byte structure containing all 31 GPRs plus the special registers:
-
-```
-Offset   Register    Purpose
-──────   ────────    ────────────────────────────
-0x000    x0-x30      31 general-purpose registers (248 bytes)
-0x0F8    SP          Saved stack pointer (SP_EL0 if from user)
-0x100    ELR_EL1     Return address (the faulting/syscall PC)
-0x108    SPSR_EL1    Saved processor state (includes DAIF mask, EL, etc.)
-0x110    ESR_EL1     Exception Syndrome (what happened)
-0x118    FAR_EL1     Fault Address (for page faults)
-──────
-0x120    (total: 288 bytes = TF_SIZE)
-```
-
-> **XNU reference:** XNU's equivalent is `struct arm_saved_state64` in [`osfmk/arm64/proc_reg.h`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/proc_reg.h). The layout differs slightly but serves the same purpose.
-
-The `SAVE_REGS` macro takes an `el` parameter (0 or 1) to handle the SP differently:
-- From **EL0** (user): saves `SP_EL0` — the user's stack pointer
-- From **EL1** (kernel): computes the pre-exception SP as `current_sp + TF_SIZE`
-
-After `SAVE_REGS`, the macro sets `x0 = sp` (pointer to the trap frame) and falls through to a `bl` to the C handler. When the C handler returns, `RESTORE_REGS` does the reverse: restores all registers, writes `ELR_EL1` and `SPSR_EL1`, and executes `ERET` to return to the point of exception.
-
-**The Syscall Hot Path**
-
-When a user process executes `svc #0x80`, the processor:
-
-1. Saves PC → `ELR_EL1`, PSTATE → `SPSR_EL1`
-2. Masks IRQs in `DAIF`
-3. Switches to `SP_EL1` (kernel stack)
-4. Jumps to vector table entry 8 (Lower EL, Sync)
-
-The handler in `vectors.S` does:
+#### Step 5: Set Up the Boot Stack (lines 84-89)
 
 ```asm
-_handle_el0_sync:
-    SAVE_REGS 0          // Build trap frame, x0 = &tf
-    bl  trap_sync_el0    // C handler
-    RESTORE_REGS 0       // Restore registers, eret to user
+    ldr     x0, =__stack_top
+    mov     sp, x0
 ```
 
-Inside `trap_sync_el0()` (`kernel/kern/trap.c:169`), the first thing is to classify the exception by reading the **Exception Class** (EC) from `ESR_EL1` bits 31:26:
+`__stack_top` is defined by the linker script (`linker-qemu.ld`). The kernel reserves 128 KB of stack space (32 KB × 4 cores), laid out as:
 
-| EC | Meaning | Kiseki Action |
-|----|---------|---------------|
-| `0x15` | SVC from AArch64 | **Syscall** → enable IRQs, call `syscall_handler(tf)` |
-| `0x24` | Data Abort from EL0 | **Page fault** → demand-page, COW, or SIGSEGV |
-| `0x20` | Instruction Abort from EL0 | **Code fault** → demand-page executable pages |
-| `0x26` | SP Alignment | Kill process |
-| `0x3C` | BRK (breakpoint) | Kill process |
+```
+  __stack_top  ───────────────── ◄─── Core 0 SP starts here
+                   32 KB
+  __stack_top - 0x8000  ──────── ◄─── Core 1 SP
+                   32 KB
+  __stack_top - 0x10000 ──────── ◄─── Core 2 SP
+                   32 KB
+  __stack_top - 0x18000 ──────── ◄─── Core 3 SP
+                   32 KB
+  __stack_base ──────────────────
+```
 
-The syscall path is critical for performance — it is the gateway for every `read()`, `write()`, `mmap()`, `mach_msg()`, and all other kernel services. The key insight is that Kiseki **enables IRQs** (`msr daifclr, #0x2`) before calling `syscall_handler()`. This allows the timer to fire during long syscalls (like blocking reads), which is essential for preemptive multitasking.
+The stack grows **downward** on ARM64 (as on x86). Core 0 gets the highest address; each subsequent core gets 32 KB lower. This boot stack is temporary — after `kmain()` creates the bootstrap thread (Phase 17), this stack is abandoned forever.
 
-> **XNU reference:** XNU does the same in [`osfmk/arm64/sleh.c:sleh_synchronous()`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/sleh.c) — it calls `ml_set_interrupts_enabled(TRUE)` before dispatching the syscall.
+> **32 KB vs the old 16 KB:** The kernel stack was originally 16 KB, but deep call chains during the 17-phase bootstrap (particularly ext4 mount → VFS → buffer cache) would overflow it. We doubled it to 32 KB in a prior session.
 
-**Special Return Paths**
+#### Step 6: Clear BSS (lines 91-99)
 
-Three assembly functions in `vectors.S` provide special ways to "return" to user space for newly-created threads:
+```asm
+    ldr     x0, =__bss_start
+    ldr     x1, =__bss_end
+_bss_clear:
+    cmp     x0, x1
+    b.ge    _bss_done
+    str     xzr, [x0], #8          // Store zero, advance pointer by 8 bytes
+    b       _bss_clear
+```
 
-1. **`fork_child_return`** (line 167): Used when a forked child is first scheduled. Switches `TTBR0_EL1` to the child's page table (using the `vm_space` pointer in `x19`), flushes the TLB, validates the trap frame, and does `RESTORE_REGS 0` to jump to user mode at the parent's saved PC (with `x0=0`, the fork return value for the child).
+**What is BSS?** The `.bss` section contains all global and static variables that are declared without an initialiser (e.g., `static int counter;`). The C standard guarantees they start as zero. The ELF loader doesn't store zeros in the file (that would waste space), so the boot code must zero this memory region before calling any C code.
 
-2. **`init_thread_return`** (line 265): Same as `fork_child_return` but simpler — used only for the first process (PID 1, init).
+`xzr` is the ARM64 "zero register" — a hardware register that always reads as zero. The loop writes 8 bytes of zeros at a time until `__bss_start` through `__bss_end` is cleared.
 
-3. **`user_thread_return`** (line 306): For `pthread_create`-spawned threads. Additionally sets `TPIDR_EL0` (the user Thread-Local Storage base register) from `x20` before entering user mode.
+#### Step 7: Call kmain (lines 105-109)
 
-All three share the pattern: switch address space → flush TLB → enable IRQs → `RESTORE_REGS 0` → `ERET`.
+```asm
+    mov     x0, #0                 // DTB pointer (TODO: preserve from entry)
+    bl      kmain                  // Branch with Link → C entry point
+    b       _halt                  // If kmain returns (it shouldn't), halt
+```
 
-### 2.3 Context Switching
+We pass 0 as the DTB (Device Tree Blob) address because boot.S clobbered `x0` during core ID detection. QEMU passes the DTB address in `x0` at entry, but we haven't implemented DTB parsing yet — device addresses are hardcoded to match QEMU's `virt` machine layout.
 
-When the scheduler decides to run a different thread, it must save the current thread's CPU state and restore the new thread's state. This is the **context switch**, implemented in `kernel/arch/arm64/context_switch.S` (142 lines).
+`bl` (Branch with Link) saves the return address in `x30` (LR). `kmain()` never returns — it creates a bootstrap thread and calls `load_context()` to abandon the boot stack (see §2.5). But if it somehow did return, we'd fall through to `_halt` (an infinite `wfi` loop).
 
-The key insight is that we only need to save **callee-saved registers** (x19–x30, SP). The C calling convention guarantees that the caller has already saved any caller-saved registers (x0–x18) before calling into the scheduler. This makes the context switch fast — only 13 registers to save/restore instead of 31.
+#### The Complete Boot Flow
+
+```
+Power On (QEMU)
+     │
+     ▼
+  _start (boot.S:22)                    All 4 cores start here
+     │
+     ├── Core 1,2,3 ──► _secondary_spin (wfe loop)
+     │
+     ▼ Core 0 only
+  Check CurrentEL
+     │
+     ├── EL2 ──► _from_el2
+     │              │
+     │              ▼
+     │           Configure HCR_EL2, SPSR_EL2, ELR_EL2
+     │              │
+     │              ▼
+     │           eret ──────────────────────┐
+     │                                      │
+     ├── EL1 ──────────────────────────────►│
+     │                                      │
+     ▼                                      ▼
+  _at_el1 (boot.S:61)                Now at EL1
+     │
+     ├── Disable MMU + caches (SCTLR_EL1)
+     ├── Enable FP/SIMD (CPACR_EL1)
+     ├── Install vector table (VBAR_EL1)
+     ├── Set up boot stack (SP = __stack_top)
+     ├── Clear BSS (__bss_start → __bss_end)
+     │
+     ▼
+  kmain() (main.c:48)                17-phase bootstrap begins
+```
+
+### 2.3 The Vector Table (vectors.S)
+
+**File:** `kernel/arch/arm64/vectors.S` (403 lines)
+
+The vector table is the kernel's switchboard — every syscall, every interrupt, and every page fault arrives here. This file contains:
+
+1. The `SAVE_REGS` / `RESTORE_REGS` macros that build and tear down **trap frames**
+2. The 16-entry vector table itself
+3. Four out-of-line exception handlers
+4. Three special return paths for newly created threads
+
+#### The Trap Frame
+
+When the CPU takes an exception, the kernel must save *all* of the user's register state so it can be restored later. This saved state is called a **trap frame** and it lives on the kernel stack.
+
+**File:** `kernel/include/machine/trap.h` (87 lines)
 
 ```c
-// The context structure (from thread.h)
-struct cpu_context {
-    uint64_t x19, x20, x21, x22, x23, x24;
-    uint64_t x25, x26, x27, x28;
-    uint64_t x29;  // Frame pointer
-    uint64_t x30;  // Link register (return address)
-    uint64_t sp;   // Stack pointer
+struct trap_frame {
+    uint64_t regs[31];  // x0-x30 (31 general-purpose registers)
+    uint64_t sp;        // saved Stack Pointer
+    uint64_t elr;       // Exception Link Register (return PC)
+    uint64_t spsr;      // Saved Program Status Register
+    uint64_t esr;       // Exception Syndrome Register
+    uint64_t far;       // Fault Address Register
+    // FP/NEON state (saved only for EL0 traps):
+    uint64_t fpcr;      // Floating-Point Control Register
+    uint64_t fpsr;      // Floating-Point Status Register
+    uint64_t neon[64];  // q0-q31 (each 128-bit = 2 × uint64_t)
 };
 ```
 
-The `context_switch(old_ctx, new_ctx)` function:
+The total size is **816 bytes** (`TF_SIZE`). Here's the layout visually:
+
+```
+                Trap Frame (816 bytes, on kernel stack)
+Offset    Field          Size     Notes
+──────────────────────────────────────────────────────────
+  0       x0-x30         248B     31 × 8 bytes (GPRs)
+248       SP              8B      SP_EL0 for user traps
+256       ELR             8B      Return address (PC to resume)
+264       SPSR            8B      Saved processor state
+272       ESR             8B      What caused the exception
+280       FAR             8B      Fault address (for aborts)
+288       FPCR            8B      FP control ─┐
+296       FPSR            8B      FP status   ├─ Only saved
+304       q0-q31        512B      NEON regs   ┘  for EL0 traps
+──────────────────────────────────────────────────────────
+816       Total                   = TF_SIZE
+```
+
+#### Why Two Sizes? EL0 vs EL1 Traps
+
+When the kernel itself takes an exception (e.g., a page fault during `kmalloc`), it does NOT save the FP/NEON registers. Why? The kernel is compiled with `-mgeneral-regs-only`, so the compiler never generates FP/NEON instructions. The 816-byte frame is allocated (to keep the stack offsets consistent), but only the first 288 bytes are written.
+
+When *user code* traps into the kernel, we must save the full 816 bytes — user programs use NEON freely (the compiler generates SIMD instructions for memcpy, floating-point arithmetic, etc.), and if the kernel context-switches to another process before returning, that other process's NEON state would overwrite the registers.
+
+#### SAVE_REGS: Building the Trap Frame
 
 ```asm
+.macro SAVE_REGS el                   // el=0 for user, el=1 for kernel
+    sub     sp, sp, #TF_SIZE          // Allocate 816 bytes on kernel stack
+    stp     x0, x1, [sp, #(0 * 8)]   // Save x0, x1 at offset 0
+    stp     x2, x3, [sp, #(2 * 8)]   // Save x2, x3 at offset 16
+    ...                                // (saves all 31 GPRs)
+    str     x30, [sp, #(30 * 8)]     // Save x30 (Link Register)
+
+    .if \el == 0
+        mrs     x0, sp_el0            // User trap: save USER stack pointer
+    .else
+        add     x0, sp, #TF_SIZE      // Kernel trap: save pre-exception SP
+    .endif
+    str     x0, [sp, #TF_SP]
+
+    mrs     x0, elr_el1               // Save return address
+    str     x0, [sp, #TF_ELR]
+    mrs     x0, spsr_el1              // Save processor state
+    str     x0, [sp, #TF_SPSR]
+    mrs     x0, esr_el1               // Save exception syndrome
+    str     x0, [sp, #TF_ESR]
+    mrs     x0, far_el1               // Save fault address
+    str     x0, [sp, #TF_FAR]
+
+    .if \el == 0
+        mrs     x0, fpcr              // Save FP control register
+        str     x0, [sp, #TF_FPCR]
+        mrs     x0, fpsr              // Save FP status register
+        str     x0, [sp, #TF_FPSR]
+        stp     q0,  q1,  [sp, #(TF_NEON_BASE + 0 * 16)]  // Save q0-q31
+        stp     q2,  q3,  [sp, #(TF_NEON_BASE + 2 * 16)]  // (128-bit pairs)
+        ...
+        stp     q30, q31, [sp, #(TF_NEON_BASE + 30 * 16)]
+    .endif
+
+    mov     x0, sp                    // x0 = pointer to trap frame
+.endm
+```
+
+After `SAVE_REGS`, `x0` points to the trap frame. This pointer is passed as the first argument to the C handler (ARM64 calling convention: first argument in `x0`).
+
+> **`stp` (Store Pair):** ARM64 can store two 64-bit registers (or two 128-bit NEON registers) in a single instruction. `stp x0, x1, [sp, #0]` writes x0 at SP+0 and x1 at SP+8. This is why ARM64 trap frame save/restore is so efficient — 31 GPRs need only 16 `stp` + 1 `str` instructions.
+
+> **`sp_el0` vs `sp`:** ARM64 has *two* stack pointers at EL1: `SP_EL1` (the kernel stack, selected by the `h` suffix in EL1h) and `SP_EL0` (the user stack, saved in a separate register). When we trap from EL0, the CPU switches to `SP_EL1` automatically, but the user's stack pointer is preserved in `SP_EL0` — we just need to save it.
+
+#### RESTORE_REGS: Tearing Down the Trap Frame
+
+`RESTORE_REGS` does the exact reverse: restores system registers, optionally restores FP/NEON, restores all GPRs, deallocates the frame, and executes `eret`.
+
+```asm
+.macro RESTORE_REGS el
+    ldr     x0, [sp, #TF_ELR]
+    msr     elr_el1, x0              // Restore return address
+    ldr     x0, [sp, #TF_SPSR]
+    msr     spsr_el1, x0             // Restore processor state
+
+    .if \el == 0
+        ldr     x0, [sp, #TF_SP]
+        msr     sp_el0, x0           // Restore user stack pointer
+        // Restore FPCR, FPSR, q0-q31...
+    .endif
+
+    ldp     x0, x1, [sp, #(0 * 8)]  // Restore x0, x1
+    ...
+    ldr     x30, [sp, #(30 * 8)]    // Restore x30
+
+    add     sp, sp, #TF_SIZE         // Deallocate trap frame
+    isb                               // Ensure all writes complete
+    eret                              // Return to EL0 (or EL1)
+.endm
+```
+
+The `eret` at the end atomically restores the PC (from `ELR_EL1`) and the processor state (from `SPSR_EL1`), dropping back to whichever exception level the trap came from.
+
+#### The Vector Table Itself (lines 153-180)
+
+```asm
+.balign 2048                          // Must be 2048-byte aligned
+.global _vectors
+_vectors:
+
+// Row 0: Current EL with SP_EL0 (unused — Kiseki always uses SP_ELx)
+.balign 128; b _vec_unhandled         // +0x000  Synchronous
+.balign 128; b _vec_unhandled         // +0x080  IRQ
+.balign 128; b _vec_unhandled         // +0x100  FIQ
+.balign 128; b _vec_unhandled         // +0x180  SError
+
+// Row 1: Current EL with SP_ELx (kernel-mode exceptions)
+.balign 128; b _handle_el1h_sync      // +0x200  Kernel sync (page fault in kernel)
+.balign 128; b _handle_el1h_irq       // +0x280  Kernel IRQ (timer tick during syscall)
+.balign 128; b _vec_unhandled         // +0x300  FIQ (unused)
+.balign 128; b _vec_unhandled         // +0x380  SError (unused)
+
+// Row 2: Lower EL, AArch64 (user-mode exceptions) ★ HOT PATH
+.balign 128; b _handle_el0_sync       // +0x400  User sync (syscalls + faults)
+.balign 128; b _handle_el0_irq        // +0x480  User IRQ (timer tick in user code)
+.balign 128; b _vec_unhandled         // +0x500  FIQ (unused)
+.balign 128; b _vec_unhandled         // +0x580  SError (unused)
+
+// Row 3: Lower EL, AArch32 (not supported)
+.balign 128; b _vec_unhandled         // +0x600 through +0x780
+...
+```
+
+Only **4 of the 16 entries** are actually used: EL1 sync, EL1 IRQ, EL0 sync, and EL0 IRQ. The rest branch to `_vec_unhandled`, which reads the exception registers, calls `exception_handler_early()` (defined in `main.c:434`), and halts.
+
+> **`.balign 2048`:** The ARM64 architecture requires the vector table base to be 2048-byte aligned. Each entry must be 128-byte aligned (`.balign 128`). The assembler inserts padding NOPs to satisfy these constraints.
+
+#### The Out-of-Line Handlers (lines 186-204)
+
+Each handler follows the same pattern: save → call C → restore:
+
+```asm
+_handle_el0_sync:                     // User-mode synchronous exception
+    SAVE_REGS 0                       // Build full 816-byte trap frame
+    bl      trap_sync_el0             // Call C handler (trap.c)
+    RESTORE_REGS 0                    // Restore and eret to EL0
+
+_handle_el0_irq:                      // User-mode IRQ
+    SAVE_REGS 0
+    bl      trap_irq_el0
+    RESTORE_REGS 0
+
+_handle_el1h_sync:                    // Kernel-mode synchronous exception
+    SAVE_REGS 1                       // Build partial trap frame (no NEON)
+    bl      trap_sync_el1
+    RESTORE_REGS 1
+
+_handle_el1h_irq:                     // Kernel-mode IRQ
+    SAVE_REGS 1
+    bl      trap_irq_el1
+    RESTORE_REGS 1
+```
+
+The C handlers in `trap.c` decode `ESR_EL1` to determine the exception type and dispatch accordingly:
+
+```
+trap_sync_el0(tf):
+  EC = tf->esr >> 26
+  switch(EC):
+    case 0x15 (SVC):
+      if tf->regs[16] >= 0  → bsd_syscall(tf)    // 102 BSD syscalls
+      else                   → mach_trap(tf)       // 12 Mach traps
+    case 0x20 (Instruction Abort):
+    case 0x24 (Data Abort):
+      → handle_page_fault(tf)
+    case 0x3C (BRK):
+      → deliver SIGTRAP
+    default:
+      → kill process with SIGKILL
+```
+
+#### Three Special Return Paths
+
+When the kernel creates a new user-mode thread (via `fork()`, `execve()`, or `pthread_create()`), it can't just "return" to user mode — there's no trap frame on the stack from a previous trap. Instead, the scheduler dispatches the new thread via `context_switch()`, which restores `x30` (the link register) to one of three special assembly labels:
+
+| Return path | Created by | Purpose |
+|---|---|---|
+| `fork_child_return` (line 225) | `sys_fork_impl()` | Return to user mode in a forked child process |
+| `init_thread_return` (line 323) | `kernel_init_process()` | Return to user mode for PID 1 (init) |
+| `user_thread_return` (line 364) | `thread_create_user()` | Return to user mode for pthread threads |
+
+All three follow the same pattern:
+
+1. **Switch address space**: Load the process's page table root into `TTBR0_EL1` (the register that controls EL0 address translation). Flush TLB and instruction caches.
+2. **Enable interrupts**: `msr daifclr, #0x2` (unmask IRQs)
+3. **Restore and eret**: `RESTORE_REGS 0` — restores the synthetic trap frame that was placed on the kernel stack by the creating code, then `eret` drops to EL0.
+
+**`fork_child_return`** is the most complex — it includes extra safety checks (verifying that `ELR` is not a kernel address, which would indicate a corrupt trap frame) and workarounds for cache-coherency timing issues on multi-core systems:
+
+```asm
+fork_child_return:
+    dsb     sy                       // Ensure page table writes visible
+    // Build TTBR0 = pgd | (asid << 48)
+    ldr     x0, [x19, #0]           // x19 = pointer to child's vm_space
+    ldr     x1, [x19, #8]           // (set by sys_fork_impl via context.x19)
+    orr     x0, x0, x1, lsl #48
+    msr     ttbr0_el1, x0           // Switch to child's address space
+    isb
+    tlbi    vmalle1is               // Flush TLB (all cores)
+    dsb     ish
+    ic      ialluis                 // Flush instruction cache (all cores)
+    dsb     ish
+    isb
+    ...
+    msr     daifclr, #0x2           // Enable interrupts
+    RESTORE_REGS 0                  // Restore trap frame and eret to EL0
+```
+
+> **Why `x19`?** The context switch only saves callee-saved registers (`x19-x30`). `fork()` stores the child's `vm_space` pointer in `context.x19` so it survives the context switch and is available here.
+
+> **`TTBR0_EL1`:** Translation Table Base Register 0. This register points to the root of the page table hierarchy for EL0 (user space). Each process has its own page table, so switching `TTBR0_EL1` switches the entire user address space. The ASID (Address Space ID) in bits [63:48] allows the TLB to cache entries from multiple address spaces simultaneously without full flushes (though Kiseki does a full flush anyway for safety).
+
+> **XNU equivalent:** XNU's `thread_return` in `osfmk/arm64/locore.s` performs the same function — it's the assembly stub that new threads land on when first dispatched by the scheduler.
+
+### 2.4 Context Switching (context_switch.S)
+
+**File:** `kernel/arch/arm64/context_switch.S` (133 lines)
+
+When the scheduler decides to switch from one thread to another, it calls `context_switch(old_ctx, new_ctx)`. This is the most performance-critical code in the kernel — it runs on every 10ms timer tick (100 Hz), on every blocking syscall, and on every `yield()`.
+
+#### What Gets Saved?
+
+A context switch is fundamentally different from a trap. During a trap (syscall, IRQ), the kernel saves *all* registers because it needs to resume user code exactly where it left off. During a context switch, the kernel is switching between two *kernel* call stacks — the switch happens deep inside a C function call chain:
+
+```
+Thread A (running)                Thread B (sleeping)
+─────────────────                 ─────────────────
+  sched_switch()                    sched_switch()
+    context_switch(&A.ctx, &B.ctx)    ← was sleeping here
+      saves A's regs                  restores B's regs
+      ─────────── switch! ──────────►
+                                      returns from context_switch()
+                                    returns from sched_switch()
+                                    continues running...
+```
+
+Because both sides of the switch are C functions that follow the **AAPCS64** (ARM Architecture Procedure Call Standard), we only need to save the **callee-saved registers** — the ones a C function promises to preserve:
+
+```
+Callee-saved registers (must be preserved across function calls):
+  x19-x28    General-purpose
+  x29 (FP)   Frame pointer
+  x30 (LR)   Link register (return address)
+  SP          Stack pointer
+  d8-d15     Floating-point / NEON (lower 64 bits of v8-v15)
+
+Caller-saved registers (NOT saved — callers already save them):
+  x0-x18     Temporaries, arguments, platform register
+  d0-d7      FP arguments / temporaries
+  d16-d31    FP temporaries
+```
+
+**Why this works:** The C compiler already ensures that any register *not* in the callee-saved set is either not live across the call to `context_switch()` or has been saved by the caller's own code. So we only need to save 14 registers instead of 31.
+
+#### The cpu_context Structure
+
+```c
+// Implicit layout (offsets match context_switch.S):
+struct cpu_context {
+    uint64_t x19;       // offset  0
+    uint64_t x20;       // offset  8
+    uint64_t x21;       // offset 16
+    uint64_t x22;       // offset 24
+    uint64_t x23;       // offset 32
+    uint64_t x24;       // offset 40
+    uint64_t x25;       // offset 48
+    uint64_t x26;       // offset 56
+    uint64_t x27;       // offset 64
+    uint64_t x28;       // offset 72
+    uint64_t x29;       // offset 80  (frame pointer)
+    uint64_t x30;       // offset 88  (link register / return address)
+    uint64_t sp;        // offset 96
+    uint64_t d8;        // offset 104
+    uint64_t d9;        // offset 112
+    uint64_t d10;       // offset 120
+    uint64_t d11;       // offset 128
+    uint64_t d12;       // offset 136
+    uint64_t d13;       // offset 144
+    uint64_t d14;       // offset 152
+    uint64_t d15;       // offset 160
+};                      // Total: 168 bytes
+```
+
+Compare with the 816-byte trap frame — the context switch structure is **5× smaller** because it only stores callee-saved state.
+
+#### context_switch() — The Two-Way Switch
+
+```asm
+// x0 = &old_thread->context, x1 = &new_thread->context
 context_switch:
-    // Save old thread's callee-saved registers
-    stp     x19, x20, [x0, #0]     // old_ctx->x19, x20
-    stp     x21, x22, [x0, #16]    // ...
+    // ---- Save old thread's state ----
+    stp     x19, x20, [x0, #0]       // Save x19,x20 to old context
+    stp     x21, x22, [x0, #16]
     stp     x23, x24, [x0, #32]
     stp     x25, x26, [x0, #48]
     stp     x27, x28, [x0, #64]
-    stp     x29, x30, [x0, #80]    // FP, LR
+    stp     x29, x30, [x0, #80]      // Save FP and LR
     mov     x2, sp
-    str     x2, [x0, #96]          // SP
+    str     x2, [x0, #96]            // Save SP
+    stp     d8,  d9,  [x0, #104]     // Save callee-saved NEON
+    stp     d10, d11, [x0, #120]
+    stp     d12, d13, [x0, #136]
+    stp     d14, d15, [x0, #152]
 
-    // Restore new thread's callee-saved registers
-    ldp     x19, x20, [x1, #0]
+    // ---- Restore new thread's state ----
+    ldp     x19, x20, [x1, #0]       // Restore x19,x20 from new context
     ldp     x21, x22, [x1, #16]
     ldp     x23, x24, [x1, #32]
     ldp     x25, x26, [x1, #48]
     ldp     x27, x28, [x1, #64]
-    ldp     x29, x30, [x1, #80]
+    ldp     x29, x30, [x1, #80]      // Restore FP and LR
     ldr     x2, [x1, #96]
-    mov     sp, x2
+    mov     sp, x2                    // Restore SP ← THIS is the big moment
+    ldp     d8,  d9,  [x1, #104]
+    ldp     d10, d11, [x1, #120]
+    ldp     d12, d13, [x1, #136]
+    ldp     d14, d15, [x1, #152]
 
-    ret     // Jump to new thread's x30 (LR)
+    ret                               // Return via restored x30 (LR)
 ```
 
-The `ret` instruction jumps to whatever address is in `x30`. For a thread that was previously preempted while running, `x30` points back into the scheduler code (specifically, the instruction after the `bl context_switch` call). The new thread resumes execution as if `context_switch()` had just returned — it doesn't even know it was asleep.
+**The "magic moment"** is `mov sp, x2` — after that instruction, we are on the new thread's stack. The `ret` instruction then jumps to the new thread's saved `x30` (link register), which is the address *inside* `sched_switch()` right after the call to `context_switch()`. The new thread wakes up as if it just returned from `context_switch()` normally.
 
-For a **newly-created thread**, `x30` is set to `thread_trampoline` (a function that calls the thread's entry point), so the first `ret` jumps into the trampoline.
-
-Kiseki also includes debug validation: after restoring the new context, it checks that `x30` points into kernel RAM (`0x40000000`–`0x80000000`). If it doesn't, something has corrupted the saved context — the kernel panics with a detailed diagnostic dump rather than executing random code.
-
-> **XNU reference:** XNU's context switch is `Switch_context()` in [`osfmk/arm64/pcb.c`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/pcb.c) and the assembly in [`osfmk/arm64/locore.s`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/locore.s). It also saves only callee-saved registers.
-
-There is also `load_context(new_ctx)` — a one-way version that restores a context **without saving the old one**. This is used exactly twice:
-1. At the end of `kmain()`, to abandon the boot stack and jump into the bootstrap thread
-2. On each secondary CPU, to abandon that core's boot stack and jump into its idle thread
-
-### 2.4 The 17-Phase Kernel Bootstrap
-
-After `boot.S` jumps to `kmain()` (`kernel/kern/main.c:48`), the kernel initialises its subsystems in a strict order. Each phase depends on the ones before it — you cannot set up virtual memory without the physical allocator, cannot create threads without the scheduler, cannot mount the root filesystem without the block device driver, and so on.
-
-```mermaid
-flowchart TD
-    P1["Phase 1: uart_init()<br/>Early serial console"] --> P2
-    P2["Phase 2: gic_init() + gic_init_percpu()<br/>Interrupt controller"] --> P3
-    P3["Phase 3: pmm_init()<br/>Physical memory (buddy allocator)"] --> P4
-    P4["Phase 4: vmm_init()<br/>Virtual memory + MMU enable"] --> P5
-    P5["Phase 5: thread_init() + sched_init()<br/>Threading + MLFQ scheduler"] --> P6
-    P6["Phase 6: timer_init(100)<br/>ARM Generic Timer at 100 Hz"] --> P7
-    P7["Phase 7: smp_init()<br/>Wake secondary CPU cores"] --> P8
-    P8["Phase 8: blkdev_init()<br/>Block device subsystem"] --> P9
-    P9["Phase 9: buf_init()<br/>Buffer cache (256 × 4 KB)"] --> P10
-    P10["Phase 10: vfs_init() + tty_init() + pty_init()<br/>VFS layer + terminals"] --> P11
-    P11["Phase 11: ext4_fs_init()<br/>Register ext4 driver"] --> P12
-    P12["Phase 12: Mount root '/' + devfs '/dev'<br/>+ buf_start_sync_daemon()"] --> P13
-    P13["Phase 13: ipc_init()<br/>Mach IPC subsystem"] --> P14
-    P14["Phase 14: iokit_init()<br/>IOKit + master port"] --> P15
-    P15["Phase 15: commpage_init() + proc_init()<br/>CommPage + process table"] --> P16
-    P16["Phase 16: net_init() + GPU + HID<br/>TCP/IP stack + display + input"] --> P17
-    P17["Phase 17: Create bootstrap thread<br/>→ load_context() → abandon boot stack"]
-    P17 --> INIT["kernel_bootstrap_thread_func()<br/>→ kernel_init_process()<br/>→ creates PID 1<br/>→ thread_exit()"]
+```
+Thread A's view:                   Thread B's view:
+  calls context_switch()           (was suspended inside context_switch)
+  A's state saved                  B's state restored
+  ──── SP switches! ────           B resumes
+  (A is now suspended)             ret → back to sched_switch()
+                                   continues running
 ```
 
-Here is what each phase does and why it must happen in this order:
+> **No TTBR0 switch here:** The context switch does NOT change the user address space. That happens in the scheduler (`sched_switch()` in `sched.c`) before calling `context_switch()`, or in the special return paths (`fork_child_return`, etc.). This keeps the assembly fast and simple.
 
-| Phase | Function | What It Does | Why This Order |
-|-------|----------|-------------|----------------|
-| 1 | `uart_init()` | Configures PL011 UART for `kprintf()` output | Everything else uses `kprintf()` for debug output |
-| 2 | `gic_init()` | Configures GICv2 distributor: disables all IRQs, sets priorities, routes SPIs to core 0 | IRQ infrastructure needed before enabling any device |
-| 3 | `pmm_init(__heap_start, RAM_END)` | Initialises buddy allocator over all RAM after kernel image | VMM needs to allocate physical pages for page tables |
-| 4 | `vmm_init()` | Identity-maps all RAM, configures MAIR/TCR, enables MMU + caches | Everything after this runs with caches and virtual memory |
-| 5 | `thread_init()` + `sched_init()` | Zeroes thread pool (256 slots), creates CPU 0's idle thread, initialises MLFQ run queues | Timer needs scheduler to be initialised |
-| 6 | `timer_init(100)` | Programmes ARM Generic Timer for 100 Hz ticks (10 ms quantum) | IRQs still masked — timer won't fire until Phase 17 |
-| 7 | `smp_init()` | Wakes secondary cores via PSCI | Each core runs `secondary_main()`: enable MMU → init GIC → init scheduler → `load_context(idle_thread)` |
-| 8 | `blkdev_init()` | Probes VirtIO block device | Filesystem mount needs a block device |
-| 9 | `buf_init()` | Allocates 256 × 4 KB buffer cache with LRU eviction and hash table | Ext4 reads go through buffer cache |
-| 10 | `vfs_init()` + `tty_init()` + `pty_init()` | Initialises VFS tables (512 files, 1024 vnodes, 16 mounts), TTY subsystem, 16 PTY pairs | Must exist before mounting filesystems |
-| 11 | `ext4_fs_init()` | Registers "ext4" filesystem type with VFS | Must happen before `vfs_mount()` |
-| 12 | `vfs_mount("ext4", "/", ...)` | Reads ext4 superblock, validates magic `0xEF53`, reads group descriptor table, creates root vnode (inode 2). Then mounts devfs at `/dev` and starts the buffer sync daemon | The root filesystem is now accessible |
-| 13 | `ipc_init()` | Initialises Mach IPC: port pool (512 ports), kernel IPC space, vm_map_copy pool (256 entries) | IOKit uses Mach ports for kobject dispatch |
-| 14 | `iokit_init()` | Initialises I/O Registry, creates "IOResources" root, allocates master port (`IKOT_MASTER_DEVICE`), registers in bootstrap as `uk.co.avltree9798.iokit` | Drivers need IOKit to register services |
-| 15 | `commpage_init()` + `proc_init()` | Maps the CommPage (a read-only shared page at `0xFFFFFC000` with signal trampoline code), zeroes process table (256 slots), creates PID 0 (kernel process) | Fork/exec need process table |
-| 16 | `net_init()` + GPU + HID | TCP/IP stack (including DHCP), VirtIO GPU → IOFramebuffer, VirtIO input → IOHIDSystem, framebuffer console | WindowServer needs display and input |
-| 17 | Bootstrap thread + `load_context()` | Creates a kernel thread, sets it as current on CPU 0, does a **one-way** `load_context()` to abandon the boot stack forever | See explanation below |
+#### load_context() — The One-Way Switch
 
-**Phase 17: The Boot Stack Abandonment (XNU Pattern)**
-
-This is the most subtle part of the boot sequence. The problem: `kmain()` has been running on the **boot stack** — a static 32 KB region allocated by the linker script. But the scheduler expects every thread to have a dynamically-allocated kernel stack. If we simply enable IRQs on the boot stack and start scheduling, the idle thread would share the boot stack with `kmain()`'s frame — a stack corruption disaster.
-
-The solution, copied from XNU's `kernel_bootstrap()` in [`osfmk/kern/startup.c`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/startup.c):
-
-1. Create a new kernel thread (`kernel_bootstrap`) with its own PMM-allocated stack
-2. Set this thread as `cpu_data->current_thread` (the scheduler's notion of "current")
-3. Call `load_context(&bootstrap_thread->context)` — this restores the bootstrap thread's saved registers and `ret`s into `thread_trampoline`, which calls `kernel_bootstrap_thread_func()`
-4. The boot stack is **permanently abandoned** — `kmain()`'s stack frame will never be returned to
-
-Inside `kernel_bootstrap_thread_func()`:
-1. `kernel_init_process()` — creates PID 1, loads `/sbin/init` as a Mach-O binary, builds the user stack, enqueues init's thread on the scheduler run queue
-2. `thread_exit()` — the bootstrap thread terminates itself and calls `sched_switch()`, which picks the next runnable thread (PID 1's init thread) and context-switches to it
-
-From this point, the kernel is fully operational. The scheduler runs, IRQs fire, and PID 1 is the first user process.
-
-### 2.5 Secondary Core Bring-Up (SMP)
-
-Phase 7 wakes the secondary CPU cores via **PSCI** (Power State Coordination Interface), the ARM standard for SMP management. The primary core writes the entry point address to the PSCI `CPU_ON` call for each secondary core.
-
-Each secondary core runs `secondary_main(core_id)` (`kernel/kern/main.c:390`):
-
-```mermaid
-sequenceDiagram
-    participant Core0 as CPU 0 (Boot)
-    participant Core1 as CPU 1 (Secondary)
-
-    Core0->>Core0: smp_init(): PSCI CPU_ON for cores 1,2,3
-    Core1->>Core1: _secondary_entry (boot.S:114)
-    Core1->>Core1: EL2→EL1 drop (if needed)
-    Core1->>Core1: Enable FP/SIMD
-    Core1->>Core1: Set per-core stack (SP = __stack_top - core_id * 0x8000)
-    Core1->>Core1: Load VBAR_EL1 = _vectors
-    Core1->>Core1: bl secondary_main
-    Core1->>Core1: vmm_init_percpu() — enable MMU + caches
-    Note over Core1: CRITICAL: must happen before<br/>touching any shared data/spinlocks
-    Core1->>Core1: gic_init_percpu() — enable CPU interface
-    Core1->>Core1: sched_init_percpu() — create idle thread, init run queues
-    Core1->>Core1: timer_init_percpu() — start 100 Hz timer
-    Core1->>Core1: load_context(idle_thread) — abandon boot stack
-    Note over Core1: Now running idle thread,<br/>waiting for work
+```asm
+// x0 = &new_thread->context
+load_context:
+    ldp     x19, x20, [x0, #0]
+    ...                               // Same restore sequence as above
+    ldp     d14, d15, [x0, #152]
+    ret                               // Jump to restored x30
 ```
 
-The critical ordering constraint is that `vmm_init_percpu()` must happen **before any spinlock acquisition**. Spinlocks use `LDAXR`/`STXR` (exclusive load/store), which require the data cache to be enabled. If a secondary core tries to acquire a spinlock before enabling its MMU and caches, the exclusive monitor will not work correctly, leading to either deadlock or double-acquisition.
+`load_context()` is identical to the "restore" half of `context_switch()`, but it **does not save** the old thread's state. The old stack is abandoned forever.
 
-Each secondary core gets its own 32 KB stack at `__stack_top - (core_id * 0x8000)`, and its own idle thread. The per-CPU data is stored in `TPIDR_EL1`, a system register that the hardware guarantees is private to each core — it serves as the "current CPU" pointer throughout the kernel.
+This is used in exactly two places:
 
-> **XNU reference:** XNU's secondary core startup is `arm_init_cpu()` in [`osfmk/arm64/start.s`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/start.s) → `cpu_init()` → `slave_main()` in [`osfmk/arm/cpu.c`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm/cpu.c). The same pattern applies: MMU first, then scheduler, then `load_context()` to abandon the boot stack.
+1. **`kmain()` (line 343):** After creating the bootstrap thread, core 0 abandons its boot stack and jumps into the bootstrap thread via `load_context()`. The boot stack is never used again.
+
+2. **`secondary_main()` (line 421):** Each secondary core (1, 2, 3) abandons its boot stack and jumps into its idle thread via `load_context()`.
+
+```
+Boot Stack (from boot.S)          Bootstrap Thread (PMM-allocated stack)
+─────────────────────              ──────────────────────────────────────
+  kmain()                            thread_trampoline()
+    ...phases 1-17...                  kernel_bootstrap_thread_func()
+    load_context(&bootstrap.ctx)         kernel_init_process()
+    ── one-way jump ──────────────►      thread_exit()
+  (boot stack abandoned forever)
+```
+
+#### Debug Validation (lines 54-87)
+
+In debug builds (`#ifdef DEBUG`), `context_switch()` includes a safety check after restoring `x30`:
+
+```asm
+    // Verify x30 is a kernel address [0x40000000, 0x80000000)
+    mov     x2, #0x4000
+    lsl     x2, x2, #16             // x2 = 0x40000000
+    cmp     x30, x2
+    b.lo    .Lrestore_x30_bad       // x30 < 0x40000000 → corruption!
+    mov     x2, #0x8000
+    lsl     x2, x2, #16             // x2 = 0x80000000
+    cmp     x30, x2
+    b.hs    .Lrestore_x30_bad       // x30 >= 0x80000000 → corruption!
+```
+
+If the restored link register isn't a kernel address, the thread's context was corrupted — probably a stack overflow or a use-after-free on the thread structure. The check catches this immediately with a diagnostic `kprintf` and `panic()` instead of letting the CPU jump to a garbage address and crash mysteriously.
+
+> **Compiled out in release builds:** The `#ifdef DEBUG` guard ensures zero overhead in production. This is the "crash early, crash clearly" philosophy — debug builds sacrifice a few cycles per context switch for vastly better diagnostics.
+
+#### Summary: Trap Frame vs Context Switch
+
+| | Trap Frame (vectors.S) | Context Switch (context_switch.S) |
+|---|---|---|
+| **When** | Syscall, IRQ, page fault | Scheduler thread switch |
+| **Direction** | EL0↔EL1 (or EL1↔EL1) | Kernel thread ↔ kernel thread |
+| **Registers saved** | All 31 GPRs + SP + ELR + SPSR + ESR + FAR + FP/NEON | x19-x30, SP, d8-d15 only |
+| **Size** | 816 bytes | 168 bytes |
+| **Location** | Top of kernel stack | `thread->context` struct |
+| **Return mechanism** | `eret` | `ret` (via restored x30) |
+
+### 2.5 The 17-Phase Kernel Bootstrap (kmain)
+
+**File:** `kernel/kern/main.c` (458 lines)
+
+After `boot.S` drops to EL1, clears BSS, and calls `kmain()`, the kernel must initialise every subsystem in the correct order. Each subsystem depends on ones initialised before it — UART must be up before we can print, the GIC must be up before we can route interrupts, physical memory must be up before virtual memory, etc.
+
+`kmain()` runs on core 0's boot stack. It executes 17 phases sequentially, prints a status message for each, and finishes by creating a bootstrap thread and abandoning the boot stack via `load_context()`.
+
+```
+kmain() Bootstrap Timeline (core 0)
+
+ Phase  Function             Subsystem                    Depends on
+───────────────────────────────────────────────────────────────────────
+  1     uart_init()          PL011 UART (serial console)  (none)
+  2     gic_init()           GICv2 interrupt controller   (none)
+        gic_init_percpu()    Per-core GIC setup           GIC
+        uart_enable_irq()    UART RX interrupts           GIC
+  3     pmm_init()           Buddy allocator (phys mem)   (none)
+  4     vmm_init()           Page tables + MMU enable     PMM
+  5     thread_init()        Thread subsystem             VMM (for stacks)
+        sched_init()         MLFQ scheduler               Threads
+  6     timer_init(100)      ARM Generic Timer (100 Hz)   GIC
+  7     smp_init()           Secondary cores via PSCI     VMM, Sched, Timer
+  8     blkdev_init()        VirtIO block device          VMM (MMIO mapping)
+  9     buf_init()           Buffer cache (256 × 4KB)     PMM
+ 10     vfs_init()           Virtual file system          (none)
+        tty_init()           Console TTY                  (none)
+        pty_init()           Pseudo-terminals             (none)
+ 11     ext4_fs_init()       Ext4 filesystem driver       (none, just registers)
+ 12     vfs_mount("ext4")    Mount root on /dev/vda       Block, Buf, VFS, Ext4
+        devfs_init()         Device filesystem on /dev    VFS
+        buf_start_sync_daemon() Periodic buffer flush     Threads, Buf
+ 13     ipc_init()           Mach IPC (ports, msgs)       PMM
+ 14     iokit_init()         IOKit registry + services    IPC
+ 15     commpage_init()      User-kernel shared page      VMM
+        proc_init()          Process subsystem            VMM, IPC
+ 16     net_init()           TCP/IP stack                 (none)
+        virtio_gpu_init()    VirtIO GPU framebuffer       VMM, Block
+        io_framebuffer_init_driver() IOFramebuffer        IOKit, GPU
+        fbconsole_init()     Framebuffer text console     GPU
+        virtio_input_init()  VirtIO keyboard+tablet       VMM
+        io_hid_system_init_driver() IOHIDSystem           IOKit, Input
+ 17     thread_create()      Bootstrap thread             Threads
+        load_context()       Abandon boot stack           (one-way jump)
+───────────────────────────────────────────────────────────────────────
+```
+
+Let's walk through the key phases in detail.
+
+#### Phase 1: Early Console (UART)
+
+```c
+uart_init();     // kernel/drivers/uart/pl011.c
+```
+
+The PL011 UART is a serial port at MMIO address `0x09000000`. It's the simplest device — just write a byte to a register and it appears on the serial console. This is initialised first because every subsequent phase uses `kprintf()` (which calls `uart_putc()`) to report its status.
+
+At this point the MMU is off, so `0x09000000` is a physical address that directly hits the UART hardware.
+
+#### Phase 2: Interrupt Controller (GIC)
+
+```c
+gic_init();          // kernel/drivers/gic/gicv2.c — distributor init
+gic_init_percpu();   // Per-CPU interface init
+uart_enable_irq();   // Enable UART RX interrupt (for Ctrl+C)
+```
+
+The **GICv2** (Generic Interrupt Controller v2) is the interrupt routing hardware. It has two parts:
+
+- **GICD** (Distributor) at `0x08000000` — routes interrupts from devices to cores
+- **GICC** (CPU Interface) at `0x08010000` — each core's local interrupt interface
+
+Until the GIC is initialised, no interrupt can reach the CPU. After this phase, the UART can generate interrupts when it receives a character (used for Ctrl+C to interrupt a runaway process).
+
+> **IRQs are still masked** at this point (the `DAIF.I` bit is set). The timer will be programmed in Phase 6, but its interrupt will pend until interrupts are unmasked in the bootstrap thread.
+
+#### Phase 3: Physical Memory Manager (PMM)
+
+```c
+pmm_init((uint64_t)&__heap_start, RAM_BASE + RAM_SIZE);
+```
+
+The buddy allocator takes ownership of all physical memory from `__heap_start` (end of the kernel image) to `0x140000000` (4 GB). It divides this into 4 KB pages and organises them into power-of-2 free lists (order 0 = 4 KB, order 1 = 8 KB, ... order 10 = 4 MB). This is covered in detail in Chapter 3.
+
+#### Phase 4: Virtual Memory + MMU
+
+```c
+vmm_init();    // kernel/kern/vmm.c
+```
+
+This is the single most important initialisation step:
+
+1. Allocates page tables from the PMM
+2. Identity-maps the kernel (VA = PA for the kernel image)
+3. Maps MMIO regions (UART, GIC, VirtIO) as device memory
+4. Configures `MAIR_EL1` (memory attributes), `TCR_EL1` (translation control), `TTBR1_EL1` (kernel page table base)
+5. **Enables the MMU** (`SCTLR_EL1.M = 1`)
+
+After this point, the CPU does virtual-to-physical translation on every memory access. The identity mapping ensures the kernel continues running at the same addresses. Covered in Chapter 3.
+
+#### Phase 5: Threading and Scheduler
+
+```c
+thread_init();   // Creates idle threads for each core
+sched_init();    // Initialises the 128-level MLFQ run queues
+```
+
+The scheduler creates per-core data structures (`cpu_data`, accessed via `TPIDR_EL1`) and idle threads. Each idle thread has its own PMM-allocated 32 KB stack and runs a WFI (Wait For Interrupt) loop. Covered in Chapter 4.
+
+#### Phase 6: Timer
+
+```c
+timer_init(SCHED_HZ);    // SCHED_HZ = 100 → 10ms quantum
+```
+
+Programs the ARM Generic Timer to fire an interrupt every 10ms. Each tick calls `sched_tick()`, which decrements the current thread's quantum and potentially triggers a context switch. The timer interrupt is **SPI #27** and is routed through the GIC.
+
+> **Critical note from `main.c:106-116`:** IRQs remain masked here. If we enabled them now, a timer tick could trigger `sched_switch()` while still on the boot stack, which isn't a proper thread stack. The interrupts will be unmasked when the bootstrap thread starts (Phase 17).
+
+#### Phase 7: SMP (Secondary Cores)
+
+```c
+smp_init();    // kernel/arch/arm64/smp.c
+```
+
+Wakes up cores 1, 2, and 3 using PSCI (Power State Coordination Interface) — a firmware call to start a core at a given entry point. Each secondary core goes through its own EL2→EL1 drop and ends up in `secondary_main()`. See §2.6 for details.
+
+#### Phases 8-12: Storage Stack
+
+```c
+blkdev_init();          // Phase 8:  VirtIO block device → /dev/vda
+buf_init();             // Phase 9:  Buffer cache (256 × 4KB LRU)
+vfs_init();             // Phase 10: VFS + TTY + PTY
+ext4_fs_init();         // Phase 11: Register ext4 driver
+vfs_mount("ext4", "/"); // Phase 12: Mount root filesystem
+devfs_init();           // Phase 12b: Mount /dev
+buf_start_sync_daemon();// Phase 12c: Periodic flush thread
+```
+
+This brings up the entire storage stack in dependency order:
+
+```
+  Block device (VirtIO)
+       │
+       ▼
+  Buffer cache (256 × 4KB, LRU eviction)
+       │
+       ▼
+  VFS (vnode layer, mount table, path resolution)
+       │
+       ▼
+  Ext4 driver (superblock, block groups, extent trees)
+       │
+       ▼
+  Root mount at "/" + devfs at "/dev"
+```
+
+After Phase 12, the kernel can `open("/sbin/init")` and read files from the disk image.
+
+#### Phase 13: Mach IPC
+
+```c
+ipc_init();    // kernel/mach/ipc.c
+```
+
+Initialises the IPC subsystem: 512 port structures, the bootstrap port, and the notification port. Every process will get its own port namespace (256 names). Covered in Chapter 6.
+
+#### Phase 14: IOKit
+
+```c
+iokit_init();    // kernel/iokit/io_registry.c (called from iokit_init)
+```
+
+Initialises the I/O Registry (a tree of driver objects), the service matching system, and the IOKit Mach port bridge. IOKit is Kiseki's reimplementation of macOS's IOKit in C (instead of C++). Covered in Chapter 10.
+
+#### Phase 15: CommPage and Process Subsystem
+
+```c
+commpage_init();    // kernel/kern/commpage.c
+proc_init();        // kernel/kern/proc.c
+```
+
+The **CommPage** is a read-only page mapped into every user process at a fixed virtual address. It contains the signal trampoline (the code that returns from a signal handler) and time-related data. This is identical to macOS's `__DATA_CONST/__commpage` region.
+
+`proc_init()` initialises the process table (64 slots, matching XNU's `allproc` list).
+
+#### Phase 16: Networking, GPU, Input
+
+```c
+net_init();                    // TCP/IP stack, BSD sockets
+virtio_gpu_init();             // VirtIO GPU framebuffer (1280×800, B8G8R8X8)
+io_framebuffer_init_driver();  // IOFramebuffer IOKit service
+fbconsole_init();              // Text console on framebuffer
+virtio_input_init();           // VirtIO keyboard + tablet
+io_hid_system_init_driver();   // IOHIDSystem IOKit service
+```
+
+These are the "optional" subsystems — the kernel can boot without a GPU or network. Each is guarded by an error check:
+
+```c
+int gpu_ret = virtio_gpu_init();
+if (gpu_ret < 0) {
+    kprintf("[boot] No VirtIO GPU found (non-fatal)\n");
+}
+```
+
+#### Phase 17: Create Bootstrap Thread and Abandon Boot Stack
+
+This is the most architecturally interesting phase:
+
+```c
+// Create a kernel thread with its own PMM-allocated stack
+struct thread *bootstrap_thread = thread_create(
+    "kernel_bootstrap", kernel_bootstrap_thread_func, NULL, PRI_MAX);
+
+// Set bootstrap_thread as current_thread on this CPU
+__asm__ volatile("msr daifset, #0x2" ::: "memory");  // Mask IRQs
+{
+    struct cpu_data *cd;
+    __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
+    cd->current_thread = bootstrap_thread;
+    bootstrap_thread->cpu = 0;
+}
+
+// One-way jump — boot stack is never used again
+load_context(&bootstrap_thread->context);
+```
+
+**Why not just call `kernel_bootstrap_thread_func()` directly?** Because the boot stack is a fixed region defined by the linker script — it's not a proper thread stack allocated by the PMM. If we kept using it, the scheduler would try to save/restore context to it, but it doesn't have a `thread` structure associated with it. By creating a real thread and `load_context()`-ing into it, we ensure every piece of code that runs from here on has a proper thread identity and PMM-allocated stack.
+
+The bootstrap thread function then launches PID 1:
+
+```c
+static void kernel_bootstrap_thread_func(void *arg)
+{
+    kernel_init_process();   // Loads /sbin/init, creates PID 1
+    thread_exit();           // This thread is done
+}
+```
+
+`kernel_init_process()` (in `proc.c`) loads the Mach-O binary for `/sbin/init`, sets up the user stack and arguments, creates a trap frame for the init thread, and enqueues it on the scheduler's run queue. The scheduler will dispatch it to `init_thread_return` (from §2.3), which does the TTBR0 switch and `eret` to EL0.
+
+At this point, the kernel is fully operational and user space takes over.
+
+> **XNU equivalent:** This mirrors XNU's `kernel_bootstrap()` → `kernel_bootstrap_thread()` → `bsd_init()` → `load_init_program()` flow in `osfmk/kern/startup.c` and `bsd/kern/bsd_init.c`.
+
+### 2.6 Secondary Core Bring-Up (SMP)
+
+**Files:** `kernel/arch/arm64/smp.c` (71 lines), `kernel/arch/arm64/boot.S:114-166` (secondary entry)
+
+Kiseki runs on 4 cores. Core 0 runs the full 17-phase bootstrap. Cores 1-3 are woken up in Phase 7 and go through a streamlined per-core initialisation. Let's trace the entire flow.
+
+#### How PSCI Works
+
+**PSCI** (Power State Coordination Interface) is a firmware-level API for controlling CPU cores. It's not an OS feature — it's a standard defined by ARM that firmware (EFI, U-Boot, or QEMU's built-in firmware) implements. The OS calls PSCI functions via `hvc #0` (Hypervisor Call) or `smc #0` (Secure Monitor Call).
+
+The key function is `CPU_ON`:
+
+```c
+// smp.c:25 — Start a secondary core
+static int64_t psci_cpu_on(uint64_t target_cpu, uint64_t entry_point,
+                           uint64_t context_id)
+{
+    int64_t result;
+    __asm__ volatile(
+        "mov x0, %1\n"     // x0 = PSCI_CPU_ON_64 = 0xC4000003
+        "mov x1, %2\n"     // x1 = target core MPIDR (0, 1, 2, or 3)
+        "mov x2, %3\n"     // x2 = entry point (physical address)
+        "mov x3, %4\n"     // x3 = context ID (unused, 0)
+        "hvc #0\n"          // Call firmware
+        "mov %0, x0\n"     // result = return value
+        : "=r"(result)
+        ...
+    );
+    return result;
+}
+```
+
+When PSCI `CPU_ON` succeeds, the target core starts executing at `entry_point` (which is `_secondary_entry` in `boot.S`). The core starts at EL2 with the MMU off — exactly the same state as core 0 at power-on.
+
+#### The Wake-Up Loop
+
+```c
+// smp.c:58
+void smp_init(void)
+{
+    for (uint32_t core = 1; core < MAX_CPUS; core++) {
+        int64_t ret = psci_cpu_on(core, (uint64_t)_secondary_entry, 0);
+        if (ret == 0)
+            kprintf("[smp] Core %u: started\n", core);
+        else
+            kprintf("[smp] Core %u: PSCI CPU_ON failed (err=%ld)\n", core, ret);
+    }
+}
+```
+
+This iterates over cores 1, 2, 3 and wakes each one. Note that the cores were originally spinning in `_secondary_spin` (the `wfe` loop from §2.2), but PSCI doesn't wake them from that loop — it resets them entirely and redirects execution to `_secondary_entry`.
+
+> **Wait, weren't cores 1-3 in `_secondary_spin`?** Yes, from the initial boot. But PSCI `CPU_ON` doesn't send a `sev` (Set Event) to wake them from `wfe`. Instead, it resets the target core's state entirely and starts it fresh at the specified entry point. The `_secondary_spin` loop is a fallback for platforms without PSCI — on QEMU, it's effectively dead code after `smp_init()`.
+
+#### Secondary Core Entry (boot.S:114-166)
+
+Each secondary core starts at `_secondary_entry`:
+
+```asm
+_secondary_entry:
+    // 1. Read core ID
+    mrs     x0, mpidr_el1
+    and     x0, x0, #0xFF
+
+    // 2. Drop from EL2 to EL1 (same as primary core)
+    mrs     x1, CurrentEL
+    and     x1, x1, #0xC
+    cmp     x1, #0x8
+    b.ne    _secondary_at_el1
+
+    // EL2 → EL1 drop
+    mov     x1, #(1 << 31)
+    msr     hcr_el2, x1
+    mov     x1, #0x3C5
+    msr     spsr_el2, x1
+    adr     x1, _secondary_at_el1
+    msr     elr_el2, x1
+    eret
+
+_secondary_at_el1:
+    // 3. Re-read core ID (may have been lost in EL drop)
+    mrs     x0, mpidr_el1
+    and     x0, x0, #0xFF
+
+    // 4. Enable FP/SIMD (must match primary core)
+    mov     x1, #(3 << 20)
+    msr     cpacr_el1, x1
+    isb
+
+    // 5. Set up per-core stack
+    //    SP = __stack_top - (core_id * 0x8000)
+    ldr     x1, =__stack_top
+    mov     x2, #0x8000            // 32 KB per core
+    mul     x3, x0, x2
+    sub     x1, x1, x3
+    mov     sp, x1
+
+    // 6. Install exception vectors
+    ldr     x1, =_vectors
+    msr     vbar_el1, x1
+    isb
+
+    // 7. Call C entry point
+    bl      secondary_main
+    b       _halt
+```
+
+The secondary core boot is simpler than primary — no BSS clearing (already done), no UART init, no `kmain()`. Each core just gets its own stack and jumps to `secondary_main()`.
+
+**Note the stack calculation:** Core 1's SP = `__stack_top - 0x8000`, Core 2's SP = `__stack_top - 0x10000`, Core 3's SP = `__stack_top - 0x18000`.
+
+#### secondary_main() — Per-Core Initialisation
+
+```c
+// main.c:391
+void secondary_main(uint64_t core_id)
+{
+    // CRITICAL: Enable MMU first!
+    vmm_init_percpu();     // Set TTBR1, MAIR, TCR, enable MMU
+
+    gic_init_percpu();     // Configure per-core GIC interface
+    sched_init_percpu();   // Create per-core cpu_data, set TPIDR_EL1
+    timer_init_percpu();   // Start per-core timer (100 Hz tick)
+
+    kprintf("[smp] Core %lu online (scheduler + timer ready)\n", core_id);
+
+    // Abandon boot stack → jump to idle thread
+    {
+        struct cpu_data *cd;
+        __asm__ volatile("mrs %0, tpidr_el1" : "=r"(cd));
+        load_context(&cd->idle_thread->context);
+    }
+
+    __builtin_unreachable();
+}
+```
+
+**Four per-core inits:**
+
+| Function | Purpose |
+|---|---|
+| `vmm_init_percpu()` | Sets up this core's page table registers (`TTBR1_EL1`, `MAIR_EL1`, `TCR_EL1`) and enables the MMU. **Must be first** — without the MMU, exclusive monitors (`LDAXR`/`STXR`) for spinlocks may not work, and core 0's memory writes may be invisible. |
+| `gic_init_percpu()` | Enables this core's GIC CPU interface so it can receive interrupts. |
+| `sched_init_percpu()` | Allocates and installs the per-core `cpu_data` structure in `TPIDR_EL1`, creates this core's idle thread. |
+| `timer_init_percpu()` | Programs this core's ARM Generic Timer to fire at 100 Hz. |
+
+After init, the core abandons its boot stack via `load_context()` (exactly as core 0 does in Phase 17) and jumps into its idle thread's `thread_trampoline`. The idle thread enables interrupts (`daifclr #0x2`) and enters a WFI loop, waiting for the scheduler to assign it work.
+
+> **CRITICAL: MMU before spinlocks.** The comment in `main.c:397-398` explains: secondary cores start with the MMU off (PSCI reset value). Without caches, the ARM exclusive monitor mechanism (used by spinlocks, mutexes, and atomic operations) may not work correctly across cores. The MMU must be enabled before touching *any* shared data structure.
+
+#### The Full SMP Timeline
+
+```
+Time ──────────────────────────────────────────────────────────────►
+
+Core 0: _start → _at_el1 → kmain()
+         │
+         ├── Phase 1-6 (UART, GIC, PMM, VMM, Threads, Timer)
+         │
+         ├── Phase 7: smp_init()
+         │      │
+         │      ├── psci_cpu_on(1, _secondary_entry)
+         │      │       Core 1: ──► _secondary_entry → _secondary_at_el1
+         │      │                     → secondary_main(1) → load_context()
+         │      │                     → idle thread (WFI loop)
+         │      │
+         │      ├── psci_cpu_on(2, _secondary_entry)
+         │      │       Core 2: ──► (same as core 1)
+         │      │
+         │      └── psci_cpu_on(3, _secondary_entry)
+         │              Core 3: ──► (same as core 1)
+         │
+         ├── Phases 8-16 (Block, FS, IPC, IOKit, Net, GPU, ...)
+         │
+         └── Phase 17: load_context() → bootstrap thread
+                                          → kernel_init_process()
+                                          → thread_exit()
+
+         All cores now running idle threads, waiting for work.
+         Scheduler dispatches init (PID 1) → init_thread_return → EL0
+```
+
+At this point the entire boot sequence is complete. All 4 cores are online, the kernel is fully initialised, and PID 1 (`/sbin/init`) is about to start executing in user space. The next chapter covers how the physical and virtual memory systems that underpin all of this actually work.
 
 ---
 
 ## Chapter 3: Physical & Virtual Memory
 
-Before diving in, let's establish what "virtual memory" actually means and why every modern OS needs it.
+Every piece of code we've seen so far depends on memory management. The boot code allocates page tables from the PMM. The scheduler allocates thread stacks. `fork()` copies address spaces. `execve()` maps Mach-O segments. The GPU driver maps framebuffers. This chapter explains the two layers that make it all work:
 
-#### What Problem Does Virtual Memory Solve?
+1. **Physical memory management (PMM)** -- how the kernel tracks and allocates raw RAM pages
+2. **Virtual memory management (VMM)** -- how the kernel creates the illusion that every process has its own private address space
 
-Imagine a system without virtual memory: every program sees the real, physical RAM directly. Program A is loaded at address `0x1000`, program B at `0x5000`. This has three fatal problems:
+### 3.1 Why Virtual Memory Exists
 
-1. **No isolation**: Program A can read/write program B's memory (and the kernel's memory). A single bug or malicious program compromises everything.
+Without virtual memory, every program would share a single flat address space. Program A could read Program B's data. A bug in a web browser could corrupt the kernel. Two programs couldn't both use address `0x1000` -- they'd collide.
 
-2. **No flexibility**: If program A was compiled to run at address `0x1000` and that address is already taken, it cannot run. Every program must know in advance where it will be loaded.
-
-3. **No overcommit**: If you have 4 GB of RAM and programs collectively need 6 GB, some simply cannot run — even if most of that memory is rarely touched.
-
-Virtual memory solves all three by adding a layer of **address translation** between the CPU and physical RAM:
+**Virtual memory** solves all three problems by giving each process its own **private address space**. When Program A accesses address `0x1000`, the **MMU** (Memory Management Unit) translates it to physical address `0x50000`. When Program B accesses the same address `0x1000`, the MMU translates it to physical address `0x80000`. Neither program knows about the other's memory.
 
 ```
-Program A sees:         Page Table A          Physical RAM
-0x0000 → code      ──►  VA 0x0000 → PA 0x8000  ──►  [A's code at 0x8000]
-0x1000 → data      ──►  VA 0x1000 → PA 0xA000  ──►  [A's data at 0xA000]
-
-Program B sees:         Page Table B          Physical RAM
-0x0000 → code      ──►  VA 0x0000 → PA 0xC000  ──►  [B's code at 0xC000]
-0x1000 → data      ──►  VA 0x1000 → PA 0xE000  ──►  [B's data at 0xE000]
+                Program A                     Program B
+              (virtual memory)              (virtual memory)
+         +-----------------------+     +-----------------------+
+         |                       |     |                       |
+0x3000   |  stack                |     |  stack                |  0x3000
+         |                       |     |                       |
+0x2000   |  heap                 |     |  heap                 |  0x2000
+         |                       |     |                       |
+0x1000   |  code                 |     |  code                 |  0x1000
+         |                       |     |                       |
+0x0000   |  (unmapped, SEGFAULT) |     |  (unmapped, SEGFAULT) |  0x0000
+         +-----------+-----------+     +----------+------------+
+                     |                            |
+                     | MMU                        | MMU
+                     | translates                 | translates
+                     v                            v
+         +-------------------------------------------------+
+         |         Physical RAM (shared hardware)           |
+         |                                                  |
+         | 0x50000: A's code   0x80000: B's code            |
+         | 0x51000: A's heap   0x81000: B's heap            |
+         | 0x52000: A's stack  0x82000: B's stack           |
+         |          ....                                    |
+         +-------------------------------------------------+
 ```
 
-Both programs think they're loaded at address `0x0000`, but they are actually at different physical addresses. Neither can see the other's pages because their page tables don't contain mappings for each other's physical memory.
+The translation happens automatically in hardware, on every memory access, with zero software overhead for the common case. The kernel only gets involved when something goes wrong (page fault) or when it needs to change the mapping (fork, exec, mmap).
 
-The **page table** is a data structure in RAM (maintained by the kernel) that the CPU hardware reads *on every memory access* to translate virtual addresses to physical addresses. The unit of translation is a **page** — a 4 KB aligned chunk. The CPU has a dedicated piece of hardware called the **MMU** (Memory Management Unit) that performs this translation automatically; no software runs per-access.
+### 3.2 The Buddy Allocator (PMM)
 
-#### Two Layers of Memory Management
+**Files:** `kernel/kern/pmm.c` (387 lines), `kernel/include/kern/pmm.h` (101 lines)
 
-The kernel manages memory at two layers:
+The PMM answers the simplest question in memory management: **"Give me N physical pages."** It manages all RAM from `__heap_start` (end of the kernel image) to the end of physical memory (4 GB on QEMU).
 
-1. **Physical Memory Manager (PMM)**: tracks which physical 4 KB pages are free or in use. Think of it as a warehouse inventory system — it knows which shelves are empty.
+#### How the Buddy System Works
 
-2. **Virtual Memory Manager (VMM)**: builds and modifies page tables to create the illusion of private address spaces for each process. It is the architect that decides which process sees which physical pages at which virtual addresses.
+The buddy allocator organises free memory into **11 free lists**, one per "order" (power of 2):
 
-Both layers are covered in this chapter.
+```
+Order    Block Size     Pages    Free List
+------------------------------------------
+  0        4 KB           1      order_0 -> [page] -> [page] -> ...
+  1        8 KB           2      order_1 -> [page] -> ...
+  2       16 KB           4      order_2 -> ...
+  3       32 KB           8      order_3 -> ...
+  4       64 KB          16      order_4 -> ...
+  5      128 KB          32      order_5 -> ...
+  6      256 KB          64      order_6 -> ...
+  7      512 KB         128      order_7 -> ...
+  8        1 MB         256      order_8 -> ...
+  9        2 MB         512      order_9 -> ...
+ 10        4 MB       1,024      order_10 -> ...
+```
 
-### 3.1 The Buddy Allocator (PMM)
+**Allocation:** To allocate 2^n pages, look at `free_list[n]`. If it's empty, try `free_list[n+1]` and **split** the larger block in half -- one half satisfies the request, the other half goes onto `free_list[n]`. Repeat up the orders until a block is found.
 
-Every operating system needs a way to manage physical RAM. The kernel must be able to allocate and free pages (4 KB chunks) of physical memory for page tables, user processes, DMA buffers, and kernel data structures.
+**Freeing:** When a block is freed, check if its **buddy** (the adjacent block of the same size) is also free. If so, **coalesce** them into a single block at the next order up. Repeat until the buddy is in use or we reach the maximum order.
 
-Kiseki uses a **buddy allocator** (`kernel/kern/pmm.c`, 313 lines), the same algorithm used by Linux and (conceptually) by XNU's `vm_page` subsystem. The idea is elegant: physical memory is divided into blocks of power-of-two sizes, and adjacent ("buddy") blocks can be merged when freed.
+```
+Example: Allocate 1 page (order 0) when only order-2 blocks are free
 
-**Orders and block sizes:**
+  order_2:  [block: 4 pages at 0x50000]
 
-| Order | Block Size | Pages |
-|-------|-----------|-------|
-| 0 | 4 KB | 1 |
-| 1 | 8 KB | 2 |
-| 2 | 16 KB | 4 |
-| 3 | 32 KB | 8 |
-| ... | ... | ... |
-| 10 | 4 MB | 1024 |
+  Step 1: Split order-2 block into two order-1 blocks
+  order_1:  [0x52000 (2 pages)]        <-- put on free list
+  order_1:  [0x50000 (2 pages)]        <-- continue splitting
 
-The allocator maintains 11 **free lists** (orders 0–10), each a doubly-linked list of available blocks at that order.
+  Step 2: Split order-1 block into two order-0 blocks
+  order_0:  [0x51000 (1 page)]         <-- put on free list
+  order_0:  [0x50000 (1 page)]         <-- return to caller
+```
 
-**Page descriptors:**
+**Why "buddy"?** Two blocks are buddies if they differ by exactly one bit in their page index. For a block at page index `i` with order `n`, its buddy is at index `i XOR (1 << n)`:
+
+```c
+// pmm.c:94 -- Finding a block's buddy
+static struct page *buddy_of(struct page *pg, uint32_t order)
+{
+    uint64_t idx = page_index(pg);
+    uint64_t buddy_idx = idx ^ (1UL << order);   // Flip the order-th bit
+    if (buddy_idx >= total_pages)
+        return NULL;
+    return &pages[buddy_idx];
+}
+```
+
+#### The Page Descriptor Array
 
 Every physical page has a 32-byte descriptor:
 
 ```c
+// pmm.h:32
 struct page {
-    uint32_t flags;      // PAGE_FREE, PAGE_USED, PAGE_KERNEL, PAGE_RESERVED
-    uint32_t order;      // Buddy order (if head of a free block)
-    uint32_t refcount;   // Reference count (for COW)
-    uint32_t _pad;       // Alignment padding
-    struct page *next;   // Next in free list
-    struct page *prev;   // Previous in free list
+    uint32_t flags;       // PAGE_FREE, PAGE_USED, PAGE_RESERVED
+    uint32_t order;       // Buddy order (if head of free block)
+    uint32_t refcount;    // Reference count (for COW sharing)
+    uint32_t _pad;
+    struct page *next;    // Next in free list (doubly linked)
+    struct page *prev;    // Prev in free list
 };
 ```
 
-The `pages[]` array is statically allocated for up to 262,144 pages (1 GB of RAM), consuming about 8 MB of kernel BSS.
+Kiseki allocates a static array of 262,144 descriptors (`PMM_MAX_PAGES = 256 * 1024`), covering up to 1 GB of RAM. At 32 bytes each, this costs 8 MB of kernel BSS -- a fixed overhead regardless of how much RAM is actually present.
 
-**Allocation algorithm (`pmm_alloc_pages(order)`):**
+> **Why not dynamic?** At the point the PMM initialises, there is no dynamic allocator yet. The PMM *is* the foundation on which everything else is built. A static array is the simplest bootstrap.
 
-```mermaid
-flowchart TD
-    A["Request: allocate 2^order pages"] --> B{Free list at 'order'<br/>has a block?}
-    B -->|Yes| C["Remove block from free list<br/>Mark PAGE_USED, refcount=1"]
-    B -->|No| D["Try order+1, order+2, ..."]
-    D --> E{Found a larger block<br/>at order N?}
-    E -->|No| FAIL["Return 0 (out of memory)"]
-    E -->|Yes| F["Remove block from free_list[N]"]
-    F --> G["Split: put upper buddy<br/>on free_list[N-1]"]
-    G --> H{N-1 == order?}
-    H -->|No| G
-    H -->|Yes| C
-```
+#### Spinlock Protection
 
-The key insight is **buddy splitting**: if you need a 4 KB block (order 0) but only have a 16 KB block (order 2) available, you split it:
-1. Split the 16 KB block into two 8 KB buddies → put one on `free_list[1]`
-2. Split the remaining 8 KB block into two 4 KB buddies → put one on `free_list[0]`
-3. Return the other 4 KB block
-
-**Deallocation algorithm (`pmm_free_pages(paddr, order)`):**
-
-The reverse process — **buddy coalescing**:
-
-```mermaid
-flowchart TD
-    A["Free block at address A, order O"] --> B["Compute buddy address:<br/>buddy = A XOR (1 << O)"]
-    B --> C{Buddy is FREE<br/>AND buddy.order == O?}
-    C -->|Yes| D["Remove buddy from free_list[O]<br/>Keep lower address as merged block<br/>O = O + 1"]
-    D --> B
-    C -->|No| E["Insert block on free_list[O]"]
-```
-
-The buddy's address is computed with a single XOR: `buddy_idx = page_idx ^ (1 << order)`. This is the mathematical property that makes buddy allocation work — at any order, you can find your buddy by flipping exactly one bit.
-
-**Reference counting for COW:**
-
-Each page has a `refcount` field. When `fork()` shares a page between parent and child (copy-on-write), the refcount is incremented. When a COW fault resolves by allocating a new page, the old page's refcount is decremented. When the refcount reaches zero, the page is freed with buddy coalescing.
-
-`pmm_page_unref()` performs the free **inline** (not by calling `pmm_free_pages()`) because it already holds the PMM lock — calling `pmm_free_pages()` would deadlock.
-
-> **XNU reference:** XNU uses a different physical memory allocator — `vm_page` objects in a per-segment free list with a "free count" for each colour (for cache-line colouring). The buddy algorithm is simpler and works well for Kiseki's needs. See [`osfmk/vm/vm_page.c`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/vm/vm_page.c).
-
-> **Security note:** The buddy allocator is protected by a single global spinlock (`pmm_lock`) with IRQ save/restore. This means physical page allocation is serialised across all CPUs — a potential denial-of-service vector if an attacker can cause rapid allocation/deallocation. XNU mitigates this with per-CPU free lists.
-
-### 3.2 ARM64 Page Tables
-
-ARM64 with a 4 KB page granule uses a **4-level page table** structure. Each level is a 4 KB page containing 512 entries (64 bits each). The virtual address is split into index fields:
-
-```
-63        48 47    39 38    30 29    21 20    12 11       0
-┌──────────┬────────┬────────┬────────┬────────┬──────────┐
-│  unused  │ L0 idx │ L1 idx │ L2 idx │ L3 idx │  offset  │
-│ (16 bits)│(9 bits)│(9 bits)│(9 bits)│(9 bits)│ (12 bits)│
-└──────────┴────────┴────────┴────────┴────────┴──────────┘
-```
-
-The translation walk:
-
-```mermaid
-flowchart LR
-    VA["Virtual Address"] --> L0["L0 Table<br/>(in TTBR0/1)"]
-    L0 -->|"L0[bits 47:39]"| L1["L1 Table"]
-    L1 -->|"L1[bits 38:30]"| L2["L2 Table"]
-    L2 -->|"L2[bits 29:21]"| L3["L3 Table"]
-    L3 -->|"L3[bits 20:12]"| PA["Physical Page<br/>+ offset[11:0]"]
-```
-
-Each Page Table Entry (PTE) at L3 is a 64-bit value with the physical page address in bits 47:12 and attribute bits everywhere else:
-
-| Bits | Name | Purpose |
-|------|------|---------|
-| 0 | Valid | Entry is valid (1) or invalid (0) |
-| 1 | Page/Table | 1 = L3 page descriptor |
-| 4:2 | AttrIdx | MAIR index (0=Device, 1=Normal-NC, 2=Normal-WB) |
-| 7:6 | AP | Access Permission (RW_EL1, RW_ALL, RO_EL1, RO_ALL) |
-| 9:8 | SH | Shareability (None, Outer, Inner) |
-| 10 | AF | Access Flag (must be 1 or hardware raises fault) |
-| 53 | PXN | Privileged Execute Never |
-| 54 | UXN | User Execute Never |
-| 55 | **COW** | **Software-defined** — Copy-on-Write marker (hardware ignores) |
-
-Bit 55 is Kiseki's software-defined COW flag — when a page is shared between parent and child after `fork()`, both PTEs are set to read-only with bit 55 set. When either process writes to the page, a permission fault occurs, the kernel checks bit 55, and if set, performs the COW copy.
-
-> **XNU reference:** XNU uses software PTE bits in the upper ignored range too. See `ARM_PTE_WRITEABLE` and `ARM_PTE_FAULT_HANDLER_MASK` in [`osfmk/arm64/proc_reg.h`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/proc_reg.h).
-
-**MAIR (Memory Attribute Indirection Register):**
-
-The `AttrIdx` field in the PTE doesn't encode the cache policy directly — it indexes into `MAIR_EL1`, a register that maps indices to actual memory attributes:
-
-| Index | Encoding | Meaning | Used For |
-|-------|----------|---------|----------|
-| 0 | `0x00` | Device-nGnRnE (strongly ordered) | MMIO registers |
-| 1 | `0x44` | Normal, Non-Cacheable | Shared buffers |
-| 2 | `0xFF` | Normal, Write-Back Cacheable | RAM (default) |
-
-**Composite PTE macros** (from `kernel/include/kern/vmm.h`):
-
-| Macro | Bits | Purpose |
-|-------|------|---------|
-| `PTE_KERNEL_RWX` | Valid + AF + Inner-Shareable + RW-EL1 + WB + UXN | Kernel code |
-| `PTE_KERNEL_RW` | Above + PXN | Kernel data (no execute) |
-| `PTE_USER_RWX` | Valid + AF + Inner-Shareable + RW-ALL + WB | User code + data |
-| `PTE_USER_RO` | Valid + AF + Inner-Shareable + RO-ALL + WB + PXN + UXN | Read-only user data |
-| `PTE_USER_RX` | Valid + AF + Inner-Shareable + RO-ALL + WB + PXN | User executable (read+exec, no write) |
-| `PTE_DEVICE` | Valid + AF + No-Share + RW-EL1 + Device + PXN + UXN | MMIO |
-
-### 3.3 Kernel Address Space Setup
-
-`vmm_init()` (`kernel/kern/vmm.c:229`) sets up the kernel's page tables and enables the MMU. This is a one-time operation that transforms the system from raw physical addressing to virtual addressing.
-
-The steps:
-
-1. **Allocate the L0 table** via `alloc_pt_page()` (which uses `pmm_alloc_page()` — the PMM is already initialised)
-
-2. **Identity-map all RAM** — for every page from `RAM_BASE` (`0x40000000`) to `RAM_BASE + RAM_SIZE`, create a mapping where virtual address == physical address, using `PTE_KERNEL_RWX` attributes
-
-3. **Map MMIO regions** — UART (`0x09000000`), GIC distributor (`0x08000000`), GIC CPU interface (`0x08010000`), and VirtIO MMIO slots, all with `PTE_DEVICE` attributes
-
-4. **Configure MAIR_EL1** — set the 3 memory attribute indices
-
-5. **Configure TCR_EL1** — Translation Control Register:
-   - `T0SZ=16` — 48-bit user virtual address space (TTBR0)
-   - `T1SZ=16` — 48-bit kernel virtual address space (TTBR1)
-   - `TG0=TG1=4KB` — 4 KB page granule
-   - Inner-Shareable, Write-Back Write-Allocate for both halves
-
-6. **Set TTBR0_EL1 and TTBR1_EL1** — both point to `kernel_pgd` (the kernel uses the lower half with identity mapping for now; the higher half is configured but not yet used)
-
-7. **Full TLB invalidation** — `TLBI VMALLE1` + barriers
-
-8. **Enable MMU** — set `SCTLR_EL1` bits M (MMU), C (data cache), I (instruction cache). **Crucially, bit A (alignment check) is cleared** — this is required because GNUstep's ObjC runtime performs unaligned accesses that would otherwise fault.
-
-After this point, all memory accesses go through the page tables. Because the mapping is identity (VA == PA), existing pointers to kernel data structures still work.
-
-> **Kiseki difference from macOS:** macOS runs the kernel in the **upper half** (addresses starting with `0xFFFF...`), with TTBR1 pointing to the kernel page tables. Kiseki currently uses the lower half with identity mapping. Both TTBR0 and TTBR1 point to the same `kernel_pgd`. A future improvement would be to move the kernel to the upper half, matching XNU's `KERNEL_VA_BASE = 0xFFFF000000000000`.
-
-### 3.4 User Address Spaces
-
-Each user process has its own **address space** represented by `struct vm_space`:
+All PMM operations (`pmm_alloc_page`, `pmm_free_page`, `pmm_page_ref`, `pmm_page_unref`) are protected by a single spinlock with IRQ save/restore:
 
 ```c
-struct vm_space {
-    pte_t    *pgd;    // L0 page table (physical address)
-    uint64_t  asid;   // Address Space ID for TLB tagging
-    struct vm_map *map; // Software region tracking
-};
+// pmm.c:26
+static spinlock_t pmm_lock = SPINLOCK_INIT;
+
+// pmm.c:173 (inside pmm_alloc_pages)
+spin_lock_irqsave(&pmm_lock, &flags);
+// ... allocate ...
+spin_unlock_irqrestore(&pmm_lock, flags);
 ```
 
-**Creating an address space** (`vmm_create_space()`, line 343):
+`spin_lock_irqsave` disables interrupts before taking the lock. This prevents a timer IRQ from triggering a context switch while the lock is held, which would cause a deadlock if the new thread also tried to allocate memory.
 
-1. Allocate a new L0 page table
-2. **Share kernel mappings** — copy the kernel's L1 entries into per-process L1 tables. This is subtle: the L0 entry at index 0 covers 512 GB, which includes both kernel and user virtual addresses. Sharing the kernel's L1 *directly* would cause cross-process corruption when `walk_pgd()` allocates new L2/L3 tables. Instead, each process gets its own L1 table with the kernel entries *copied in*.
-3. Create a `vm_map` for tracking user regions
-4. **Assign an ASID** (Address Space ID, 1–255). ASIDs let the TLB cache entries from multiple address spaces simultaneously, avoiding a full TLB flush on every context switch. When ASIDs wrap (255→1), a global `TLBI VMALLE1IS` broadcast is issued.
+#### Audit Bitmap
 
-**Switching address spaces** (`vmm_switch_space()`, line 555):
+In debug builds, the PMM maintains an independent bitmap (`pmm_audit_bitmap[]`) that tracks which pages are allocated. Every allocation checks that the pages aren't already allocated; every free checks that they aren't already free. This catches double-alloc and double-free bugs immediately:
 
 ```c
-void vmm_switch_space(struct vm_space *space) {
-    uint64_t ttbr0 = (uint64_t)space->pgd | (space->asid << 48);
-    asm volatile("msr ttbr0_el1, %0" : : "r"(ttbr0));
-    asm volatile("tlbi vmalle1is; dsb ish; isb");
+// pmm.c:213 -- Double-alloc detection
+if (audit_is_allocated(base_idx + a)) {
+    kprintf("[PMM BUG] DOUBLE ALLOC! page idx %lu ...\n", ...);
 }
 ```
 
-The ASID is packed into the upper 16 bits of `TTBR0_EL1`. The hardware uses this to tag TLB entries, so entries from process A don't match lookups for process B.
+#### Reference Counting (for COW)
 
-**The page table walker** (`walk_pgd()`, line 70):
-
-This is the core function that translates a virtual address to its L3 PTE slot, optionally allocating intermediate page table pages along the way:
-
-```mermaid
-flowchart TD
-    A["walk_pgd(pgd, va, alloc)"] --> B["l0_idx = (va >> 39) & 0x1FF"]
-    B --> C{"L0[l0_idx] valid?"}
-    C -->|Yes| D["l1 = PTE_TO_PHYS(L0[l0_idx])"]
-    C -->|No, alloc=true| E["Allocate new L1 page<br/>Install in L0 with PTE_TABLE|PTE_VALID<br/>DSB ISH barrier"]
-    C -->|No, alloc=false| NULL["Return NULL"]
-    E --> D
-    D --> F["l1_idx = (va >> 30) & 0x1FF"]
-    F --> G{"L1[l1_idx] valid?"}
-    G -->|Yes| H["l2 = PTE_TO_PHYS(L1[l1_idx])"]
-    G -->|No, alloc=true| I["Allocate L2, install, DSB"]
-    G -->|No, alloc=false| NULL
-    I --> H
-    H --> J["l2_idx = (va >> 21) & 0x1FF"]
-    J --> K{"L2[l2_idx] valid?"}
-    K -->|Yes| L["l3 = PTE_TO_PHYS(L2[l2_idx])"]
-    K -->|No, alloc=true| M["Allocate L3, install, DSB"]
-    K -->|No, alloc=false| NULL
-    M --> L
-    L --> N["Return &l3[(va >> 12) & 0x1FF]"]
-```
-
-The `DSB ISH` (Data Synchronization Barrier, Inner Shareable) after installing each table entry is critical — it ensures the hardware page table walker sees the new entry before any subsequent translation.
-
-### 3.5 Copy-on-Write
-
-When `fork()` creates a child process, it would be enormously wasteful to copy all the parent's physical pages. Instead, Kiseki (like all modern OSes) uses **Copy-on-Write (COW)**: both parent and child share the same physical pages, marked read-only. When either process writes to a shared page, a permission fault occurs, the kernel allocates a new page, copies the data, and makes the faulting process's page writable.
-
-**COW setup during fork** (`vmm_copy_space()`, line 1314):
-
-For each valid user page in the parent:
-1. If the page is writable (`AP_RW_ALL`): change **both** parent and child PTEs to read-only (`AP_RO_ALL`) with the `PTE_COW` bit set. Issue `TLBI VALE1IS` on the parent's PTE to flush any stale writable TLB entries.
-2. If already read-only: share directly without COW marking.
-3. Increment the page's `refcount` via `pmm_page_ref()`.
-
-**COW fault resolution** (`vmm_copy_on_write()`, line 579):
-
-```mermaid
-flowchart TD
-    A["Write fault at VA<br/>PTE has PTE_COW bit set"] --> B["Get old physical address<br/>and refcount"]
-    B --> C{refcount <= 1?}
-    C -->|"Yes (sole owner)"| D["Make PTE writable in-place<br/>Clear COW bit<br/>TLBI + DSB + ISB"]
-    C -->|"No (shared)"| E["Drop VMM lock<br/>(avoid deadlock with PMM lock)"]
-    E --> F["pmm_alloc_page() — new page"]
-    F --> G["Copy 4 KB (512 × uint64_t)"]
-    G --> H["Re-acquire VMM lock"]
-    H --> I["Update PTE → new page, writable<br/>Clear COW bit"]
-    I --> J["pmm_page_unref(old_page)<br/>TLBI + DSB + ISB"]
-```
-
-The lock-dropping in step E is a critical detail. `vmm_copy_on_write()` holds `vmm_lock`, but `pmm_alloc_page()` needs `pmm_lock`. If we held both simultaneously, other code paths that acquire them in the opposite order would deadlock. The solution: drop `vmm_lock`, allocate, re-acquire.
-
-> **Security note:** The COW mechanism is a frequent source of vulnerabilities. If the kernel fails to properly re-check the PTE after re-acquiring the lock (a TOCTOU race), an attacker could manipulate the page table between the check and the update. XNU has had multiple COW-related CVEs. Kiseki's implementation re-reads the PTE after re-acquiring the lock.
-
-### 3.6 The VM Map
-
-Above the hardware page tables (the "pmap" layer), Kiseki maintains a software **VM map** — a sorted doubly-linked list of `vm_map_entry` structures that track which regions of the address space are allocated and their properties.
-
-This is modelled directly on XNU's `struct vm_map` from [`osfmk/vm/vm_map.h`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/vm/vm_map.h).
+Each page has a `refcount` field. When a page is first allocated, `refcount = 1`. When `fork()` shares the page between parent and child (copy-on-write), both processes' page tables point to the same physical page, and `refcount` is incremented to 2. When one process writes to the page, the COW handler (`vmm_copy_on_write`) copies it, and the original page's refcount drops back to 1.
 
 ```c
-struct vm_map_entry {
-    struct vm_map_entry *prev, *next;  // Sorted doubly-linked list
-    uint64_t vme_start;                // VA range start (inclusive, page-aligned)
-    uint64_t vme_end;                  // VA range end (exclusive, page-aligned)
-    uint8_t  protection;               // Current: VM_PROT_READ | WRITE | EXECUTE
-    uint8_t  max_protection;           // Ceiling (mprotect cannot exceed this)
-    uint8_t  inheritance;              // VM_INHERIT_COPY (COW on fork), SHARE, or NONE
-    uint8_t  is_shared  : 1;           // MAP_SHARED mapping
-    uint8_t  needs_copy : 1;           // Deferred COW
-    uint8_t  wired      : 1;           // Pages pinned (mlock)
-    int      backing_fd;               // File descriptor (-1 = anonymous)
-    uint64_t file_offset;              // Offset into backing file
-    struct vnode *backing_vnode;       // Vnode for file-backed mapping
+// pmm.c:303
+void pmm_page_ref(uint64_t paddr)   { pg->refcount++; }
+
+// pmm.c:315
+void pmm_page_unref(uint64_t paddr) {
+    if (--pg->refcount == 0) {
+        pg->flags = PAGE_FREE;
+        // ... coalesce with buddy ...
+    }
+}
+```
+
+### 3.3 ARM64 Page Tables
+
+**File:** `kernel/include/kern/vmm.h` (420 lines)
+
+The MMU needs to know how to translate virtual addresses to physical addresses. This mapping is stored in a data structure called a **page table**, which lives in ordinary RAM and is managed by the kernel.
+
+ARM64 uses a **4-level page table** with a **4 KB granule**. A 48-bit virtual address is split into five fields:
+
+```
+63    48 47    39 38    30 29    21 20    12 11        0
++-------+--------+--------+--------+--------+----------+
+| unused|  L0    |  L1    |  L2    |  L3    |  offset  |
+| sign  | index  | index  | index  | index  | in page  |
+| extend| 9 bits | 9 bits | 9 bits | 9 bits | 12 bits  |
++-------+--------+--------+--------+--------+----------+
+         512       512      512      512       4096
+        entries   entries  entries  entries    bytes
+```
+
+Each level is a table of **512 entries**, each **8 bytes** (64 bits), fitting exactly in one **4 KB page** (512 x 8 = 4096). The translation walks four levels:
+
+```
+TTBR0_EL1 (user) or TTBR1_EL1 (kernel)
+     |
+     |  bits [47:39]
+     v
+  +-----+     +-----+     +-----+     +-----+
+  | L0  |---->| L1  |---->| L2  |---->| L3  |----> Physical Page
+  | PGD |     | PUD |     | PMD |     | PTE |      + offset [11:0]
+  +-----+     +-----+     +-----+     +-----+
+  512 entries  512 entries  512 entries  512 entries
+  (one page)  (one page)  (one page)  (one page)
+```
+
+**Concrete example:** Translating virtual address `0x0000000100004000`:
+
+```
+VA = 0x0000000100004000
+
+  Bits [47:39] = 0x000  --> L0[0]     (1st entry of L0)
+  Bits [38:30] = 0x004  --> L1[4]     (5th entry of L1)
+  Bits [29:21] = 0x000  --> L2[0]     (1st entry of L2)
+  Bits [20:12] = 0x004  --> L3[4]     (5th entry of L3)
+  Bits [11:0]  = 0x000  --> offset 0  (start of page)
+
+  L0[0] -> points to L1 table at PA 0x41000000
+  L1[4] -> points to L2 table at PA 0x41001000
+  L2[0] -> points to L3 table at PA 0x41002000
+  L3[4] -> points to data page at PA 0x50004000
+
+  Final PA = 0x50004000 + 0x000 = 0x50004000
+```
+
+> **Index extraction in code** (`vmm.c:59-62`):
+> ```c
+> #define L0_IDX(va)  (((va) >> 39) & 0x1FF)   // bits [47:39]
+> #define L1_IDX(va)  (((va) >> 30) & 0x1FF)   // bits [38:30]
+> #define L2_IDX(va)  (((va) >> 21) & 0x1FF)   // bits [29:21]
+> #define L3_IDX(va)  (((va) >> 12) & 0x1FF)   // bits [20:12]
+> ```
+
+#### Page Table Entry Format
+
+Each 64-bit PTE contains the physical address of the next level (or the data page) plus permission and attribute bits:
+
+```
+63  55 54 53 52    48 47            12 11 10  9  8  7  6  5  4  2  1  0
++-----+--+--+-------+----------------+--+--+--+--+--+--+--+----+--+--+
+| SW  |XN|PX|  res  | Physical addr  |AF|SH |AP |NS |  AI |Tbl |Vld|
+|     |  |N |       | [47:12]        |  |   |   |   |     |    |   |
++-----+--+--+-------+----------------+--+--+--+--+--+--+--+----+--+--+
+  |     |  |                           |   |   |         |    |    |
+  |     |  +-- Privileged XN           |   |   |         |    |    +-- Valid
+  |     +-- User XN (no execute)       |   |   |         |    +-- Table/Page
+  |                                    |   |   |         +-- MAIR attr index
+  +-- Software bits (COW flag here)    |   |   +-- Access Permission
+                                       |   +-- Shareability
+                                       +-- Access Flag
+```
+
+Kiseki defines these in `vmm.h:29-53`:
+
+| Constant | Bits | Meaning |
+|---|---|---|
+| `PTE_VALID` | [0] | Entry is valid (hardware checks this) |
+| `PTE_TABLE` / `PTE_PAGE` | [1:0] | Table descriptor (L0-L2) or page descriptor (L3) |
+| `PTE_AP_RW_ALL` | [6] | Both EL1 and EL0 can read/write |
+| `PTE_AP_RO_ALL` | [7:6]=11 | Both EL1 and EL0 can only read |
+| `PTE_AF` | [10] | Access flag (must be set or first access faults) |
+| `PTE_SH_INNER` | [9:8]=11 | Inner shareable (required for SMP cache coherency) |
+| `PTE_PXN` | [53] | Privileged execute never (kernel can't run this code) |
+| `PTE_UXN` | [54] | User execute never (user can't run this code) |
+| `PTE_COW` | [55] | **Software bit**: marks a page as copy-on-write |
+
+Common combinations used by Kiseki:
+
+| Macro | Used for | Permissions |
+|---|---|---|
+| `PTE_KERNEL_RWX` | Kernel code | Kernel R/W/X, user no access, cacheable |
+| `PTE_KERNEL_RW` | Kernel data | Kernel R/W, no execute, cacheable |
+| `PTE_DEVICE` | MMIO (UART, GIC, VirtIO) | Kernel R/W, no execute, no cache |
+| `PTE_USER_RWX` | User code+data | User+kernel R/W/X, cacheable |
+| `PTE_USER_RW` | User heap/stack | User R/W, no execute, cacheable |
+| `PTE_USER_RO` | User read-only data | User R/O, no execute, cacheable |
+| `PTE_USER_RX` | User __TEXT segment | User R/X, kernel no exec, cacheable |
+
+### 3.4 Kernel Address Space Setup
+
+**File:** `kernel/kern/vmm.c:224-322` (`vmm_init`)
+
+When `kmain()` calls `vmm_init()` in Phase 4, the MMU is still off -- all addresses are physical. `vmm_init()` builds the kernel page tables and then flips the MMU on. Here's what it does:
+
+**Step 1: Allocate the L0 table.**
+
+```c
+kernel_pgd = alloc_pt_page();   // 4KB page, zeroed
+```
+
+**Step 2: Identity-map all of RAM.**
+
+```c
+for (uint64_t addr = RAM_BASE; addr < ram_end; addr += PAGE_SIZE)
+    vmm_map_page(kernel_pgd, addr, addr, PTE_KERNEL_RWX);
+```
+
+This maps virtual address `0x40080000` to physical address `0x40080000` (VA == PA) for every page of RAM. The kernel continues running at the same addresses after the MMU is enabled.
+
+> **Why identity mapping?** A higher-half kernel (where kernel VA = `0xFFFF000040080000`) is more elegant but requires carefully writing position-independent code or using a trampoline to jump from the physical address to the virtual address after enabling the MMU. Kiseki takes the simpler approach.
+
+**Step 3: Map MMIO regions as device memory.**
+
+```c
+vmm_map_page(kernel_pgd, UART0_BASE, UART0_BASE, PTE_DEVICE);
+// ... GIC distributor/CPU interface ...
+// ... VirtIO MMIO slots ...
+```
+
+Device memory uses `MAIR_DEVICE_nGnRnE` (index 0): no caching, no gathering, no reordering. This ensures that writes to hardware registers happen in program order and are immediately visible to the device.
+
+**Step 4: Configure translation control registers.**
+
+```c
+// MAIR_EL1: Memory attribute encodings
+//   Index 0: Device-nGnRnE  (0x00)  -- for MMIO
+//   Index 1: Normal NC       (0x44)  -- for GPU framebuffer
+//   Index 2: Normal WB       (0xFF)  -- for regular RAM
+msr mair_el1, mair
+
+// TCR_EL1: Translation Control Register
+//   T0SZ=16: 48-bit user VA space (256 TB)
+//   T1SZ=16: 48-bit kernel VA space
+//   TG0/TG1=4KB: page granule
+//   SH0/SH1=Inner Shareable: required for SMP
+//   ORGN0/IRGN0=WB-WA: outer/inner write-back write-allocate caching
+msr tcr_el1, tcr
+
+// TTBR0_EL1 and TTBR1_EL1: both point to kernel_pgd
+msr ttbr0_el1, kernel_pgd
+msr ttbr1_el1, kernel_pgd
+```
+
+**Step 5: Enable the MMU.**
+
+```c
+mrs sctlr, sctlr_el1
+sctlr |= (1 << 0)    // M: MMU on
+sctlr |= (1 << 2)    // C: Data cache on
+sctlr |= (1 << 12)   // I: Instruction cache on
+msr sctlr_el1, sctlr
+isb
+```
+
+After this `isb`, every memory access goes through the page tables. The identity mapping ensures the next instruction (which the CPU fetches from the same physical address) is still reachable.
+
+> **Two TTBRs:** ARM64 has two translation table base registers. `TTBR0_EL1` translates addresses in the **lower half** (bit 63 = 0, i.e., user space: `0x0000...`). `TTBR1_EL1` translates addresses in the **upper half** (bit 63 = 1, i.e., kernel space: `0xFFFF...`). Kiseki currently uses identity mapping with both TTBRs pointing to the same table, but the architecture is designed for the eventual split where user page tables go in TTBR0 and the kernel page table stays in TTBR1.
+
+### 3.5 User Address Spaces
+
+**File:** `kernel/kern/vmm.c:326-434` (`vmm_create_space`)
+
+When `fork()` or `execve()` creates a new process, the kernel calls `vmm_create_space()` to create a fresh user address space. This returns a `vm_space` structure:
+
+```c
+// vmm.h:188
+struct vm_space {
+    pte_t    *pgd;     // L0 page table (physical address)
+    uint64_t  asid;    // Address Space ID (for TLB tagging, 1-255)
+    struct vm_map *map; // Software region map (sorted linked list)
 };
 ```
 
-The `vm_map` uses a **sentinel node** as the list head — its `prev` and `next` point to each other when the list is empty. Entries are allocated from a static pool of 512 per process.
-
-**Key operations:**
-
-- **`vm_map_enter()`** — Create a new mapping. If a fixed address is given, existing overlapping entries are removed first (XNU-style `vmf_overwrite`). Otherwise, `vm_map_find_space()` scans from `hint_addr` (initially `0x300000000`, the `USER_MMAP_BASE`) for the first gap large enough.
-
-- **`vm_map_remove()`** — Remove mappings in a range. Uses `vm_map_clip_start()` and `vm_map_clip_end()` to split entries at the boundaries, then removes all entries fully within the range.
-
-- **`vm_map_protect()`** — Change protection on a range. Again clips at boundaries, then updates the `protection` field on each entry.
-
-- **`vm_map_fork()`** — Copy entries for `fork()`. Entries with `VM_INHERIT_COPY` are duplicated; entries with `VM_INHERIT_NONE` are skipped; entries with `VM_INHERIT_SHARE` are shared.
-
-**User address space layout:**
+The user address space has a carefully designed layout:
 
 ```
-0x0000000100000000  USER_VA_BASE     — Mach-O main binary load address (4 GB)
-0x0000000300000000  USER_MMAP_BASE   — Anonymous mmap() region (12 GB)
-0x00007FFFFFFF0000  USER_STACK_TOP   — User stack (grows down, 8 MB default)
-0x0000000FFFFFC000  COMMPAGE_VA      — Darwin CommPage (read-only, 1 page)
+User Virtual Address Space Layout
+
+0x0000000000000000  +-----------------------------+
+                    |  __PAGEZERO (unmapped)       |  Null dereference trap
+0x0000000100000000  +-----------------------------+
+                    |  Main binary (__TEXT, __DATA) |  Loaded by execve()
+                    |  (Mach-O segments)           |
+0x0000000200000000  +-----------------------------+
+                    |  dyld (dynamic linker)       |  Loaded by execve()
+                    |                              |
+0x0000000300000000  +-----------------------------+
+                    |  mmap region                 |  Anonymous + file-backed
+                    |  (grows upward)              |  mappings from mmap()
+                    |                              |
+                    |          ...                 |
+                    |                              |
+0x0000000FFFFFC000  +-----------------------------+
+                    |  CommPage (4 KB, read-only)  |  Signal trampoline, time
+                    |                              |
+                    |          ...                 |
+                    |                              |
+0x00007FFFFFFF0000  +-----------------------------+
+                    |  User stack (grows downward) |  8 MB default
+0x00007FFFFFFFFFFF  +-----------------------------+
 ```
 
-This layout matches macOS's 64-bit address space conventions, allowing Mach-O binaries linked for macOS-like addresses to load without relocation.
+**Creating the L0 table** is not as simple as allocating a blank page. The user page table must include the kernel's identity mapping so that when a syscall traps from EL0 to EL1, the kernel code is still accessible. Kiseki handles this by allocating **per-process L1 tables** and copying the kernel's L1 entries into them:
 
-> **XNU reference:** The real macOS vm_map uses a red-black tree for O(log n) lookups. Kiseki uses a linear list, which is O(n) but trivially correct and sufficient for 512 entries.
+```
+Kernel PGD (L0)                   User PGD (L0)
++---------+                       +---------+
+| L0[0]   | -> kernel L1         | L0[0]   | -> user L1 (copy of kernel L1 entries)
+| L0[1]   | -> (empty)           | L0[1]   | -> (empty)
+|  ...    |                       |  ...    |
++---------+                       +---------+
+
+User L1 table:
+  - Entries for kernel VAs (MMIO, RAM) -> shared L2/L3 from kernel
+  - Entries for user VAs (binary, mmap) -> separate L2/L3 per process
+```
+
+This ensures that when `walk_pgd` allocates new L2/L3 tables for user virtual addresses, they go into the **per-process** L1 rather than the kernel's L1. Without this, all processes would share a single L1 table, and mapping user VA `0x100004000` in process A would also make it visible in process B.
+
+**ASIDs** (Address Space IDs) are 8-bit tags (1-255) assigned to each address space. They allow the TLB to cache translations from multiple processes simultaneously. When a context switch changes `TTBR0_EL1`, the new ASID is encoded in bits [63:48] of the TTBR value (`pgd | (asid << 48)`). Stale TLB entries from the old process (with a different ASID) won't match, avoiding the need for a full TLB flush on every context switch. When ASIDs wrap around past 255, Kiseki does a global TLB flush (`tlbi vmalle1is`).
+
+### 3.6 Copy-on-Write (COW)
+
+**File:** `kernel/kern/vmm.c:562-625` (`vmm_copy_on_write`)
+
+When `fork()` creates a child process, copying the entire address space page-by-page would be expensive (a process with 100 MB of data would need to copy 100 MB). **Copy-on-write** avoids this by sharing pages between parent and child, only copying when one of them writes.
+
+The COW flow:
+
+```
+1. fork() is called
+   +---------------------------+          +---------------------------+
+   |  Parent (PID 10)          |          |  Child (PID 11)           |
+   |  VA 0x100004000           |          |  VA 0x100004000           |
+   |  PTE: PA=0x50000 RW       |          |  PTE: PA=0x50000 RO+COW  |
+   +-------------+-------------+          +-------------+-------------+
+                 |                                      |
+                 +-----------> Physical page 0x50000 <--+
+                               refcount = 2
+
+2. Child writes to 0x100004000 --> Data Abort (page fault)!
+   The PTE is read-only, so the write faults.
+
+3. Kernel handles the fault:
+   - Sees PTE_COW is set --> this is a COW fault, not a bug
+   - refcount > 1 --> allocate new page, copy 4 KB
+   - Update child's PTE to point to new page (RW, COW cleared)
+   - Decrement old page's refcount (now 1)
+
+   +---------------------------+          +---------------------------+
+   |  Parent (PID 10)          |          |  Child (PID 11)           |
+   |  VA 0x100004000           |          |  VA 0x100004000           |
+   |  PTE: PA=0x50000 RW       |          |  PTE: PA=0x60000 RW      |
+   +-------------+-------------+          +-------------+-------------+
+                 |                                      |
+                 v                                      v
+        Physical 0x50000                       Physical 0x60000
+        refcount = 1                           refcount = 1
+        (original data)                        (copied data)
+```
+
+The key code in `vmm_copy_on_write()`:
+
+```c
+// vmm.c:562
+int vmm_copy_on_write(struct vm_space *space, uint64_t va)
+{
+    pte_t *pte = walk_pgd(space->pgd, va, false);
+    uint64_t old_pa = PTE_TO_PHYS(*pte);
+    uint32_t refcount = pmm_page_refcount(old_pa);
+
+    // Preserve original flags but change RO -> RW, clear COW bit
+    uint64_t orig_flags = *pte & ~PTE_ADDR_MASK;
+    uint64_t new_flags = (orig_flags & ~(3UL << 6) & ~PTE_COW) | PTE_AP_RW_ALL;
+
+    if (refcount <= 1) {
+        // Sole owner: just make writable in place
+        *pte = (old_pa & PTE_ADDR_MASK) | new_flags;
+        tlbi vale1is;    // Flush stale TLB entry
+        return 0;
+    }
+
+    // Multiple owners: copy the page
+    uint64_t new_pa = pmm_alloc_page();
+    memcpy(new_pa, old_pa, 4096);       // Copy 4 KB
+
+    *pte = (new_pa & PTE_ADDR_MASK) | new_flags;
+    pmm_page_unref(old_pa);             // Drop shared reference
+    tlbi vale1is;                        // Flush stale TLB entry
+    return 0;
+}
+```
+
+> **Software PTE_COW bit:** ARM64 reserves bits [58:55] in PTEs for software use (the hardware ignores them). Kiseki uses bit 55 (`PTE_COW`) to mark pages that are shared via copy-on-write. When a write fault occurs, the trap handler (`trap.c`) checks this bit to distinguish a COW fault (copy the page) from a genuine permission violation (kill the process with SIGSEGV).
+
+### 3.7 The VM Map
+
+**File:** `kernel/kern/vmm.c:712-` and `kernel/include/kern/vmm.h:99-418`
+
+The page tables (the "pmap" in XNU terminology) are a hardware cache of the kernel's intent. The authoritative record of what is mapped, with what permissions, and how regions behave on fork is the **vm_map** -- a sorted linked list of `vm_map_entry` structures.
+
+```c
+// vmm.h:134
+struct vm_map_entry {
+    struct vm_map_entry *prev, *next;   // Sorted doubly-linked list
+    uint64_t  vme_start;               // Region start (page-aligned)
+    uint64_t  vme_end;                 // Region end (exclusive)
+    uint8_t   protection;              // Current: VM_PROT_READ|WRITE|EXECUTE
+    uint8_t   max_protection;          // Ceiling for mprotect()
+    uint8_t   inheritance;             // Fork: VM_INHERIT_COPY, SHARE, or NONE
+    uint8_t   is_shared : 1;           // MAP_SHARED?
+    uint8_t   needs_copy : 1;          // Deferred COW
+    uint8_t   wired : 1;              // Pinned (mlock)
+    int       backing_fd;              // File descriptor (-1 = anonymous)
+    uint64_t  file_offset;             // Offset into backing file
+    struct vnode *backing_vnode;        // Vnode (NULL = anonymous)
+};
+
+// vmm.h:170
+struct vm_map {
+    struct vm_map_entry header;        // Sentinel (list head)
+    int          nentries;
+    uint64_t     min_offset;           // Lowest valid VA
+    uint64_t     max_offset;           // Highest valid VA
+    uint64_t     hint_addr;            // Hint for next allocation
+    spinlock_t   lock;
+    struct vm_map_entry entries[512];   // Static pool (no kmalloc needed)
+    uint8_t      entry_used[512];
+};
+```
+
+**Key vm_map operations:**
+
+| Function | Purpose | XNU Equivalent |
+|---|---|---|
+| `vm_map_enter()` | Create a new region (used by `mmap`, `execve`) | `vm_map_enter` |
+| `vm_map_remove()` | Remove regions in a range (used by `munmap`) | `vm_map_remove` |
+| `vm_map_lookup_entry()` | Find the entry containing an address | `vm_map_lookup_entry` |
+| `vm_map_protect()` | Change protection on a range (used by `mprotect`) | `vm_map_protect` |
+| `vm_map_fork()` | Copy the map for `fork()`, respecting inheritance | `vm_map_fork` |
+
+The vm_map uses a **static pool** of 512 entries per process (no dynamic allocation needed). Entries are stored in a sorted doubly-linked list by `vme_start`. XNU also uses an RB-tree for O(log n) lookup; Kiseki uses linear search, which is sufficient for the current scale of ~50-100 entries per process.
+
+**Interaction between vm_map and pmap:**
+
+```
+mmap(addr, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
+  |
+  v
+vm_map_enter()          <-- Creates vm_map_entry (software record)
+  |                         protection = RW, inheritance = COPY
+  |                         backing_fd = -1 (anonymous)
+  v
+(return to user)        <-- No physical pages allocated yet!
+  |
+  v
+User writes to addr     <-- Page fault! (no PTE exists)
+  |
+  v
+trap_sync_el0()
+  -> handle_page_fault()
+     -> vm_map_lookup_entry()   <-- Find the entry for this VA
+     -> pmm_alloc_page()        <-- Allocate physical page
+     -> vmm_map_page()          <-- Create PTE in the pmap
+     -> return to user          <-- Fault resolved, instruction retries
+```
+
+This is **demand paging** -- physical pages are only allocated when first accessed, not when `mmap()` is called. The vm_map records the intent; the pmap is populated lazily on fault.
 
 ---
 
 ## Chapter 4: Threads, Scheduling & Synchronisation
 
-#### What Is a Thread, Really?
+Everything described so far -- page tables, buddy allocator, address spaces -- is static infrastructure. Nothing actually *runs* until we introduce **threads**: the unit of execution that the CPU schedules. This chapter explains how Kiseki creates threads, picks which one to run next, switches between them, and coordinates them when they need to share data.
 
-If you have written Python or C programs, you have been running inside a thread without thinking about it. A **thread** is just an independent stream of execution — a program counter (which instruction to run next), a stack (local variables and function call history), and a set of register values.
+### 4.1 What Is a Thread?
 
-A **process** can have multiple threads, and they all share the same memory space (same page tables, same heap, same global variables). This is how your web browser can download a file while still responding to mouse clicks — two threads in the same process.
+**For the systems newcomer:** A program sitting on disk is just bytes. When you launch it, the kernel creates a *process* (a container with its own address space, file descriptors, and permissions) and at least one *thread* inside that process. The thread is what the CPU actually executes -- it has its own:
 
-The kernel's job is to decide which thread runs on which CPU core, and for how long. With 4 CPU cores and potentially hundreds of threads, the kernel must constantly switch between them — giving each thread a brief time slice (10 ms in Kiseki), saving its registers, loading the next thread's registers, and resuming. This is called **scheduling**, and the mechanism of saving/restoring register state is the **context switch** we saw in §2.3.
+- **Program counter** (where in the code it is)
+- **Stack** (local variables, function call chain)
+- **Register state** (the values in x0-x30, SP, NEON registers, etc.)
 
-**macOS terminology note:** macOS uses *Mach tasks* where most OSes say "process" and *Mach threads* where most OSes say "thread". A Mach **task** = an address space + a collection of threads. A BSD **process** = a Mach task + a PID + file descriptors + credentials + signals. Kiseki uses both abstractions simultaneously, just like XNU.
+Multiple threads in the same process share the address space (same page tables), so they can read each other's global variables. Multiple threads in *different* processes cannot (different page tables).
 
-### 4.1 Thread Representation
+```
+Process A (PID 10)                    Process B (PID 11)
++-------------------------------+     +-------------------------------+
+|  Address space (TTBR0 = 0x..) |     |  Address space (TTBR0 = 0x..) |
+|                               |     |                               |
+|  +----------+ +----------+   |     |  +----------+                 |
+|  | Thread 1 | | Thread 2 |   |     |  | Thread 1 |                 |
+|  | tid=1    | | tid=2    |   |     |  | tid=3    |                 |
+|  | SP, PC,  | | SP, PC,  |   |     |  | SP, PC,  |                 |
+|  | regs     | | regs     |   |     |  | regs     |                 |
+|  +----------+ +----------+   |     |  +----------+                 |
+|       (share same memory)     |     |                               |
++-------------------------------+     +-------------------------------+
+        Isolated from Process B               Isolated from Process A
+```
 
-In Kiseki (as in XNU), the **thread** is the fundamental unit of execution. A Mach **task** is a container for one or more threads plus a shared address space. A BSD **process** wraps a task with PID, file descriptors, credentials, and signals.
+**Mach threading model:** Like XNU (macOS), Kiseki uses a **1:1 model** -- every user thread maps to exactly one kernel thread. The kernel-side structure (`struct thread`) tracks both the user-space state (saved in the trap frame on syscall entry) and the kernel-space state (saved in `cpu_context` on context switch). Some systems use N:M models (many user threads multiplexed onto fewer kernel threads), but 1:1 is simpler and what macOS uses.
+
+**Key terminology:**
+| Term | Meaning |
+|------|---------|
+| **Thread** | Unit of execution (has its own registers & stack) |
+| **Task** | Mach name for a process container (owns address space, IPC ports) |
+| **Run queue** | List of threads ready to execute |
+| **Quantum** | Time slice -- how many timer ticks a thread runs before the scheduler can preempt it |
+| **Context switch** | Saving one thread's registers and loading another's |
+| **Wait channel** | An address that a sleeping thread is "waiting on" (BSD `tsleep`/`wakeup` pattern) |
+
+### 4.2 Thread Representation
+
+**File:** `kernel/include/kern/thread.h`
+
+Every thread in Kiseki is a `struct thread` from a **static pool** of 256 entries:
 
 ```c
+// sched.c:26-28
+static struct thread thread_pool[MAX_THREADS];   // MAX_THREADS = 256
+static uint64_t next_tid = 1;
+static spinlock_t thread_lock = SPINLOCK_INIT;
+```
+
+No `malloc` -- thread structures are pre-allocated. `alloc_thread()` scans the pool for a slot with `tid == 0` (never used) or `state == TH_TERM` (terminated, can be recycled). This is the same static-pool pattern used for PMM page descriptors, vm_map entries, and IPC ports throughout Kiseki.
+
+Here is the full thread structure with annotations:
+
+```c
+// thread.h:79-127
 struct thread {
-    uint64_t         tid;              // Unique thread ID
-    int              state;            // TH_RUN(0), TH_WAIT(1), TH_IDLE(2), TH_TERM(3)
-    int              priority;         // Base priority (0–127)
-    int              effective_priority; // After MLFQ demotion/aging
-    int              sched_policy;     // SCHED_OTHER(0), SCHED_FIFO(1), SCHED_RR(2)
-    int              quantum;          // Remaining time ticks (reset to 10 on switch)
-    int              cpu;              // CPU currently on (-1 = never scheduled)
-    uint32_t         cpu_affinity;     // Bitmask (0 = any)
-    struct cpu_context context;        // Saved callee-saved registers (see §2.3)
-    uint64_t        *kernel_stack;     // Base address of 16 KB kernel stack
-    struct task     *task;             // Owning Mach task
-    void            *wait_channel;     // Sleep channel (like BSD's tsleep)
-    struct thread   *run_next;         // Next in run queue linked list
-    bool             on_runq;          // Double-enqueue prevention flag
-    uint64_t         wakeup_tick;      // For timed sleeps
-    struct thread   *sleep_next;       // Global sleep queue (sorted by deadline)
-    uint64_t         tls_base;         // User TLS (written to TPIDR_EL0)
-    // ... (join support, exit value, etc.)
+    /* --- Identity & state --- */
+    uint64_t        tid;                // Unique thread ID (1, 2, 3, ...)
+    int             state;              // TH_RUN(0), TH_WAIT(1), TH_IDLE(2), TH_TERM(3)
+    int             priority;           // Base priority (0-127, higher = more important)
+    int             effective_priority; // May be boosted by priority inheritance
+    int             sched_policy;       // SCHED_OTHER(0), SCHED_FIFO(1), SCHED_RR(2)
+    int             quantum;            // Ticks remaining in current time slice
+    int             cpu;                // CPU core currently running on (-1 = never run)
+    uint32_t        cpu_affinity;       // Bitmask: 0 = any core, else restrict
+
+    /* --- Saved registers --- */
+    struct cpu_context context;         // 168 bytes: x19-x30, SP, d8-d15
+    uint64_t        *kernel_stack;      // Base of 32 KB kernel stack
+    uint64_t        kernel_stack_size;
+
+    /* --- Process linkage --- */
+    struct task     *task;              // Owning Mach task (NULL = pure kernel thread)
+
+    /* --- Sleep/wake --- */
+    void            *wait_channel;      // BSD-style: address we're sleeping on
+    const char      *wait_reason;       // Debug string ("pipe_read", "mutex_lock", etc.)
+
+    /* --- Queue pointers --- */
+    struct thread   *run_next;          // Next thread in same priority's run queue
+    struct thread   *wait_next;         // Next thread in a mutex/semaphore wait queue
+    struct thread   *sleep_next;        // Next thread in the timed-sleep queue
+    struct thread   *task_next;         // Next thread in same task's thread list
+
+    /* --- Mach features --- */
+    uint64_t        continuation;       // Stackless continuation (function pointer)
+    uint32_t        thread_port;        // Mach port name for thread_self_trap()
+    uint64_t        tls_base;           // TPIDR_EL0 (user-space TLS pointer)
+
+    /* --- Timed sleep --- */
+    uint64_t        wakeup_tick;        // Tick at which to auto-wake (0 = not timed)
+
+    /* --- pthread join/detach --- */
+    bool            detached;
+    bool            joined;
+    void            *exit_value;        // Return value from pthread_exit()
+    struct thread   *join_waiter;       // Thread waiting in pthread_join()
 };
 ```
 
-Threads are allocated from a static pool of 256 (`thread_pool[MAX_THREADS]`). When a terminated thread's slot is reused, its old kernel stack is freed (it couldn't be freed during `thread_exit()` because the thread was still running on it).
+**Thread states** form a simple state machine:
 
-**Thread creation** (`thread_create()`, `kernel/kern/sched.c:184`):
+```
+              sched_enqueue()
+                  +---+
+                  |   v
+  thread_create() --> TH_RUN -----> (running on CPU)
+                      ^ |               |
+                      | |  quantum expires / sched_yield()
+                      | |               |
+                      | +<--------------+
+                      |
+   thread_unblock()   |  thread_block() / thread_sleep_on()
+         |            |         |
+         +--- TH_WAIT <--------+
+                  (sleeping on wait_channel or mutex)
+                      |
+                      |  thread_exit() / thread_terminate()
+                      v
+                   TH_TERM  (slot can be recycled)
+```
 
-1. Allocate from `thread_pool`
-2. Allocate 16 KB kernel stack (4 pages via `pmm_alloc_pages(2)`)
-3. Set initial context:
-   - `SP` = top of kernel stack
-   - `x30` (LR) = `thread_trampoline`
-   - `x19` = entry function pointer
-   - `x20` = argument pointer
+| State | Value | Meaning |
+|-------|-------|---------|
+| `TH_RUN` | 0 | Runnable: either on a run queue or currently executing |
+| `TH_WAIT` | 1 | Blocked: sleeping on a wait channel, mutex, condvar, or timer |
+| `TH_IDLE` | 2 | The per-CPU idle thread (only runs when nothing else is runnable) |
+| `TH_TERM` | 3 | Terminated: waiting to be reaped or slot recycled |
 
-The `thread_trampoline` reads `x19` and `x20` *before* enabling IRQs (critical: a timer interrupt would trigger `context_switch`, which overwrites callee-saved registers), then calls the entry function. If the entry function returns, the trampoline calls `thread_exit()`.
-
-### 4.2 The MLFQ Scheduler
-
-Kiseki implements a **Multilevel Feedback Queue (MLFQ)** scheduler with 128 priority levels (0=lowest, 127=highest), matching macOS's scheduling priority range.
-
-Each CPU has its own set of run queues:
+**The Mach task structure** (`struct task`) is the process container:
 
 ```c
-struct cpu_data {
-    uint32_t      cpu_id;
-    struct thread *current_thread;
-    struct thread *idle_thread;
-    spinlock_t     run_lock;
-    struct thread *run_queue[128];     // Per-priority linked lists
-    uint32_t       run_count;          // Total runnable threads
-    bool           need_resched;       // Flag: higher-priority thread arrived
-    uint64_t       idle_ticks, total_ticks;
+// thread.h:136-148
+struct task {
+    pid_t           pid;
+    char            name[32];
+    struct vm_space *vm_space;       // Virtual address space (page tables + vm_map)
+    struct thread   *threads;        // Linked list of threads in this task
+    mach_port_t     task_port;       // Mach task port (for task_for_pid, etc.)
+    struct ipc_space *ipc_space;     // Mach IPC port namespace
+    /* Security credentials */
+    uid_t           uid, gid;        // Real user/group ID
+    uid_t           euid, egid;      // Effective user/group ID
 };
 ```
 
-**Scheduling algorithm** (`sched_switch()`, line 906):
+In XNU, the `task` and `proc` structures are separate (Mach layer vs BSD layer). Kiseki merges them for simplicity -- `struct task` serves as both the Mach task and the BSD process.
 
-```mermaid
-flowchart TD
-    A["sched_switch()"] --> B["Mask IRQs (prevent nested switch)"]
-    B --> C["Acquire run_lock"]
-    C --> D{"Old thread still TH_RUN<br/>and not on_runq?"}
-    D -->|Yes| E["Re-enqueue old thread<br/>(inline, no IPI)"]
-    D -->|No| F["Skip (thread is sleeping/terminated)"]
-    E --> G["Pick next thread"]
-    F --> G
-    G --> H["Scan run_queue from 127 → 0<br/>Take first non-empty queue head"]
-    H --> I{Found a thread?}
-    I -->|Yes| J["Dequeue it"]
-    I -->|No| K["Pick idle_thread"]
-    J --> L["Release run_lock"]
-    K --> L
-    L --> M{Same thread as before?}
-    M -->|Yes| N["Restore IRQs, return"]
-    M -->|No| O["Reset quantum to 10 ticks"]
-    O --> P{"Different address space?"}
-    P -->|Yes| Q["vmm_switch_space() — write TTBR0"]
-    P -->|No| R["Skip TTBR0 switch"]
-    Q --> S["context_switch(old_ctx, new_ctx)"]
-    R --> S
-    S --> T["Restore IRQs"]
+**Per-CPU data** is how each core tracks its own state:
+
+```c
+// thread.h:153-168
+struct cpu_data {
+    uint32_t        cpu_id;
+    struct thread   *current_thread;    // Thread currently executing on this core
+    struct thread   *idle_thread;       // This core's idle thread
+
+    /* Per-CPU MLFQ run queues */
+    spinlock_t      run_lock;           // Protects run_queue[] and run_count
+    struct thread   *run_queue[128];    // 128 priority levels, each a linked list
+    uint32_t        run_count;          // Total runnable threads on this core
+
+    /* Scheduling state */
+    bool            need_resched;       // Set by sched_tick() when quantum expires
+    bool            online;             // True once core is fully initialised
+    uint64_t        idle_ticks;         // Counter for idle time
+    uint64_t        total_ticks;        // Counter for total time
+};
 ```
 
-The MLFQ behaviour comes from the timer tick handler:
+Each core stores a pointer to its `cpu_data` in the ARM64 system register `TPIDR_EL1` (Thread Pointer ID Register, EL1). This register is per-core and only accessible from kernel mode, so `get_cpu_data()` is a single `mrs` instruction:
 
-**On each tick** (`sched_tick()`, called 100 times/second):
-
-1. Wake any threads whose sleep deadline has passed
-2. Decrement current thread's quantum
-3. When quantum reaches 0:
-   - **Demotion**: if the thread is `SCHED_OTHER` and `effective_priority > PRI_MIN`, decrement its priority by 1
-   - Set `need_resched` flag → the return-from-IRQ path will call `sched_switch()`
-
-**Priority aging** (every 100 ticks ≈ 1 second):
-
-For every thread on a run queue, if it's `SCHED_OTHER`, boost `effective_priority` by 1 toward its base `priority`. This prevents starvation — a thread that has been demoted by using its full quantum will gradually recover.
-
-> **XNU reference:** XNU's scheduler is significantly more complex — it uses a "decay" factor based on CPU usage rather than simple MLFQ demotion. See [`osfmk/kern/sched_prim.c`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/sched_prim.c). Kiseki's simpler approach is functionally equivalent for its workload.
-
-### 4.3 SMP Load Balancing
-
-With 4 CPU cores, threads must be distributed to avoid overloading one core while others idle. Kiseki uses two mechanisms:
-
-**1. Least-loaded placement** (`sched_find_least_loaded_cpu()`):
-
-When a new thread is first enqueued (or when its affinity changes), it goes to the CPU with the lowest `run_count`. This spreads threads across cores on creation.
-
-**2. Work stealing** (in the idle thread):
-
-When a CPU's run queues are empty, its idle thread tries to steal work from the busiest CPU (must have ≥ 2 runnable threads). It steals the **lowest-priority** thread to minimise impact on the donor CPU's latency-sensitive threads.
-
-**IPI (Inter-Processor Interrupt) for preemption:**
-
-When a high-priority thread is enqueued on a remote CPU, the enqueuing code sends `IPI_RESCHEDULE` (SGI #0 via the GIC). The remote CPU's IRQ handler sets `need_resched`, and on the next return-from-interrupt, it calls `sched_switch()`.
-
-```mermaid
-sequenceDiagram
-    participant CPU0
-    participant CPU1
-
-    Note over CPU0: thread_unblock(high_pri_thread)
-    CPU0->>CPU0: sched_enqueue() → find least loaded CPU = CPU1
-    CPU0->>CPU0: Enqueue on CPU1's run_queue
-    CPU0->>CPU1: GIC SGI #0 (IPI_RESCHEDULE)
-    CPU1->>CPU1: IRQ handler: need_resched = true
-    CPU1->>CPU1: Return from IRQ → sched_switch()
-    CPU1->>CPU1: Pick high_pri_thread (higher than current)
-    CPU1->>CPU1: context_switch() to high_pri_thread
+```c
+// sched.c:46
+static inline struct cpu_data *get_cpu_data(void) {
+    struct cpu_data *data;
+    __asm__ volatile("mrs %0, tpidr_el1" : "=r"(data));
+    return data;
+}
 ```
 
-**The double-enqueue problem:**
+This is the ARM64 equivalent of x86's `gs:` segment prefix for per-CPU data. XNU uses the same pattern (`current_cpu_datap()` reads from `TPIDR_EL1`).
 
-A pervasive design challenge in SMP schedulers is preventing a thread from being on two run queues simultaneously. If CPU A sets a thread to `TH_WAIT` and CPU B calls `thread_unblock()` concurrently, the thread could end up running on two CPUs sharing one kernel stack — catastrophic corruption.
+### 4.3 The MLFQ Scheduler
 
-Kiseki's solution (matching XNU's pattern):
-1. `thread_set_wait()` sets `TH_WAIT` under `thread_lock`
-2. `thread_unblock()` atomically checks `TH_WAIT` under the same lock
-3. `sched_enqueue_cpu()` checks the `on_runq` flag before inserting
-4. `thread_block_check()` re-checks state: if already `TH_RUN` (woken by a concurrent unblock), dequeues self from the run queue instead of switching
+**File:** `kernel/kern/sched.c`
 
-### 4.4 Spinlocks, Mutexes & Condition Variables
+**For the systems newcomer:** A scheduler answers one question: "which thread should the CPU run next?" The simplest answer is round-robin (take turns), but that treats a latency-sensitive GUI thread the same as a background compiler. A **Multilevel Feedback Queue (MLFQ)** solves this by assigning each thread a priority and always running the highest-priority runnable thread first.
 
-Kiseki implements four synchronisation primitives (`kernel/kern/sync.c`, 578 lines):
+Kiseki's MLFQ has **128 priority levels** (0 = lowest, 127 = highest). Each level has a linked list of threads. The scheduler picks the highest non-empty level and runs the first thread in that list.
 
-**Spinlocks** — Non-sleeping, IRQ-disabling. Used for short critical sections (PMM lock, run queue lock, etc.).
+```
+Per-CPU Run Queue (128 priority levels)
 
-The ARM64 implementation uses the `SEVL/WFE` + `LDAXR/STXR` pattern:
+  Priority 127: [Thread A] -> [Thread B] -> NULL     (highest)
+  Priority 126: NULL
+  Priority 125: NULL
+      ...
+  Priority  64: [Thread C] -> NULL                    (default user priority)
+      ...
+  Priority   1: NULL
+  Priority   0: [Thread D] -> NULL                    (lowest)
+
+  Scheduler picks: Thread A (highest non-empty level)
+```
+
+**Three scheduling policies:**
+
+| Policy | Value | Behaviour |
+|--------|-------|-----------|
+| `SCHED_OTHER` | 0 | Standard timesharing: priority decays when quantum expires, periodically restored |
+| `SCHED_FIFO` | 1 | Real-time FIFO: runs until it blocks or a higher-priority thread arrives |
+| `SCHED_RR` | 2 | Real-time round-robin: like FIFO but with time slices |
+
+Most threads use `SCHED_OTHER` (the default). The "feedback" in MLFQ comes from the priority decay rule: when a thread uses its entire quantum (10ms = 10 timer ticks at 100Hz), its `effective_priority` drops by 1. CPU-hungry threads gradually sink to lower priorities, while I/O-bound threads (which block often and rarely exhaust their quantum) stay at higher priorities. This naturally gives interactive programs better responsiveness.
+
+#### The Scheduler Tick
+
+**File:** `kernel/kern/sched.c:1024` (`sched_tick`)
+
+The timer fires at 100Hz on every core. Each core's `timer_handler()` calls `sched_tick()`:
+
+```
+Timer IRQ (100 Hz, per-core)
+  |
+  v
+timer_handler()                     [kernel/drivers/timer/timer.c:139]
+  |
+  +-- Rearm timer (write CNTV_TVAL_EL0)
+  |
+  +-- CPU 0 only: increment tick_count, poll VirtIO-net RX
+  |
+  +-- sched_tick()                  [kernel/kern/sched.c:1024]
+        |
+        +-- Wakeup expired sleepers (CPU 0 only)
+        |
+        +-- If current == idle_thread:
+        |     increment idle_ticks
+        |     if run_count > 0: set need_resched
+        |
+        +-- Else (normal thread):
+              quantum--
+              if quantum <= 0:
+                effective_priority-- (SCHED_OTHER only)
+                set need_resched
+              every 100 ticks:
+                restore effective_priority to base (anti-starvation)
+```
+
+The `need_resched` flag is checked on return from the IRQ handler. If set, the trap return path calls `sched_switch()` before returning to the interrupted thread.
+
+#### The Context Switch: sched_switch()
+
+**File:** `kernel/kern/sched.c:769` (`sched_switch`)
+
+This is the core of the scheduler. It runs with **interrupts masked** to prevent nested switches:
+
+```
+sched_switch()
+  |
+  +-- Mask IRQs (save DAIF, set daifset #0x2)
+  |
+  +-- spin_lock(&run_lock)
+  |
+  +-- If old thread is still TH_RUN: re-enqueue on local run queue
+  |
+  +-- Pick next: scan run_queue[127] down to run_queue[0]
+  |   Take first thread from highest non-empty level
+  |   If nothing found: use idle_thread
+  |
+  +-- spin_unlock(&run_lock)   (IRQs still masked!)
+  |
+  +-- If new == old: reset quantum, restore priority, unmask IRQs, return
+  |
+  +-- Set new->cpu, new->quantum = 10, update current_thread
+  |
+  +-- Switch VM space? If new->task->vm_space != old->task->vm_space:
+  |     vmm_switch_space() -- writes TTBR0_EL1 with new ASID
+  |
+  +-- context_switch(&old->context, &new->context)   [assembly]
+  |     Saves x19-x30, SP, d8-d15 to old->context
+  |     Loads x19-x30, SP, d8-d15 from new->context
+  |     "ret" jumps to new->context.x30 (the new thread's saved LR)
+  |
+  +-- (We are now running as the RESUMED thread)
+  +-- Restore IRQs from this thread's saved DAIF flags
+```
+
+**Why IRQs must stay masked across context_switch:** If a timer IRQ fired between releasing the run lock and saving the old context, it would trigger a *nested* `sched_switch()`. The nested switch would save and restore registers at a deeper stack frame, and when the outer switch's `context_switch` returns, the stack would be corrupted. This is the same reason XNU's `machine_switch_context()` runs with interrupts disabled.
+
+**Same-thread optimisation:** When only one thread is runnable, `sched_switch()` detects `new == old` and takes a fast path: reset the quantum and restore the priority (so a sole thread isn't permanently penalised by priority decay), then return without touching `context_switch`.
+
+#### Thread Creation
+
+**File:** `kernel/kern/sched.c:171` (`thread_create`)
+
+```c
+struct thread *thread_create(const char *name, void (*entry)(void *),
+                             void *arg, int priority)
+{
+    struct thread *th = alloc_thread();          // Find free slot in pool
+    uint64_t stack_pa = pmm_alloc_pages(3);      // 2^3 = 8 pages = 32 KB stack
+
+    th->kernel_stack = (uint64_t *)stack_pa;
+    th->priority = priority;
+    th->effective_priority = priority;
+    th->quantum = 10;                            // 10 ticks = 100ms
+    th->state = TH_RUN;
+
+    // Set up initial context so first context_switch enters thread_trampoline
+    th->context.sp  = stack_pa + 32768;          // Top of stack
+    th->context.x30 = (uint64_t)thread_trampoline;  // "return address"
+    th->context.x19 = (uint64_t)entry;           // Saved for trampoline
+    th->context.x20 = (uint64_t)arg;             // Saved for trampoline
+    th->context.x29 = 0;                         // FP sentinel
+    return th;
+}
+```
+
+The trick is in the initial context setup. A brand-new thread has never been context-switched, so its `cpu_context` is fabricated:
+
+1. `x30` (LR) is set to `thread_trampoline` -- so when `context_switch` does `ret`, it "returns" into the trampoline.
+2. `x19` and `x20` hold the entry function and argument -- these are callee-saved registers, so `context_switch` preserves them.
+3. `sp` points to the top of a freshly allocated 32 KB kernel stack.
+
+The trampoline (`sched.c:138`) enables interrupts (new threads start with IRQs masked), reads entry/arg from x19/x20, calls `entry(arg)`, and if the function returns, calls `thread_exit()`.
+
+```
+First context switch into new thread:
+
+  context_switch(&old->context, &new->context)
+    |
+    +-- Restore x19 = entry, x20 = arg, x30 = thread_trampoline, SP = stack_top
+    +-- ret  -->  thread_trampoline()
+                    |
+                    +-- Enable IRQs (msr daifclr, #0x2)
+                    +-- entry(arg)     // The actual thread function
+                    +-- thread_exit()  // If entry() returns
+```
+
+#### Sleep and Wakeup
+
+Kiseki implements the classic BSD **wait channel** pattern (also used in XNU as `assert_wait`/`thread_wakeup`):
+
+**Sleeping** (`sched.c:289`, `thread_sleep_on`): A thread sets `wait_channel` to an arbitrary kernel address (typically `&some_struct_field`), transitions to `TH_WAIT`, and calls `sched_switch()`. The scheduler sees `TH_WAIT` and does NOT re-enqueue it.
+
+**Waking** (`sched.c:362`, `thread_wakeup_on`): Scans all 256 thread slots for any thread in `TH_WAIT` whose `wait_channel` matches. Uses atomic CAS (`TH_WAIT` -> `TH_RUN`) to prevent the double-enqueue race where two cores wake the same thread simultaneously.
+
+**The missed-wakeup problem:** There is a classic race condition:
+
+```
+Thread A (sleeper)              Thread B (waker)
+------------------              ----------------
+lock(queue_lock)
+check: queue empty? yes
+unlock(queue_lock)
+                                lock(queue_lock)
+                                enqueue(item)
+                                unlock(queue_lock)
+                                thread_wakeup_on(&queue)  <-- A is not TH_WAIT yet!
+set TH_WAIT
+sched_switch()                  <-- A sleeps FOREVER (wakeup was lost)
+```
+
+`thread_sleep_on_locked()` (`sched.c:330`) solves this by setting `TH_WAIT` *before* releasing the lock:
+
+```c
+void thread_sleep_on_locked(void *chan, const char *reason,
+                            spinlock_t *lock, uint64_t flags)
+{
+    th->wait_channel = chan;
+    th->state = TH_WAIT;           // Set WAIT while still holding lock
+    spin_unlock_irqrestore(lock, flags);  // Now release
+    sched_switch();                 // Switch away
+}
+```
+
+This is the equivalent of XNU's `lck_mtx_sleep()` or FreeBSD's `msleep()`.
+
+#### Timed Sleep
+
+**File:** `kernel/kern/sched.c:393` (`thread_sleep_ticks`)
+
+A **sorted sleep queue** holds threads waiting for a timed wakeup. Threads are inserted in order of `wakeup_tick` so that the wakeup check (`sched_wakeup_sleepers`, called from `sched_tick` on CPU 0) only needs to scan from the front until it finds a thread whose time hasn't come yet:
+
+```
+Sleep queue (sorted by wakeup_tick):
+
+  sleep_queue -> [tid=5, wake@150] -> [tid=8, wake@200] -> [tid=3, wake@350] -> NULL
+
+  Current tick: 155
+  --> Wake tid=5 (150 <= 155), stop at tid=8 (200 > 155)
+```
+
+### 4.4 SMP Load Balancing
+
+**File:** `kernel/kern/sched.c:539-738`
+
+With 4 CPU cores, the scheduler must distribute threads across them. Kiseki uses three mechanisms:
+
+**1. Least-loaded placement** (`sched_find_least_loaded_cpu`, `sched.c:554`): When a new thread is first enqueued (`th->cpu == -1`), it goes to the CPU with the lowest `run_count`. This spreads new work across cores.
+
+**2. Cache-affinity stickiness**: When an existing thread is re-enqueued (e.g., after waking from sleep), it stays on the same CPU it last ran on. This preserves warm caches (the thread's data is likely still in that core's L1/L2 cache).
+
+**3. Work stealing** (`sched_steal_work`, `sched.c:648`): When a core's run queue is empty, its idle thread tries to steal work from the busiest core. It finds the core with the highest `run_count`, takes the lock, and removes the lowest-priority thread:
+
+```
+CPU 0 (busy)                        CPU 2 (idle)
++---------------------+            +---------------+
+| run_count=4         |            | run_count=0   |
+| [A]->[B]->[C]->[D]  |            | (empty)       |
++---------------------+            +---------------+
+                                         |
+                        idle_thread_func:
+                        stolen = sched_steal_work(2)
+                        --> Scans CPUs, finds CPU 0 has max load
+                        --> Locks CPU 0's run_lock
+                        --> Removes thread D (lowest pri)
+                        --> Enqueues D on CPU 2
+                                         |
+                                         v
+CPU 0                               CPU 2
++---------------------+            +---------------+
+| run_count=3         |            | run_count=1   |
+| [A]->[B]->[C]       |            | [D]           |
++---------------------+            +---------------+
+```
+
+**IPI-driven wakeup:** When a thread is enqueued on a remote CPU (e.g., CPU 0 unblocks a thread assigned to CPU 2), an **Inter-Processor Interrupt** (IPI) is sent via the GIC (`gic_send_sgi(IPI_RESCHEDULE, 1 << cpu_id)`). This wakes the target CPU from WFI (Wait For Interrupt) so it can schedule the new thread immediately rather than waiting for its next timer tick.
+
+```
+CPU 0                                    CPU 2
+  |                                        |
+  | thread_unblock(th)                     | (idle, in WFI)
+  | --> sched_enqueue(th)                  |
+  |     --> target = CPU 2 (th->cpu)       |
+  |     --> sched_enqueue_cpu(th, 2, true) |
+  |         --> add to CPU 2's run_queue   |
+  |         --> need_resched = true         |
+  |         --> gic_send_sgi(0, 1<<2) --IPI-->  (wakes from WFI)
+  |                                        |  sched_yield()
+  |                                        |  --> picks th from run_queue
+  |                                        |  --> context_switch to th
+```
+
+**QEMU-specific considerations:** The work-stealing code has a double-check optimisation: it reads `run_count` without the lock first, and only takes the lock if the count is >= 2. This avoids lock contention in QEMU TCG mode (where all 4 virtual CPUs share one host thread). Without this, three idle CPUs would all compete for one busy CPU's `run_lock` on every timer tick.
+
+### 4.5 Spinlocks, Mutexes & Condition Variables
+
+**File:** `kernel/kern/sync.c` (410 lines), `kernel/include/kern/sync.h`
+
+**For the systems newcomer:** When two threads (possibly on different CPU cores) access shared data, they need synchronisation to avoid corruption. There are two fundamental approaches:
+
+1. **Spin** -- keep trying in a tight loop (busy-wait). Fast for very short critical sections.
+2. **Sleep** -- put the thread to sleep and wake it when the resource is free. Better for longer waits.
+
+Kiseki provides four synchronisation primitives, matching XNU's:
+
+| Primitive | Spin or Sleep? | IRQs disabled? | XNU Equivalent |
+|-----------|---------------|----------------|----------------|
+| Spinlock | Spin | Yes (when using `_irqsave`) | `hw_lock_t`, `lck_spin_t` |
+| Mutex | Adaptive (spin then sleep) | No | `lck_mtx_t` |
+| Semaphore | Sleep | No | Mach `semaphore_t` |
+| Condition variable | Sleep | No | `pthread_cond_t` (via `condvar_wait`) |
+
+#### Spinlocks
+
+**File:** `kernel/kern/sync.c:37` (`spin_lock`)
+
+```c
+typedef struct {
+    volatile uint32_t locked;   // 0 = free, 1 = held
+    uint32_t _pad;
+} spinlock_t;
+```
+
+The implementation uses ARM64 **exclusive load/store** instructions (`LDAXR`/`STXR`) for atomic compare-and-swap:
 
 ```asm
-spin_lock:
-    sevl                    // Set Event Locally (prevents first WFE from blocking)
-1:  wfe                     // Wait For Event (low-power spin)
-    ldaxr   w0, [lock]      // Load-Acquire Exclusive
-    cbnz    w0, 1b           // If locked, retry
-    stxr    w0, #1, [lock]   // Store Exclusive
+// sync.c:58-70  (simplified)
+1:  ldaxr   w0, [lock]       // Exclusive load with acquire semantics
+    cbnz    w0, 2f           // If locked != 0, go to spin
+    stxr    w0, #1, [lock]   // Try to store 1 (exclusively)
     cbnz    w0, 1b           // If store failed (contention), retry
+    b       3f               // Success!
+2:  yield                    // Hint: we're spinning
+    b       1b               // Retry
+3:                           // Lock acquired
 ```
 
-The `LDAXR` (Load-Acquire Exclusive) provides acquire semantics — all subsequent reads/writes are ordered after this load. The `STLR` (Store-Release) in `spin_unlock` provides release semantics. Together they form a happens-before relationship that guarantees mutual exclusion.
+**Why LDAXR/STXR instead of a simple compare-and-swap?** ARM64 uses a **Load-Link / Store-Conditional (LL/SC)** model. `LDAXR` marks the cache line as "exclusively owned" by this core. `STXR` only succeeds if no other core has touched that cache line since the `LDAXR`. If another core wrote to the same line (even a different word in the same 64-byte cache line), `STXR` fails and we retry. This is more efficient than x86's `LOCK CMPXCHG` on workloads with low contention.
 
-**Mutexes** — Adaptive spinning with direct handoff. Used for longer critical sections (VM map lock, file descriptor lock, etc.).
+**Unlock** uses `STLR` (Store with Release semantics) to ensure all writes inside the critical section are visible to other cores before the lock appears free:
 
-The adaptive spinning strategy:
-1. **Fast path**: try `LDAXR/STXR` once
-2. **Spin phase**: 100 iterations of `spin_trylock` + `yield`
-3. **Sleep phase**: enqueue on the mutex's wait queue, call `thread_block()`
+```asm
+// sync.c:75-81
+stlr    w0, [lock]       // Store 0 with release barrier
+sev                      // Send Event (wake cores in WFE)
+```
 
-On unlock, **direct handoff**: if there are waiters, the mutex is NOT released — instead, ownership is transferred directly to the first waiter, and the waiter is unblocked. This prevents lock stealing by adaptive spinners on other CPUs.
+**IRQ-saving variants:** `spin_lock_irqsave()` saves the DAIF register (which controls interrupt masking) and disables IRQs before acquiring the lock. `spin_unlock_irqrestore()` releases the lock and restores the saved IRQ state. This prevents deadlock: if a timer IRQ fired while holding a spinlock, and the IRQ handler tried to acquire the same lock, the core would deadlock (spinning forever on a lock it already holds, with the unlock code unable to run because IRQs are masked).
 
-> **XNU reference:** XNU's `lck_mtx` uses a similar adaptive spin → sleep strategy with turnstile-based priority inheritance. See [`osfmk/kern/locks.c`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/locks.c).
+```
+DEADLOCK scenario without irqsave:
 
-**Semaphores** — Counting semaphore with spinlock-protected wait queue. Used for Mach IPC port message queues (`msg_available`).
+  Thread on CPU 0:
+    spin_lock(&run_lock)
+    ... modifying run queue ...
+    |
+    +-- Timer IRQ fires! (interrupts NOT disabled)
+        |
+        +-- sched_tick()
+            |
+            +-- spin_lock(&run_lock)  <-- DEADLOCK!
+                (CPU 0 already holds this lock, IRQ handler
+                 can't return until it gets the lock,
+                 but the lock holder can't release until
+                 the IRQ handler returns)
+```
 
-The `semaphore_timedwait()` implementation is particularly interesting: it inserts the calling thread into both the semaphore's wait queue and the global sorted sleep queue, then calls `thread_block_check()`. On wakeup (either by `semaphore_signal()` or deadline expiry), it removes itself from whichever queue it's still on.
+**YIELD vs WFE:** Earlier versions used `WFE` (Wait For Event) in the spin loop, which on real hardware puts the core into a low-power state until another core sends `SEV`. But on QEMU TCG (where all vCPUs share one host thread), WFE blocks the *entire* emulated system -- the lock holder can't run to release the lock. `YIELD` is a polite hint that the loop is spinning, allowing QEMU to schedule other vCPUs.
 
-**Condition Variables** — Used for `proc_wait()` (parent waiting for child exit). `condvar_wait()` atomically releases the associated mutex and blocks, re-acquiring the mutex on wakeup. `condvar_broadcast()` detaches the entire waiter list and unblocks all waiters in sequence.
+#### Mutexes
 
-### 4.5 The Timer Driver
+**File:** `kernel/kern/sync.c:146` (`mutex_lock`)
 
-The ARM Generic Timer (`kernel/drivers/timer/timer.c`, 181 lines) drives the scheduler. Each CPU core has its own independent timer, firing PPI #27 (Private Peripheral Interrupt — each core gets its own instance).
+```c
+typedef struct {
+    volatile uint32_t locked;
+    volatile uint32_t _pad;
+    struct thread *owner;             // For priority inheritance
+    spinlock_t wait_lock;             // Protects the waiter queue
+    struct thread *waiters_head;      // FIFO queue of blocked threads
+    struct thread *waiters_tail;
+} mutex_t;
+```
 
-**Configuration:**
-- Read `CNTFRQ_EL0` for the counter frequency (QEMU: typically 62.5 MHz)
-- Compute interval: `timer_interval = freq / 100` (for 100 Hz)
-- Write `CNTV_TVAL_EL0 = timer_interval` (countdown value)
-- Enable: `CNTV_CTL_EL0 = CTL_ENABLE`
+Mutexes use **adaptive spinning**: try to acquire atomically (fast path), spin up to 100 iterations (medium path), then add to wait queue and sleep (slow path):
 
-**IRQ handler** (`timer_handler()`):
+```
+mutex_lock(mtx):
+  |
+  +-- mutex_trylock(mtx)?  --> yes: set owner, return     (FAST: < 10 ns)
+  |
+  +-- Spin 100 times:
+  |     mutex_trylock(mtx)?  --> yes: set owner, return   (MEDIUM: < 1 us)
+  |
+  +-- spin_lock_irqsave(&mtx->wait_lock)
+  |   append current thread to waiters_tail
+  |   spin_unlock_irqrestore(&mtx->wait_lock)
+  |
+  +-- thread_block("mutex_lock")  --> sleep               (SLOW: context switch)
+  |
+  +-- (woken by mutex_unlock)
+  +-- mtx->owner = current_thread
+```
 
-1. **Atomically increment `tick_count`** using ARM64 `LDXR/STXR`:
-   ```asm
-   1: ldxr  x0, [&tick_count]
-      add   x1, x0, #1
-      stxr  w2, x1, [&tick_count]
-      cbnz  w2, 1b
-   ```
-   This prevents lost increments when multiple CPUs fire their timer PPIs simultaneously.
+**Unlock with direct handoff** (`sync.c:194`): Instead of setting `locked = 0` and letting waiters race for it, `mutex_unlock` checks the wait queue *before* releasing:
 
-2. **Rearm timer**: write `CNTV_TVAL_EL0 = timer_interval`
+```c
+void mutex_unlock(mutex_t *mtx) {
+    spin_lock_irqsave(&mtx->wait_lock, &flags);
+    struct thread *waiter = mtx->waiters_head;
+    if (waiter) {
+        // Direct handoff: transfer ownership without unlocking
+        mtx->waiters_head = waiter->wait_next;
+        mtx->owner = waiter;    // locked stays 1
+        spin_unlock_irqrestore(&mtx->wait_lock, flags);
+        thread_unblock(waiter);
+    } else {
+        // No waiters: actually release
+        mtx->owner = NULL;
+        mtx->locked = 0;
+        spin_unlock_irqrestore(&mtx->wait_lock, flags);
+    }
+}
+```
 
-3. **Network polling** (core 0 only): call `virtio_net_recv()` — a NAPI-style approach that ensures network packets are never stuck in the VirtIO RX ring for more than one tick (10 ms)
+This prevents the **thundering herd** problem where multiple waiters all wake up and race for the lock, with all but one immediately going back to sleep. Direct handoff also prevents a third core from stealing the lock in the gap between `locked = 0` and the woken waiter's `mutex_trylock`.
 
-4. **Call `sched_tick()`** — wake sleepers, decrement quantum, do MLFQ demotion/aging
+#### Semaphores
+
+**File:** `kernel/kern/sync.c:248`
+
+```c
+typedef struct {
+    volatile int32_t count;     // Current count (> 0 means resources available)
+    uint32_t _pad;
+    spinlock_t lock;
+    struct thread *waiters_head;
+    struct thread *waiters_tail;
+} semaphore_t;
+```
+
+A counting semaphore with wait and signal operations. `semaphore_wait()` blocks if `count <= 0`; `semaphore_signal()` increments the count and wakes one waiter. These map to Mach's `semaphore_wait_trap` and `semaphore_signal_trap` system calls.
+
+#### Condition Variables
+
+**File:** `kernel/kern/sync.c:326`
+
+```c
+typedef struct {
+    struct thread *waiters_head;
+    struct thread *waiters_tail;
+    spinlock_t lock;
+} condvar_t;
+```
+
+The classic monitor pattern: `condvar_wait(cv, mtx)` atomically releases the mutex and sleeps on the condition variable's wait queue. When woken by `condvar_signal()` or `condvar_broadcast()`, it re-acquires the mutex before returning.
+
+```
+condvar_wait(cv, mtx):
+  +-- Append current thread to cv->waiters
+  +-- mutex_unlock(mtx)              // Release before sleeping
+  +-- thread_block("condvar_wait")   // Sleep
+  +-- (woken by condvar_signal)
+  +-- mutex_lock(mtx)                // Re-acquire before returning
+```
+
+`condvar_signal()` wakes one waiter (FIFO order). `condvar_broadcast()` wakes all waiters. These are used throughout the kernel -- for example, the TTY subsystem uses them for waiting on input, and the IPC message queue uses them for blocking receives.
+
+**Comparison with XNU synchronisation:**
+
+| Kiseki | XNU | Notes |
+|--------|-----|-------|
+| `spin_lock` | `hw_lock_lock`, `lck_spin_lock` | Both use LDAXR/STXR on ARM64 |
+| `spin_lock_irqsave` | `splhigh` + `hw_lock_lock` | Kiseki combines them |
+| `mutex_lock` | `lck_mtx_lock` | Both do adaptive spinning + sleep |
+| `semaphore_wait/signal` | `semaphore_wait_trap`/`signal_trap` | Mach trap interface |
+| `condvar_wait` | `cv_wait` (BSD), `thread_block` (Mach) | Similar semantics |
+| `thread_sleep_on` | `assert_wait` + `thread_block` | BSD `tsleep` pattern |
+| `thread_wakeup_on` | `thread_wakeup_prim` | BSD `wakeup` pattern |
+
+### 4.6 The Timer Driver
+
+**File:** `kernel/drivers/timer/timer.c` (182 lines)
+
+The timer is the heartbeat of the scheduler. Without it, a CPU-bound thread would run forever and no other thread would get a chance. Kiseki uses the **ARM Generic Timer** -- a hardware counter built into every ARM64 core.
+
+**Key hardware registers:**
+
+| Register | Full Name | Purpose |
+|----------|-----------|---------|
+| `CNTFRQ_EL0` | Counter Frequency | Clock speed of the counter (set by firmware, read-only). Typically 62.5 MHz on QEMU virt |
+| `CNTVCT_EL0` | Virtual Counter | Monotonically increasing tick counter (read-only). Like an always-on stopwatch |
+| `CNTV_TVAL_EL0` | Timer Value | Countdown register. When it reaches 0, the timer fires an IRQ |
+| `CNTV_CTL_EL0` | Timer Control | Enable/disable the timer and mask/unmask its interrupt |
+
+**Initialisation** (`timer.c:70`, `timer_init`):
+
+```c
+void timer_init(uint32_t hz)    // hz = 100 (10ms tick period)
+{
+    uint64_t freq = read_cntfrq();              // e.g., 62,500,000 Hz
+    timer_interval = freq / hz;                  // e.g., 625,000 counter ticks
+    tick_count = 0;
+
+    // Enable EL0 access to CNTVCT_EL0 (for commpage mach_absolute_time)
+    cntkctl |= (1 << 1) | (1 << 0);            // EL0VCTEN | EL0PCTEN
+
+    gic_enable_irq(27);                          // Enable PPI 27 (virtual timer)
+    write_cntv_tval(timer_interval);             // Set countdown
+    write_cntv_ctl(CTL_ENABLE);                  // Start!
+}
+```
+
+The counter ticks at 62.5 MHz. We want a 100 Hz scheduler tick, so we set `CNTV_TVAL = 62,500,000 / 100 = 625,000`. When the countdown reaches zero, IRQ 27 fires.
+
+**Per-core timers:** Each CPU core has its **own** ARM Generic Timer. Secondary cores call `timer_init_percpu()` to arm their local timer. This means each core gets independent 100Hz ticks -- critical for SMP scheduling, where each core's `sched_tick()` independently decrements its current thread's quantum.
+
+**Timer handler** (`timer.c:139`):
+
+```c
+void timer_handler(void)
+{
+    write_cntv_tval(timer_interval);    // Rearm for next tick
+    write_cntv_ctl(CTL_ENABLE);         // Clear pending status
+
+    // CPU 0 only: increment global tick counter + poll network
+    if (cd->cpu_id == 0) {
+        tick_count++;
+        virtio_net_recv();              // NAPI-style RX polling
+    }
+
+    sched_tick();                        // Per-core scheduler tick
+}
+```
+
+**Why only CPU 0 increments `tick_count`?** The variable is a plain `volatile uint64_t`, not an atomic. If all 4 cores did `tick_count++` simultaneously, they would read the same value and write back the same value plus one, losing 3 increments. Rather than adding atomic overhead, Kiseki designates CPU 0 as the timekeeper. The sleep queue and `timer_get_ticks()` all use this single counter.
+
+**EL0 access to the counter:** The `CNTKCTL_EL1` register is configured to allow user-space reads of `CNTVCT_EL0`. This lets the CommPage's `mach_absolute_time()` implementation read the hardware counter directly from EL0 without a syscall -- the same optimisation used by macOS, where `mach_absolute_time()` resolves to a single `mrs x0, cntvct_el0` instruction via the commpage.
+
+```
+Timer flow on a 4-core system:
+
+  Core 0           Core 1           Core 2           Core 3
+    |                |                |                |
+    v                v                v                v
+  IRQ 27           IRQ 27           IRQ 27           IRQ 27
+    |                |                |                |
+  timer_handler()  timer_handler()  timer_handler()  timer_handler()
+    |                |                |                |
+  rearm timer      rearm timer      rearm timer      rearm timer
+  tick_count++     (skip)           (skip)           (skip)
+  virtio_net_recv  (skip)           (skip)           (skip)
+  sched_tick()     sched_tick()     sched_tick()     sched_tick()
+    |                |                |                |
+  check quantum    check quantum    check quantum    check quantum
+  on this core's   on this core's   on this core's   on this core's
+  current thread   current thread   current thread   current thread
+```
+
+**Utility functions:**
+
+- `timer_get_ticks()` -- returns the global tick counter (used by `thread_sleep_ticks`)
+- `timer_get_freq()` -- returns `CNTFRQ_EL0` (used by CommPage to compute nanoseconds)
+- `timer_delay_us(us)` -- busy-wait by polling `CNTVCT_EL0`. Used for short delays during driver initialisation (e.g., VirtIO device reset)
 
 ---
 
-## Chapter 5: Processes — Fork, Exec, Exit
+## Chapter 5: Processes -- Fork, Exec, Exit
 
-### 5.1 The Process Table
+Chapters 2-4 built the foundations: memory management, threads, and scheduling. This chapter assembles them into **processes** -- the user-visible unit of isolation that contains an address space, file descriptors, credentials, and one or more threads.
 
-Every process in Kiseki is represented by a `struct proc` — a 256-slot static table (`proc_table[PROC_MAX]`) in `kernel/kern/proc.c` (1784 lines). Each slot contains:
+### 5.1 The Process Structure
+
+**Files:** `kernel/include/kern/proc.h`, `kernel/kern/proc.c`
+
+Like threads, processes live in a **static table** of 256 entries:
 
 ```c
+// proc.c:76-77
+struct proc  proc_table[PROC_MAX];     // PROC_MAX = 256
+spinlock_t   proc_table_lock = SPINLOCK_INIT;
+```
+
+PIDs map 1:1 to table indices (`proc_table[pid]`), so `proc_find(pid)` is O(1). PID 0 is the kernel "process" (owns the boot thread), PID 1 is init.
+
+The `struct proc` is large -- it is the BSD-layer process descriptor that contains everything a Unix process needs:
+
+```c
+// proc.h:63-121 (abridged, with annotations)
 struct proc {
-    pid_t            p_pid, p_ppid;          // Process ID, parent PID
-    char             p_comm[32];             // Process name
-    int              p_state;                // UNUSED/EMBRYO/RUNNING/ZOMBIE/etc.
-    struct task     *p_task;                 // Mach task (threads + VM)
-    struct vm_space *p_vmspace;              // User address space
-    struct ucred     p_ucred;                // Credentials (uid, gid, saved IDs)
-    struct filedesc  p_fd;                   // Open file table
-    struct sigacts   p_sigacts;              // Signal handlers + pending signals
-    struct proc     *p_parent, *p_children, *p_sibling; // Process tree
-    int              p_exitstatus;           // For wait()
-    condvar_t        p_waitcv;              // Parent sleeps here for child exit
-    struct vnode    *p_cwd;                  // Current working directory
-    mode_t           p_umask;                // File creation mask (default 022)
-    // ... (session, pgrp, timing, dyld info)
+    /* --- Identity --- */
+    pid_t           p_pid;              // Process ID
+    pid_t           p_ppid;             // Parent PID
+    char            p_comm[32];         // Process name (e.g., "/sbin/init")
+    int             p_state;            // PROC_RUNNING, PROC_ZOMBIE, etc.
+
+    /* --- Mach layer --- */
+    struct task     *p_task;            // Mach task (threads + VM space)
+    struct vm_space *p_vmspace;         // Page tables + vm_map
+
+    /* --- BSD layer --- */
+    struct ucred    p_ucred;            // Credentials (uid, gid, euid, egid)
+    struct filedesc p_fd;               // File descriptor table (64 slots)
+    struct sigacts  p_sigacts;          // Signal handlers + pending mask
+
+    /* --- Process tree --- */
+    struct proc     *p_parent;          // Parent process
+    struct proc     *p_children;        // First child (linked list head)
+    struct proc     *p_sibling;         // Next sibling (same parent)
+
+    /* --- Exit/wait --- */
+    int             p_exitstatus;       // Status for wait4()
+    bool            p_exited;
+    condvar_t       p_waitcv;           // Parent sleeps here in wait4()
+    mutex_t         p_waitmtx;
+
+    /* --- Filesystem --- */
+    struct vnode    *p_cwd;             // Current working directory
+    char            p_cwd_path[256];    // CWD path string
+    mode_t          p_umask;            // File creation mask (default 022)
+
+    /* --- Process group / session --- */
+    pid_t           p_pgrp;             // Process group ID
+    pid_t           p_session;          // Session ID
+    bool            p_session_leader;   // Controls the TTY
 };
 ```
 
-This is the Mach+BSD duality in action: every `struct proc` contains a `struct task *` (Mach side) and BSD fields (PID, files, credentials). A single entity viewed from two different API layers.
-
-> **XNU reference:** XNU's `struct proc` is in [`bsd/sys/proc_internal.h`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_internal.h) — much larger (hundreds of fields), but the same dual-nature design.
-
-**Process creation** (`proc_create()`, line 330) allocates a PID via linear scan, creates a `vm_space`, inherits credentials from the parent, initialises signal state, sets up stdio (for init-like processes), and links into the parent's child list.
-
-### 5.2 fork()
-
-`sys_fork_impl()` (`kernel/kern/proc.c:692`) creates a copy of the calling process. This is arguably the most complex syscall in any Unix kernel.
-
-```mermaid
-sequenceDiagram
-    participant Parent as Parent Process
-    participant Kernel
-    participant Child as Child Process
-
-    Parent->>Kernel: svc #0x80 (x16=2, fork)
-    Kernel->>Kernel: 1. proc_create(parent_name, parent)
-    Kernel->>Kernel: 2. vmm_copy_space(child, parent)<br/>COW all user pages
-    Kernel->>Kernel: 3. fd_dup_table(child_fd, parent_fd)<br/>Share all open files
-    Kernel->>Kernel: 4. Create child Mach task + IPC space
-    Kernel->>Kernel: 5. thread_create("fork_child")
-    Kernel->>Kernel: 6. Copy parent trap frame → child stack<br/>Set child x0=0 (return value)
-    Kernel->>Kernel: 7. Set child context:<br/>x30=fork_child_return<br/>x19=child vm_space
-    Kernel->>Kernel: 8. DSB SY + enqueue child thread
-    Kernel->>Parent: Return child PID (in x0)
-
-    Note over Child: Scheduler picks child thread
-    Child->>Child: fork_child_return (vectors.S)<br/>Switch TTBR0 → child page tables<br/>Flush TLB<br/>RESTORE_REGS → eret to user
-    Child->>Child: Returns from fork() with x0=0
-```
-
-Key details:
-
-- **Step 2** uses `vmm_copy_space()` (§3.5) for COW sharing — no physical pages are copied, just PTEs
-- **Step 3** increments `f_refcount` on every open file — parent and child share file offsets and everything
-- **Step 6** copies the parent's entire trap frame (saved at the top of the parent's kernel stack) to the top of the child's kernel stack, then sets `child_tf->regs[0] = 0` (so the child sees `fork()` returning 0)
-- **Step 7** configures the child thread's context so the scheduler dispatches into `fork_child_return` assembly, which switches to the child's address space and returns to user mode
-
-### 5.3 execve()
-
-`sys_execve_impl()` (`kernel/kern/proc.c:1001`) replaces the current process image with a new Mach-O binary. It is the second most complex syscall.
-
-```mermaid
-flowchart TD
-    A["execve(path, argv, envp)"] --> B["Copy path/argv/envp from user space<br/>into PMM-allocated scratch buffer<br/>(BEFORE destroying old VM!)"]
-    B --> C["vfs_stat(path) for SUID/SGID"]
-    C --> D["Switch TTBR0 to kernel PGD<br/>(temporary, while building new space)"]
-    D --> E["vmm_create_space() — new address space"]
-    E --> F["macho_load(path, new_space)<br/>Parse Mach-O, load segments,<br/>find dyld if needed"]
-    F --> G{"Success?"}
-    G -->|No| H["Destroy new space<br/>Restore old space<br/>Return -ENOEXEC"]
-    G -->|Yes| I["POINT OF NO RETURN<br/>Destroy old VM space<br/>Commit new space"]
-    I --> J["Handle SUID/SGID"]
-    J --> K["Allocate + map user stack<br/>(8 MB + guard page)"]
-    K --> L["Build stack frame:<br/>[mach_header] argc argv[] NULL envp[] NULL apple[] NULL strings"]
-    L --> M["Map CommPage"]
-    M --> N["Close FD_CLOEXEC fds"]
-    N --> O["vmm_switch_space(new)"]
-    O --> P["Set trap frame:<br/>ELR=entry, SP=stack, SPSR=0<br/>Zero all GPRs"]
-```
-
-The **user stack layout** built by `execve()` matches the macOS/XNU convention:
+**Process states:**
 
 ```
-SP → [mach_header *]    ← only if dyld is loaded (XNU convention)
-      argc               ← int, number of arguments
-      argv[0] pointer
-      argv[1] pointer
-      ...
-      NULL               ← end of argv
-      envp[0] pointer
-      envp[1] pointer
-      ...
-      NULL               ← end of envp
-      apple[0] pointer   ← "executable_path=/sbin/init"
-      ...
-      NULL               ← end of apple strings
-      string data        ← actual characters for argv/envp/apple
+              proc_create()
+                  |
+                  v
+  PROC_UNUSED --> PROC_EMBRYO --> PROC_RUNNING
+                                     |    ^
+                         all threads |    | thread wakes up
+                         blocked     |    |
+                                     v    |
+                               PROC_SLEEPING
+                                     |
+                          proc_exit()|
+                                     v
+                               PROC_ZOMBIE ----> PROC_UNUSED
+                                          (parent calls wait4, reaps)
 ```
 
-This is the exact layout that `dyld` and `crt0.S` expect. The `mach_header` pointer pushed below `argc` tells `dyld` where the main binary's Mach-O header is mapped.
+| State | Value | Meaning |
+|-------|-------|---------|
+| `PROC_UNUSED` | 0 | Slot is free (can be allocated) |
+| `PROC_EMBRYO` | 1 | Being created (between `proc_create` and setup completion) |
+| `PROC_RUNNING` | 2 | Active: has at least one runnable thread |
+| `PROC_SLEEPING` | 3 | All threads are blocked |
+| `PROC_STOPPED` | 4 | Stopped by SIGSTOP/SIGTSTP |
+| `PROC_ZOMBIE` | 5 | Exited but not yet reaped by parent's `wait4()` |
 
-> **Security note:** The scratch buffer copy in step B is critical for security. If the kernel reads argv/envp directly from user memory during exec, a malicious concurrent thread could modify the strings after validation (a TOCTOU attack). Copying to kernel memory first eliminates this.
+**Relationship between proc, task, and thread:**
 
-### 5.4 exit() and wait4()
-
-**`proc_exit()`** (line 431):
-
-1. Close all file descriptors
-2. Release current working directory vnode
-3. **Reparent all children to init** (PID 1) — if any child is already a zombie, wake init so it can reap it
-4. **Switch TTBR0 to kernel PGD before freeing user page tables** — prevents the TLB walker from following freed page table pages
-5. Destroy user VM space
-6. Destroy IPC space
-7. Set state = `PROC_ZOMBIE`, store exit status
-8. Signal parent's `p_waitcv` condition variable
-
-**`proc_wait()`** (line 516):
-
-1. Acquire parent's `p_waitmtx`
-2. Scan child list for a zombie matching the requested PID (-1 = any)
-3. If found: collect exit status, unlink from child list, free PID slot
-4. If no children at all: return `-ECHILD`
-5. If `WNOHANG`: return 0 immediately
-6. Otherwise: `condvar_wait()` on `p_waitcv`, then retry
-
-### 5.5 Signals
-
-Kiseki implements POSIX signals (`kernel/bsd/syscalls.c`, signal infrastructure starting at line 3790) with 32 signal types and the standard default actions:
-
-| Default | Signals |
-|---------|---------|
-| Terminate | SIGHUP, SIGINT, SIGPIPE, SIGALRM, SIGTERM, SIGUSR1/2 |
-| Core dump | SIGQUIT, SIGILL, SIGABRT, SIGFPE, SIGSEGV, SIGBUS, SIGSYS, SIGTRAP |
-| Stop | SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU |
-| Ignore | SIGCHLD, SIGURG, SIGWINCH |
-| Continue | SIGCONT |
-
-**Signal delivery** (`signal_check()`, line 3922) runs on the return-to-user path (after every syscall and IRQ from user mode):
-
-```mermaid
-flowchart TD
-    A["signal_check(thread, trapframe)"] --> B{Any pending<br/>non-blocked signals?}
-    B -->|No| DONE["Return false"]
-    B -->|Yes| C["Pick lowest pending signal"]
-    C --> D{Handler?}
-    D -->|SIG_DFL| E{"Default action?"}
-    E -->|Terminate/Core| F["proc_exit(signal)"]
-    E -->|Stop| G["Set PROC_STOPPED"]
-    E -->|Ignore| H["Clear pending bit"]
-    D -->|SIG_IGN| H
-    D -->|Custom handler| I["Save trap frame to user stack"]
-    I --> J["Set ELR = handler address<br/>x0 = signal number<br/>LR = CommPage sigreturn trampoline<br/>SP = new_sp (below saved frame)"]
-    J --> K["Clear pending bit"]
-    K --> DONE2["Return true<br/>(trap frame modified)"]
+```
+struct proc (BSD layer)                struct task (Mach layer)
++---------------------------+          +-------------------------+
+| p_pid = 10                |          | pid = 10                |
+| p_comm = "Finder"         |   +----->| vm_space = 0x...        |
+| p_task -------------------+---+      | threads -> th1 -> th2   |
+| p_vmspace = 0x...         |          | ipc_space = 0x...       |
+| p_ucred (uid/gid)         |          | task_port = 0x...       |
+| p_fd (file descriptors)   |          +-------------------------+
+| p_sigacts (signals)        |
+| p_parent -> proc[1]       |
+| p_children -> proc[15]    |
++---------------------------+
 ```
 
-The **CommPage sigreturn trampoline** at `COMMPAGE_VA + 0x280` contains:
+In XNU, `proc` and `task` are strictly separate structures in different layers (BSD and Mach). Kiseki keeps both because they serve different purposes: `proc` holds Unix-visible state (PIDs, credentials, signals, file descriptors), while `task` holds Mach-visible state (threads, VM space, IPC ports). The `p_task` pointer bridges them.
 
-```asm
-mov     x16, #184       // SYS_sigreturn
-svc     #0x80
+### 5.2 Fork
+
+**File:** `kernel/kern/proc.c:711` (`sys_fork_impl`)
+
+`fork()` creates a copy of the calling process. The child is almost identical to the parent -- same code, same data, same open files -- but is a separate process with its own PID. The parent gets the child's PID returned; the child gets 0.
+
+**Fork steps (8 phases):**
+
+```
+sys_fork_impl(trap_frame)
+  |
+  1. proc_create(parent_name, parent)
+  |    --> Allocate PID, create fresh vm_space, init fd table, link into tree
+  |
+  2. vmm_copy_space(child_vmspace, parent_vmspace)
+  |    --> Walk parent's page tables, copy every user page
+  |        (deep copy: allocates new physical pages for each mapped VA)
+  |
+  3. fd_dup_table(&child_fd, &parent_fd)
+  |    --> Copy all 64 fd slots, increment refcount on each open file
+  |        (parent and child share the same struct file -- like Unix)
+  |
+  4. Create Mach task for child
+  |    --> Set pid, vm_space, credentials, IPC space
+  |
+  5. thread_create("fork_child", NULL, NULL, PRI_DEFAULT)
+  |    --> Allocate kernel thread with 32 KB stack
+  |
+  6. Copy parent's trap frame to top of child's kernel stack
+  |    --> child_tf = memcpy(parent_tf), then child_tf->regs[0] = 0
+  |                                                    ^
+  |                                              child returns 0 from fork()
+  |
+  7. Set child thread's saved context:
+  |    context.x30 = fork_child_return  (assembly trampoline)
+  |    context.sp  = &child_trap_frame  (where RESTORE_REGS will read)
+  |    context.x19 = child_vmspace      (for TTBR0 switch)
+  |
+  8. DSB SY barrier + sched_enqueue(child_thread)
+  |    --> Child is now runnable; parent returns with child PID
 ```
 
-When the user's signal handler returns (via `ret`), it jumps to this trampoline, which invokes `sys_sigreturn()`. The kernel then restores the original trap frame from the user stack, and the process resumes exactly where it was interrupted.
+**The fork_child_return trampoline** (in `vectors.S`) is the assembly code that a freshly forked child runs after its first context switch:
 
-> **XNU reference:** macOS uses the same CommPage trampoline mechanism. The CommPage is at `0x0000000FFFFFC000` on arm64. See [`osfmk/arm64/commpage/commpage.c`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/commpage/commpage.c).
+```
+context_switch saves parent, restores child
+  --> "ret" jumps to fork_child_return (was set as x30)
+      |
+      +-- Switch TTBR0 to child's page tables (from x19 = vm_space)
+      +-- RESTORE_REGS from trap frame on stack
+      +-- eret to user mode
+          --> child resumes at the instruction after the fork() syscall
+              with x0 = 0 (child's return value)
+```
+
+**Why deep copy instead of COW?** The comment in `proc.c:692-706` says "Full-copy fork (not COW -- simpler for now)". While Section 3.6 described the COW machinery (`vmm_copy_on_write`, `PTE_COW` bit, reference counting), the current `sys_fork_impl` uses `vmm_copy_space()` which does a full deep copy of every page. The COW infrastructure exists but is used for specific optimisations, not the main fork path. This trades memory efficiency for simplicity.
+
+**Memory barrier before enqueue:** Line 928 has `dsb sy` -- a full Data Synchronisation Barrier. This ensures all writes to the child's page tables, trap frame, and thread context are visible to other CPU cores before the child thread appears on any run queue. Without this, another core could start executing the child and see stale/partial page tables.
+
+### 5.3 Exec
+
+**File:** `kernel/kern/proc.c:1020` (`sys_execve_impl`)
+
+`execve()` replaces the current process's program with a new one. It keeps the same PID, file descriptors (except `FD_CLOEXEC`), and credentials (unless SUID), but replaces the address space entirely.
+
+```
+sys_execve_impl(tf, "/bin/ls", argv, envp)
+  |
+  1. Copy path, argv, envp into kernel scratch buffer (16 KB from PMM)
+  |   (Must copy BEFORE destroying old VM -- these pointers are in user memory!)
+  |
+  2. Stat the executable (for SUID/SGID check later)
+  |
+  3. Destroy old VM space, create fresh one
+  |   --> msr ttbr0_el1, kernel_pgd  (switch to kernel page tables first!)
+  |   --> vmm_destroy_space(old)
+  |   --> vmm_create_space()  --> new empty user address space
+  |
+  4. macho_load(path, new_vmspace, &result)
+  |   --> Parse Mach-O headers, map segments, load dyld if needed
+  |   --> Returns: entry_point, mach_header, dyld info
+  |
+  5. Handle SUID/SGID (set euid/egid to file owner if S_ISUID/S_ISGID)
+  |
+  6. Allocate user stack (1 MB, guard page at bottom)
+  |   --> Map pages from stack_bottom+4KB to stack_top
+  |
+  7. Build user stack layout:
+  |   +-------------------------------------------+  <-- stack_top
+  |   | (256 bytes headroom)                      |
+  |   | argv string data ("bin/ls\0", "-la\0")    |
+  |   | envp string data ("PATH=/bin\0", ...)     |
+  |   | apple string data ("executable_path=...") |
+  |   +-------------------------------------------+
+  |   | apple[0] pointer, NULL                    |
+  |   | envp[0], envp[1], ..., NULL               |
+  |   | argv[0], argv[1], ..., NULL               |
+  |   | argc (integer)                            |
+  |   | mach_header pointer (if dyld loaded)      |  <-- sp
+  |   +-------------------------------------------+
+  |
+  8. Map CommPage into new address space
+  |
+  9. Close FD_CLOEXEC file descriptors
+  |
+  10. Reset caught signal handlers to SIG_DFL (POSIX requirement)
+  |
+  11. Switch to new VM space (vmm_switch_space)
+  |
+  12. Set trap frame: tf->elr = entry_point, tf->sp = sp
+  |    --> Return from syscall will eret to the new program
+```
+
+**The scratch buffer trick:** User-space pointers (path, argv, envp) point into the old address space. If we destroyed the old VM first and then tried to read argv, we'd get garbage or a page fault. So step 1 copies everything into a 16 KB kernel buffer (allocated from PMM), and step 3 destroys the old VM.
+
+**Stack layout for dyld:** When the binary uses a dynamic linker, the kernel pushes the main binary's `mach_header` address at `[sp]`, then `argc` at `[sp+8]`. This is an XNU convention that dyld's `_start` function relies on to locate the main executable.
+
+**The load_result_t on the heap:** The `load_result_t` structure (returned by `macho_load`) is ~17 KB (it contains `dylib_paths[64][256]`). This is larger than the 32 KB kernel stack's safe margin, so it's allocated from PMM (32 KB, order 3) and freed after use. Stack overflow in the kernel is a hard panic -- there's no guard page in kernel space.
+
+### 5.4 Exit
+
+**File:** `kernel/kern/proc.c:446` (`proc_exit`)
+
+When a process calls `exit()` (or is killed by a signal), `proc_exit` cleans up:
+
+```
+proc_exit(p, status)
+  |
+  1. fd_close_all(p)
+  |   --> Close all 64 file descriptors
+  |       Decrement refcount on each struct file
+  |       If refcount hits 0: release vnode, close pipe end, free PTY
+  |
+  2. Release current working directory vnode
+  |
+  3. Reparent children to init (PID 1)
+  |   --> For each child of p:
+  |       child->p_parent = init_proc
+  |       Link into init's child list
+  |       If child is already ZOMBIE: wake init to reap it
+  |
+  4. Destroy VM space
+  |   --> Switch TTBR0 to kernel PGD first!
+  |       (Otherwise TLB misses walk freed page tables --> corruption)
+  |   --> vmm_destroy_space: free all user page tables + mapped pages
+  |
+  5. Destroy IPC space (release all Mach port rights)
+  |
+  6. Transition to PROC_ZOMBIE
+  |   p->p_exitstatus = status
+  |   p->p_state = PROC_ZOMBIE
+  |
+  7. Wake parent (condvar_signal(&parent->p_waitcv))
+  |   --> Parent unblocks from wait4() and reaps this zombie
+```
+
+**Why reparent to init?** Every process must have a parent to call `wait4()` and reap it. If the parent exits before the child, the child becomes an orphan. Reparenting to PID 1 (init) ensures every zombie eventually gets reaped. This is the same Unix convention used since the original V6 Unix.
+
+**The TTBR0 switch before destroy:** Line 500-501 explicitly switches to the kernel page table before freeing the user page table. This is a subtle but critical safety measure. Even though we're in kernel mode (EL1), the hardware might still have TTBR0 pointing to the user page table. If a TLB miss occurs for a low-half address (even for kernel identity-mapped regions stored in TTBR0's table), the MMU would walk the freed page -- which might have been reallocated for something else, causing silent corruption.
+
+### 5.5 Wait
+
+**File:** `kernel/kern/proc.c:535` (`proc_wait`)
+
+`wait4()` blocks the calling process until a child exits:
+
+```
+proc_wait(parent, wait_pid, &status, options)
+  |
+  retry:
+  |
+  +-- mutex_lock(&parent->p_waitmtx)
+  |
+  +-- spin_lock(&parent->p_lock)
+  |   Scan parent->p_children for a zombie matching wait_pid
+  |   (wait_pid == -1 means any child)
+  |
+  +-- Found zombie?
+  |     YES --> Remove from child list, pid_free(child_pid)
+  |             Return child PID + exit status
+  |     NO  --> Has any children at all?
+  |               NO  --> Return -ECHILD (no children to wait for)
+  |               YES --> WNOHANG set?
+  |                         YES --> Return 0 (non-blocking, nothing ready)
+  |                         NO  --> condvar_wait(&parent->p_waitcv, &mtx)
+  |                                 --> Sleep until child exits
+  |                                 --> goto retry
+```
+
+The `condvar_wait` / `condvar_signal` pair solves the classic producer-consumer problem: the child "produces" a zombie state, the parent "consumes" it. The mutex prevents the race where a child exits between the parent's zombie-scan and the `condvar_wait`.
+
+### 5.6 The First User Process (PID 1)
+
+**File:** `kernel/kern/proc.c:1525` (`kernel_init_process`)
+
+After the 17-phase kernel bootstrap completes, `kernel_init_process()` launches the first user-space program. This is a special case because there's no parent process to fork from -- the kernel must construct the process from scratch:
+
+```
+kernel_init_process()
+  |
+  1. proc_create("init", &proc_table[0])   // Parent = kernel (PID 0)
+  |
+  2. Try loading init binary in order:
+  |   /sbin/init, /bin/hello, /bin/bash, /bin/sh, /sbin/launchd
+  |   --> macho_load(path, vmspace, &result)
+  |   --> Panic if nothing loads
+  |
+  3. Allocate & map user stack (1 MB)
+  |
+  4. Build user stack: argc=1, argv={"/sbin/init"}, envp={PATH, HOME, ...}
+  |   Push mach_header if dyld loaded
+  |
+  5. Map CommPage
+  |
+  6. Create Mach task + IPC space for PID 1
+  |
+  7. thread_create("init", NULL, NULL, PRI_DEFAULT)
+  |   Place trap frame at top of kernel stack
+  |   context.x30 = init_thread_return (assembly trampoline)
+  |   context.sp  = trap_frame address
+  |   context.x19 = vmspace (for TTBR0 switch)
+  |
+  8. DSB SY + sched_enqueue(init_thread)
+  |   --> Return to caller (kernel_bootstrap_thread)
+  |       Scheduler will pick up init_thread and dispatch it
+  |
+  Eventually:
+  |
+  context_switch into init_thread
+    --> "ret" to init_thread_return
+        --> Switch TTBR0 to init's page tables
+        --> RESTORE_REGS (load ELR, SP, x0-x30 from trap frame)
+        --> eret to EL0
+            --> init starts executing at dyld's entry point
+```
+
+**Why scheduler-dispatched instead of direct eret?** An earlier version of Kiseki had `kernel_init_process()` directly eret to user mode from the boot path. This was replaced with the current approach (set up a thread, enqueue it, let the scheduler dispatch it) because:
+
+1. It ensures the boot CPU's idle thread is properly established
+2. The context switch machinery is exercised from the very first user transition
+3. It matches XNU's approach (`kernel_bootstrap_thread` -> `bsd_init` -> `load_init_program`)
+
+**The three assembly trampolines** in `vectors.S` are all variations of the same pattern (switch TTBR0, restore trap frame, eret):
+
+| Trampoline | Used By | Purpose |
+|------------|---------|---------|
+| `init_thread_return` | PID 1 bootstrap | First user process entry |
+| `fork_child_return` | `sys_fork_impl` | Child process after fork |
+| `user_thread_return` | `thread_create_user` | New pthread after `bsdthread_create` |
+
+All three work identically: read `vm_space` from `x19` (callee-saved), call `vmm_switch_space()`, then fall through to `RESTORE_REGS` + `eret`. The difference is only in how the trap frame was set up (by `kernel_init_process`, `sys_fork_impl`, or `thread_create_user`).
+
+### 5.7 File Descriptors
+
+**File:** `kernel/kern/proc.c:149-245`
+
+Each process has a file descriptor table with 64 slots:
+
+```c
+// proc.h:49-54
+struct filedesc {
+    struct file     *fd_ofiles[64];     // Pointers to open file structs
+    uint8_t         fd_oflags[64];      // Per-FD flags (FD_CLOEXEC)
+    uint32_t        fd_nfiles;          // Number of allocated slots
+    spinlock_t      fd_lock;            // SMP protection
+};
+```
+
+**`fd_alloc()`** finds the lowest free slot (returns the index). **`fd_dup_table()`** copies the parent's table during fork, incrementing each file's reference count. **`fd_close_all()`** is called from `proc_exit` -- it decrements every file's refcount and releases the underlying resource (vnode, pipe, PTY) when the count hits zero.
+
+```
+After fork, parent and child share the same struct file:
+
+Parent (PID 10)               Child (PID 11)
++-----------+                 +-----------+
+| fd[0] ----+------+          | fd[0] ----+------+
+| fd[1] ----+-+    |          | fd[1] ----+-+    |
+| fd[2] ----+ |    |          | fd[2] ----+ |    |
++-----------+ |    |          +-----------+ |    |
+              |    |                        |    |
+              v    v                        v    v
+         struct file (stdout)          (same struct file)
+         f_refcount = 2                f_refcount is shared!
+         f_vnode = /dev/pty0           Writes from either process
+         f_flags = O_WRONLY            go to the same file offset
+```
+
+Console stdin/stdout/stderr are static `struct file` objects initialised at boot (`console_files_init`). The first process (init) gets these as fd 0/1/2. Forked children inherit them via `fd_dup_table`, but init-created processes get fresh console stubs via `setup_stdio()`.
 
 ---
 
 ## Chapter 6: Mach IPC
 
-#### Why Message Passing?
+Inter-Process Communication (IPC) is how processes talk to each other and to the kernel. On macOS/XNU, the primary IPC mechanism is **Mach messages** -- structured data sent through **ports**. WindowServer, IOKit, launchd, and virtually every system service communicates via Mach IPC. Kiseki implements a faithful subset of this system.
 
-On Linux, processes communicate through shared files, pipes, or shared memory — all mediated by the filesystem or memory manager. macOS has all of those too, but it adds a fundamentally different mechanism inherited from the Mach microkernel: **message passing on ports**.
+### 6.1 Core Concepts
 
-Think of a Mach port as a **mailbox**. Any process that holds a **send right** to the mailbox can put messages in it. Only the process that holds the **receive right** can take messages out. The kernel mediates all message transfers — the sender and receiver never share memory directly.
+**For the systems newcomer:** Unix traditionally uses pipes and signals for IPC. Mach (the microkernel that forms XNU's core) uses a different model based on **ports** and **messages**:
 
-Why does this matter for security? Because **every system service on macOS is accessed through Mach ports:**
+- A **port** is a kernel-managed message queue with a single receiver and potentially many senders. Think of it like a mailbox: anyone with the address can drop a letter in, but only the owner reads from it.
+- A **right** is a capability to use a port. There are three kinds:
+  - **Send right**: can enqueue messages (many processes can hold send rights to the same port)
+  - **Receive right**: can dequeue messages (exactly one process holds this -- the "owner")
+  - **Send-once right**: can send exactly one message, then the right is consumed
+- A **message** is a structured blob of data sent from one port to another. It contains a header (destination, reply port, message ID) and a body (inline data and/or out-of-line memory descriptors).
+- An **IPC space** is a per-task namespace that maps integer names (like file descriptors) to kernel port objects.
 
-- WindowServer has a port. Apps send "draw this window" messages to it.
-- `launchd` has a bootstrap port. Daemons register their services through it.
-- IOKit user clients are accessed through ports. `IOConnectCallMethod()` is just a Mach message.
-- Even XPC (Apple's high-level IPC framework) is built on Mach messages underneath.
+```
+Task A (sender)                         Task B (receiver)
++------------------------+              +------------------------+
+| IPC Space              |              | IPC Space              |
+| name 1 -> port X (send)|              | name 5 -> port X (recv)|
+| name 2 -> port Y (recv)|              | name 6 -> port Y (send)|
++------------------------+              +------------------------+
+           |                                       ^
+           | mach_msg(SEND to name 1)              |
+           |                                       |
+           v                                       |
+     +-----------+                                 |
+     | Port X    |   ---- message queue ---->      |
+     | (kernel)  |   [msg1] [msg2] [msg3]    mach_msg(RCV from name 5)
+     +-----------+
+```
 
-This means Mach IPC is **the primary attack surface** for inter-process privilege escalation on macOS. Understanding how messages are copied between address spaces, how port rights are transferred, and how out-of-line memory descriptors work is essential for finding vulnerabilities in this layer.
+**Why ports instead of pipes?** Ports support **capability-based security**: you can only send to a port if you hold a send right. Rights can be transferred in messages (so process A can give process B the ability to talk to process C). This is how macOS implements `task_for_pid`, `bootstrap_look_up`, and IOKit service connections.
 
-### 6.1 Ports, Rights & Names
+### 6.2 Kernel Data Structures
 
-A **Mach port** is a kernel object — a message queue with a reference count, a lock, and a semaphore for blocking receivers. The kernel maintains a pool of 512 ports (`kernel/mach/ipc.c:54`).
+**File:** `kernel/include/mach/ipc.h`, `kernel/mach/ipc.c`
+
+#### The Port Object
 
 ```c
+// ipc.h:364-390
 struct ipc_port {
-    bool           active;
-    uint32_t       refs;
-    struct task   *receiver;           // Task that holds the receive right
-    struct ipc_msg queue[16];          // 16-slot ring buffer
-    uint32_t       queue_head, queue_tail, queue_count;
-    spinlock_t     lock;
-    semaphore_t    msg_available;      // Receiver blocks here
-    void          *kobject;            // IOKit kernel object (if any)
-    uint32_t       kobject_type;       // IKOT_NONE, IKOT_IOKIT_CONNECT, etc.
+    bool            active;             // Port is alive
+    uint32_t        refs;               // Reference count
+    struct task     *receiver;          // Task holding receive right
+
+    // Message ring buffer (fixed-size circular queue)
+    struct ipc_msg  queue[64];          // PORT_MSG_QUEUE_SIZE = 64
+    uint32_t        queue_head;         // Next slot to dequeue from
+    uint32_t        queue_tail;         // Next slot to enqueue to
+    uint32_t        queue_count;        // Messages currently queued
+
+    spinlock_t      lock;
+    semaphore_t     msg_available;      // Wakes receivers when msg enqueued
+
+    // IOKit kobject linkage
+    void            *kobject;           // Kernel object pointer (or NULL)
+    uint32_t        kobject_type;       // IKOT_* type (0 = IKOT_NONE)
 };
 ```
 
-Processes do not access ports directly. Each task has an **IPC space** — a name table that maps integer names (like file descriptors) to port rights:
+512 ports live in a static pool. Each port has a 64-slot ring buffer. When a message is sent, it's copied into the next `queue_tail` slot; when received, it's copied out from `queue_head`. The semaphore `msg_available` coordinates sleeping receivers with senders.
+
+#### The IPC Space
 
 ```c
+// ipc.h:408-412
 struct ipc_space {
-    struct ipc_port_entry table[256];  // Name → (port*, right_type)
-    uint32_t next_name;                // Monotonically increasing name allocator
-    spinlock_t lock;
+    struct ipc_port_entry  table[256];   // TASK_PORT_TABLE_SIZE = 256
+    uint32_t               next_name;    // Hint for next free slot
+    spinlock_t             lock;
+};
+
+struct ipc_port_entry {
+    struct ipc_port    *port;            // Kernel port object (or NULL)
+    mach_port_type_t   type;             // Rights held: SEND, RECEIVE, SEND_ONCE
 };
 ```
 
-When you call `mach_port_allocate()`, the kernel creates a port and inserts it into your task's name table, returning a `mach_port_name_t` (an integer). This is similar to how `open()` returns a file descriptor.
+Each task gets its own IPC space (allocated from a pool of 64). Port names are indices into the table (0 = `MACH_PORT_NULL`, reserved). When a task calls `mach_port_allocate`, the kernel finds a free slot, creates a port, and inserts it with the requested right.
 
-**Right types:**
-
-| Right | What It Lets You Do | Transferred How |
-|-------|-------------------|-----------------|
-| **Send** | Put messages into the port's queue | Can be copied (`COPY_SEND`) or moved (`MOVE_SEND`) |
-| **Receive** | Take messages out of the queue | Moved only (`MOVE_RECEIVE`) — exactly one receiver |
-| **Send-Once** | Send exactly one message, then the right is consumed | Used for reply ports |
-
-The critical rule: **there is exactly one receive right per port**, but there can be many send rights. This is like having one inbox but handing out your postal address to many senders.
-
-> **XNU reference:** XNU's port structures are in [`osfmk/ipc/ipc_port.h`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/ipc/ipc_port.h). The name space is in [`osfmk/ipc/ipc_space.h`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/ipc/ipc_space.h). Kiseki's `ipc_port` and `ipc_space` are simplified but structurally equivalent.
-
-### 6.2 Message Anatomy
-
-A Mach message is a structured blob of bytes with a fixed header:
+#### The Queued Message
 
 ```c
+// ipc.h:348-356
+struct ipc_msg {
+    uint32_t             size;          // Total message size
+    struct ipc_port      *reply_port;   // Translated reply port (kernel obj)
+    mach_msg_type_name_t reply_type;    // Post-copyin type (PORT_SEND_ONCE etc.)
+    mach_msg_type_name_t dest_type;     // Post-copyin type (PORT_SEND etc.)
+    uint32_t             ool_count;     // Number of OOL descriptors
+    struct ipc_kmsg_ool  ool_descs[16]; // OOL descriptor storage
+    uint8_t              data[4096];    // Raw message bytes
+};
+```
+
+### 6.3 The Message Header
+
+Every Mach message starts with a 24-byte header:
+
+```c
+// ipc.h:98-105
 typedef struct {
-    mach_msg_bits_t   msgh_bits;         // Flags + port dispositions
-    mach_msg_size_t   msgh_size;         // Total message size in bytes
-    mach_port_name_t  msgh_remote_port;  // Destination port (send right)
-    mach_port_name_t  msgh_local_port;   // Reply port (optional)
-    uint32_t          msgh_voucher_port; // Voucher (unused, macOS compat)
-    mach_msg_id_t     msgh_id;           // User-defined message ID
+    mach_msg_bits_t     msgh_bits;          // Flags + port dispositions
+    mach_msg_size_t     msgh_size;          // Total message size
+    mach_port_name_t    msgh_remote_port;   // Destination port (sender's name)
+    mach_port_name_t    msgh_local_port;    // Reply port (sender's name)
+    uint32_t            msgh_voucher_port;  // Unused (XNU compat)
+    mach_msg_id_t       msgh_id;            // User-defined message ID
 } mach_msg_header_t;
 ```
 
-The `msgh_bits` field encodes how the port names should be interpreted during the send:
+The `msgh_bits` field encodes the **disposition** of port rights being transferred:
 
 ```
-Bits 7:0   = remote port disposition (COPY_SEND, MOVE_SEND, MOVE_SEND_ONCE, etc.)
-Bits 15:8  = local port disposition  (for the reply port)
-Bit 31     = COMPLEX flag (message contains descriptors for OOL data or port transfers)
+msgh_bits layout:
+  bits [7:0]   = remote disposition (how to transfer the dest port right)
+  bits [15:8]  = local disposition (how to transfer the reply port right)
+  bit  [31]    = MACH_MSGH_BITS_COMPLEX (message has OOL descriptors)
+
+Common dispositions:
+  MACH_MSG_TYPE_COPY_SEND      (19) = Copy a send right (sender keeps theirs)
+  MACH_MSG_TYPE_MAKE_SEND_ONCE (21) = Create a send-once right from receive
+  MACH_MSG_TYPE_MOVE_SEND      (17) = Transfer sender's send right to message
 ```
 
-After the header, a message can contain:
-1. **Inline data** — arbitrary bytes (up to 4096 in Kiseki)
-2. **Descriptors** (if COMPLEX) — instructions to the kernel to transfer ports or memory between address spaces
+### 6.4 The mach_msg_trap Flow
 
-This structure lets a single `mach_msg()` call do remarkably complex things: send data, transfer port rights, and share memory regions, all atomically.
+**File:** `kernel/mach/ipc.c:1321` (`mach_msg_trap`)
 
-### 6.3 mach_msg_trap — The Send/Receive Path
+The `mach_msg` system call (Mach trap -31) is the single IPC entry point. It can send, receive, or both (send-then-receive for RPC):
 
-All Mach IPC goes through a single syscall: `mach_msg_trap()` (Mach trap number -31). It can send a message, receive a message, or both in one call, controlled by option flags:
+```
+User calls: mach_msg(&header, MACH_SEND_MSG | MACH_RCV_MSG,
+                      send_size, rcv_size, rcv_name, timeout, ...)
+  |
+  v
+svc #0x80 (x16 = -31)
+  |
+  v
+mach_msg_trap(trap_frame)
+  |
+  +------ SEND PHASE (if MACH_SEND_MSG) ------+
+  |                                             |
+  | 1. Read header from user buffer             |
+  | 2. Extract dest_name, reply_name, bits      |
+  |                                             |
+  | 3. Copyin dest port:                        |
+  |    ipc_port_lookup(space, dest_name)         |
+  |    Validate sender has send right            |
+  |    Bump reference for in-flight message      |
+  |                                             |
+  | 4. Copyin reply port (if non-NULL):          |
+  |    ipc_port_lookup(space, reply_name)         |
+  |    ipc_object_copyin_type(disp) --> type     |
+  |    Bump reference                            |
+  |                                             |
+  | 5. IOKit interception:                       |
+  |    If dest->kobject_type != IKOT_NONE:       |
+  |      iokit_kobject_server(dest, msg, reply)  |
+  |      --> Handle synchronously, skip queue    |
+  |                                             |
+  | 6. OOL copyin (if COMPLEX):                  |
+  |    ipc_kmsg_copyin_body()                    |
+  |    --> For each OOL descriptor:              |
+  |        Alloc kernel pages, copy sender data  |
+  |        Create vm_map_copy object             |
+  |                                             |
+  | 7. port_enqueue(dest_port, msg, reply_port,  |
+  |                 ool_descs)                   |
+  |    --> Copy bytes to ring buffer slot        |
+  |    --> semaphore_signal (wake receiver)       |
+  +---------------------------------------------+
+  |
+  +------ RECEIVE PHASE (if MACH_RCV_MSG) -----+
+  |                                             |
+  | 1. Determine receive port (rcv_name)         |
+  |    Verify caller holds receive right         |
+  |                                             |
+  | 2. port_dequeue(rcv_port, ...)               |
+  |    --> semaphore_wait (block until msg)       |
+  |    --> Or semaphore_trywait (non-blocking)    |
+  |    --> Or timed poll (MACH_RCV_TIMEOUT)       |
+  |    --> Copy bytes to user buffer             |
+  |    --> Return kernel port ptrs + OOL descs   |
+  |                                             |
+  | 3. Copyout reply port:                       |
+  |    Insert send-once right into receiver's    |
+  |    IPC space -> new name                     |
+  |                                             |
+  | 4. Copyout dest port:                        |
+  |    Receiver already has it (receive right)    |
+  |    Use existing name                         |
+  |                                             |
+  | 5. Swap remote/local in header:              |
+  |    msgh_remote_port = reply_name (new)       |
+  |    msgh_local_port  = dest_name (existing)   |
+  |    Swap bits accordingly                     |
+  |                                             |
+  | 6. OOL copyout (if COMPLEX):                 |
+  |    ipc_kmsg_copyout_body()                   |
+  |    --> For each OOL descriptor:              |
+  |        Alloc VA in receiver's space          |
+  |        Map kernel pages into receiver        |
+  |        Update descriptor with new user VA    |
+  |                                             |
+  | 7. Append trailer to user buffer             |
+  +---------------------------------------------+
+  |
+  v
+Return MACH_MSG_SUCCESS in x0
+```
+
+**The remote/local swap** is a key detail that confuses newcomers. When the sender creates a message:
+- `msgh_remote_port` = destination (where to send)
+- `msgh_local_port` = reply port (where to receive the reply)
+
+After the receiver dequeues, the kernel rewrites:
+- `msgh_remote_port` = the reply port (where to send the reply)
+- `msgh_local_port` = the port the receiver owns (where they received)
+
+This makes the header immediately usable for an RPC reply: the receiver can fill in the response and send it to `msgh_remote_port`.
+
+### 6.5 Out-of-Line (OOL) Memory
+
+**File:** `kernel/mach/ipc.c:493-853`
+
+For small messages, inline data in the 4 KB message buffer suffices. But WindowServer needs to transfer entire framebuffer regions (e.g., a 1280x800 window = ~4 MB). This is where **OOL descriptors** come in.
+
+A complex message (bit 31 set in `msgh_bits`) contains a `mach_msg_body_t` followed by an array of descriptors:
+
+```
+Complex message layout:
+
++------------------------+
+| mach_msg_header_t      |  24 bytes
++------------------------+
+| mach_msg_body_t        |  4 bytes (descriptor_count)
++------------------------+
+| OOL descriptor 0       |  16 bytes: address, size, type, flags
++------------------------+
+| OOL descriptor 1       |  16 bytes
++------------------------+
+| ... inline data ...    |
++------------------------+
+```
+
+Each OOL descriptor carries:
 
 ```c
-// From user space:
-mach_msg(&msg, MACH_SEND_MSG | MACH_RCV_MSG, send_size, rcv_size,
-         rcv_port, timeout, MACH_PORT_NULL);
-```
-
-This is the most complex function in the kernel (`kernel/mach/ipc.c:1216`, ~500 lines). Here is the complete flow:
-
-```mermaid
-sequenceDiagram
-    participant Sender as Sender (EL0)
-    participant Kernel as Kernel (EL1)
-    participant Port as Port Queue
-    participant Receiver as Receiver (EL0)
-
-    Note over Sender: mach_msg(SEND|RCV, ...)
-    Sender->>Kernel: svc #0x80, x16=-31
-
-    rect rgb(230, 240, 255)
-    Note over Kernel: === SEND PHASE ===
-    Kernel->>Kernel: 1. Copy header from user memory
-    Kernel->>Kernel: 2. Look up dest port in sender's IPC space
-    Kernel->>Kernel: 3. Validate sender holds SEND right
-    Kernel->>Kernel: 4. Look up reply port, validate rights
-    Kernel->>Kernel: 5. If COMPLEX: copyin OOL descriptors<br/>(allocate kernel buffers, copy sender data)
-    Kernel->>Kernel: 6. If dest is IOKit kobject:<br/>dispatch to iokit_kobject_server() directly
-    Kernel->>Port: 7. Enqueue message in port's ring buffer
-    Kernel->>Port: 8. Signal port's msg_available semaphore
-    end
-
-    rect rgb(255, 240, 230)
-    Note over Kernel: === RECEIVE PHASE ===
-    Kernel->>Kernel: 9. Look up receive port in receiver's IPC space
-    Kernel->>Port: 10. Dequeue message (block on semaphore if empty)
-    Kernel->>Kernel: 11. Copyout reply port into receiver's IPC space
-    Kernel->>Kernel: 12. If COMPLEX: copyout OOL descriptors<br/>(map kernel buffers into receiver's address space)
-    Kernel->>Kernel: 13. Swap remote/local port names (receiver perspective)
-    Kernel->>Kernel: 14. Append trailer
-    end
-
-    Kernel->>Receiver: eret (return to user with message)
-```
-
-**Step 6 — IOKit interception** is particularly interesting. If the destination port is a **kobject port** (its `kobject_type != IKOT_NONE`), the kernel short-circuits the normal send path and calls `iokit_kobject_server()` directly. The reply is sent back synchronously on the reply port. This means IOKit calls like `IOConnectCallMethod()` never actually queue a message — they are handled inline in the sender's syscall context.
-
-> **Security note:** The copyin/copyout phases are where many Mach IPC vulnerabilities live. If the kernel reads the message header from user memory, validates it, then reads it *again* to process it, a malicious concurrent thread could modify the header between reads (a double-fetch / TOCTOU bug). Kiseki copies the header into kernel memory once and works from the copy. XNU has had CVEs from improper handling of this.
-
-### 6.4 Out-of-Line Memory Descriptors
-
-For sending large amounts of data (like pixel buffers for WindowServer), Mach IPC supports **out-of-line (OOL) descriptors**. Instead of copying the data inline in the message, you describe a region of your address space:
-
-```c
+// ipc.h:171-178
 typedef struct {
-    uint64_t  address;     // User VA of the data
-    uint32_t  deallocate;  // Unmap from sender after send?
-    uint32_t  copy;        // Copy semantics
-    uint32_t  type;        // MACH_MSG_OOL_DESCRIPTOR (1)
-    uint32_t  size;        // Size in bytes
+    uint64_t                    address;     // User VA of data (sender side)
+    uint32_t                    deallocate : 8;  // Unmap from sender after copy?
+    mach_msg_copy_options_t     copy       : 8;  // PHYSICAL or VIRTUAL
+    uint32_t                    pad1       : 8;
+    mach_msg_descriptor_type_t  type       : 8;  // MACH_MSG_OOL_DESCRIPTOR
+    mach_msg_size_t             size;        // Byte count
 } mach_msg_ool_descriptor_t;
 ```
 
-**Send-side (copyin):**
-1. Calculate how many pages the OOL region spans
-2. Allocate kernel buffer pages via `pmm_alloc_pages()`
-3. For each page of the sender's region: translate the virtual address via `vmm_translate()`, copy bytes to the kernel buffer
-4. Create a `vm_map_copy` object pointing to the kernel buffer
-5. If `deallocate=true`: unmap the pages from the sender's address space
+**OOL data flow:**
 
-**Receive-side (copyout):**
-1. Call `vm_map_enter()` to find free virtual address space in the receiver
-2. For each page: allocate a physical page, map it into the receiver, copy from the kernel buffer
-3. Free the kernel buffer
+```
+Sender (Task A)                 Kernel                    Receiver (Task B)
+                                                          
+ User buffer at VA 0x200000     vm_map_copy object        VA allocated by
+ (window pixel data, 240 pages) (page list: PA array)     vm_map_enter()
+                                                          
+ [copyin]                                                 [copyout]
+ For each page:                                           For each page:
+   translate VA -> PA            PA array                   map PA into receiver
+   alloc kernel page           [PA0, PA1, PA2, ...]        at new user VA
+   copy 4KB to kernel page                                
+                                                          
+ Result: 240 kernel pages        Queued in ipc_msg        Result: 240 pages
+ holding pixel data              until receiver dequeues   visible at new VA
+                                                          in receiver's space
+```
 
-This is how WindowServer receives pixel data from GUI applications. When an app calls `_WSDrawRect()`, it sends a Mach message with an OOL descriptor pointing to its CGBitmapContext backing store. The kernel copies the pixel data to WindowServer's address space, where it is composited into the framebuffer.
+Kiseki uses a **page list** approach (`VM_MAP_COPY_PAGE_LIST`) for OOL transfers. Instead of allocating one contiguous buddy region (which would fail for 240 pages due to fragmentation), it allocates individual pages and stores their physical addresses in an array. During copyout, these pages are mapped directly into the receiver's address space -- a zero-copy transfer from the kernel staging area to the receiver.
 
-> **Kiseki vs macOS:** Real macOS can use **virtual copy** (COW page sharing) for OOL descriptors, avoiding physical copies. Kiseki always does a physical copy — simpler but slower. XNU's `vm_map_copy` can be of type `ENTRY_LIST` (COW sharing) or `KERNEL_BUFFER` (physical copy). Kiseki only uses `KERNEL_BUFFER`.
+### 6.6 IOKit Kobject Dispatch
 
-### 6.5 The Bootstrap Server
+**File:** `kernel/mach/ipc.c:1491`
 
-How does a process find the port for WindowServer? Or for any other system service? Through the **bootstrap server** — a simple name-to-port registry built into the kernel.
+Some ports represent **kernel objects** (kobjects) rather than user message queues. When a message is sent to a kobject port, the IPC layer intercepts it and dispatches synchronously to the appropriate kernel handler instead of queuing:
+
+```
+mach_msg_trap send phase:
+  |
+  +-- dest_port->kobject_type != IKOT_NONE ?
+        |
+        YES --> iokit_kobject_server(dest_port, msg, reply_port, task)
+        |       --> Decode msgh_id (IOKit selector)
+        |       --> Call IOFramebuffer/IOHIDSystem method
+        |       --> Send reply directly to reply_port
+        |       --> Return true (message handled)
+        |
+        NO  --> Normal port_enqueue() path
+```
+
+This is how user-space IOKit calls work: `IOServiceOpen()` gives the user a send right to an IOKit port. When the user sends a message with a specific `msgh_id`, the kernel routes it to the driver's external method handler. Chapter 10 covers IOKit in detail.
+
+### 6.7 Bootstrap Services
+
+**File:** `kernel/mach/ipc.c` (bootstrap traps)
+
+On macOS, service discovery (finding WindowServer's port, for example) goes through `bootstrap_look_up()`, which sends a message to launchd's bootstrap port. Kiseki simplifies this with kernel-managed traps:
 
 ```c
-// Kernel-side registry (ipc.c:1954)
-struct bootstrap_entry {
-    char             name[128];  // e.g., "uk.co.avltree9798.WindowServer"
-    struct ipc_port *port;       // The service's receive port
-    bool             active;
-};
-static struct bootstrap_entry bootstrap_registry[64];
+// Three bootstrap traps:
+bootstrap_register_trap()    // Server registers: "com.apple.windowserver" -> port
+bootstrap_look_up_trap()     // Client looks up: "com.apple.windowserver" -> send right
+bootstrap_check_in_trap()    // Daemon claims a pre-registered service port
 ```
 
-Three Mach traps operate on the registry:
+A static registry of 64 name-to-port mappings is maintained in the kernel. `bootstrap_register_kernel()` is also available for kernel-mode registration (used by IOKit drivers during boot to register their service ports before any user process starts).
 
-| Trap | Number | Who Calls It | What It Does |
-|------|--------|-------------|-------------|
-| `bootstrap_register` | -40 | `init` (PID 1) | **Pre-creates** a named service port before the daemon starts |
-| `bootstrap_check_in` | -42 | The daemon itself | Claims the receive right for a pre-created port |
-| `bootstrap_look_up` | -41 | Any client process | Gets a send right to the named service |
+**How WindowServer uses bootstrap:**
 
-The flow for starting WindowServer:
+```
+1. WindowServer starts, calls:
+     bootstrap_check_in("com.apple.windowserver", &port)
+     --> Kernel creates port, gives WindowServer receive+send rights
 
-```mermaid
-sequenceDiagram
-    participant Init as init (PID 1)
-    participant Kernel as Kernel Bootstrap
-    participant WS as WindowServer
+2. Finder starts, calls:
+     bootstrap_look_up("com.apple.windowserver", &port)
+     --> Kernel finds the port, inserts send right into Finder's IPC space
+     --> Finder now has a send right to WindowServer's port
 
-    Init->>Kernel: bootstrap_register("uk.co.avltree9798.WindowServer")
-    Note over Kernel: Creates port, stores in registry
-    Init->>Init: fork() + exec("/sbin/WindowServer")
-    WS->>Kernel: bootstrap_check_in("uk.co.avltree9798.WindowServer")
-    Note over Kernel: Gives WS the RECEIVE right
-    Note over WS: Now listening for messages on the port
+3. Finder sends window creation request:
+     mach_msg(SEND to windowserver_port, id=MSG_CREATE_WINDOW, ...)
+     --> Message queued on WindowServer's port
 
-    Note over Init: Later, when loginwindow starts...
-    participant LW as loginwindow
-    LW->>Kernel: bootstrap_look_up("uk.co.avltree9798.WindowServer")
-    Note over Kernel: Inserts SEND right into LW's IPC space
-    LW->>WS: mach_msg(WS_MSG_CONNECT, ...)
+4. WindowServer receives:
+     mach_msg(RCV from port, ...)
+     --> Dequeues Finder's request, creates window, sends reply
 ```
 
-The key design decision is **pre-creation**: `init` registers the service port *before* forking the daemon. This means clients can `bootstrap_look_up()` and start sending messages immediately — even if the daemon is still starting up. The messages will queue in the port until the daemon calls `bootstrap_check_in()` and starts receiving.
+### 6.8 Mach Traps Summary
 
-> **macOS reference:** Real macOS uses `launchd`'s XPC mechanism for service registration, which is more sophisticated (supports on-demand daemon launch, domain isolation, etc.). The bootstrap server is the legacy predecessor. Kiseki uses the simpler bootstrap model, which is functionally equivalent for understanding the attack surface.
+Kiseki implements 12 Mach traps (negative syscall numbers, matching XNU's convention):
+
+| Trap # | Name | Purpose |
+|--------|------|---------|
+| -26 | `mach_reply_port` | Allocate a fresh reply port (receive + send-once) |
+| -27 | `task_self_trap` | Return calling task's port name |
+| -28 | `thread_self_trap` | Return calling thread's port name |
+| -31 | `mach_msg_trap` | Send and/or receive a message |
+| -36 | `mach_port_allocate` | Create a new port with given rights |
+| -37 | `mach_port_deallocate` | Release a port right |
+| -39 | `mach_port_mod_refs` | Modify reference count on a port right |
+| -40 | `bootstrap_register` | Register a service name -> port |
+| -41 | `bootstrap_look_up` | Look up a service by name |
+| -42 | `bootstrap_check_in` | Daemon claims a pre-registered service |
+| -43 | `semaphore_signal_trap` | Signal a Mach semaphore |
+| -44 | `semaphore_wait_trap` | Wait on a Mach semaphore |
+
+The trap number is passed in `x16` (following the XNU ARM64 syscall convention). Negative numbers distinguish Mach traps from BSD syscalls (positive numbers). The dispatch table in `trap.c` routes each trap to its handler.
 
 ---
 
-## Chapter 7: BSD Syscalls & Security
+## Chapter 7: BSD Syscalls & POSIX Interface
 
-In Chapter 2 we introduced the `svc #0x80` instruction — the mechanism by which user code asks the kernel to do something. In Chapter 6 we covered the *Mach* half of that mechanism (negative syscall numbers). This chapter covers the *BSD* half: the POSIX-compatible system calls that provide the familiar Unix API — `open()`, `read()`, `write()`, `fork()`, `kill()`, and dozens more — plus the security model that governs who is allowed to do what.
+The previous chapter covered Mach IPC (the microkernel side). This chapter covers the **BSD syscall layer** -- the POSIX-compatible interface that user programs actually use for file I/O, process management, networking, and signals. On XNU, the BSD layer sits on top of Mach, and Kiseki follows the same architecture.
 
-#### What Is a System Call, Exactly?
+### 7.1 The Trap Handler
 
-If you have never written kernel code, you might think of `read()` as "just a function." It is not. `read()` is a **boundary crossing** — the most important boundary in the entire operating system.
+**File:** `kernel/kern/trap.c` (839 lines)
 
-User code runs at ARM64 Exception Level 0 (EL0). It can access its own memory, perform arithmetic, and call other user functions. But it *cannot*:
-
-- Read a disk block
-- Send a network packet
-- Allocate a physical page
-- Access another process's memory
-
-All of those require kernel privilege (EL1). A system call is the controlled, auditable gate that lets unprivileged code request privileged services. The CPU enforces this — there is no way for EL0 code to "just jump" into kernel functions. The *only* entry point is through the exception vector, triggered by a specific instruction (`svc`).
+When user code executes `svc #0x80`, the CPU traps from EL0 to EL1, entering the vector table's synchronous EL0 handler. After saving the full trap frame (816 bytes), control reaches `trap_sync_el0()`:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      User Process (EL0)                         │
-│                                                                 │
-│    ssize_t n = read(fd, buf, count);                           │
-│         │                                                       │
-│         ▼                                                       │
-│    libSystem wrapper:                                           │
-│         mov  x16, #3          // SYS_read = 3                  │
-│         svc  #0x80            // Trap to kernel                 │
-│                                                                 │
-├─────── HARDWARE EXCEPTION ──────────────────────────────────────┤
-│                                                                 │
-│                      Kernel (EL1)                               │
-│                                                                 │
-│    1. CPU jumps to vector table (vectors.S)                    │
-│    2. SAVE_REGS — push all 31 GPRs + SP/ELR/SPSR/ESR          │
-│    3. trap_sync_el0() — read ESR, dispatch on EC               │
-│    4. EC=0x15 (SVC) → syscall_handler(tf)                      │
-│    5. Read x16 from trap frame → positive → BSD dispatch       │
-│    6. switch(3) → sys_read(tf)                                 │
-│    7. Read args from tf: fd=x0, buf=x1, count=x2              │
-│    8. Do the work (VFS lookup, buffer cache, disk I/O)         │
-│    9. syscall_return(tf, bytes_read) — set x0, clear carry     │
-│   10. Return to trap_sync_el0, signal_check, RESTORE_REGS     │
-│   11. eret → back to EL0, right after the svc instruction     │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+User executes: svc #0x80
+  |
+  v
+Vector table (vectors.S) -> SAVE_REGS -> trap_sync_el0(trap_frame)
+  |
+  +-- Extract Exception Class: ec = (ESR >> 26) & 0x3F
+  |
+  +-- Switch on ec:
+  |     EC_SVC_A64 (0x15) --> syscall_handler(tf)
+  |     EC_DABT_LOWER (0x24) --> handle_page_fault(tf)  [demand paging, COW]
+  |     EC_IABT_LOWER (0x20) --> handle_instruction_abort(tf)
+  |     EC_SP_ALIGN (0x26) --> kill process (SIGBUS)
+  |     EC_PC_ALIGN (0x22) --> kill process (SIGBUS)
+  |     EC_BRK (0x3C) --> kill process (SIGTRAP)
+  |
+  +-- signal_check(thread, tf)   [deliver pending signals before eret]
+  |
+  +-- Sanity checks: verify SPSR=EL0t, ELR is user address, TTBR0 matches process
+  |
+  +-- RESTORE_REGS -> eret to EL0
 ```
 
-This pattern — save state, dispatch, do work, restore state — is universal across every operating system that has ever existed. The details (which register holds the syscall number, how errors are signalled, how many arguments are supported) vary, but the structure is always the same.
-
-> **Security implication:** Every system call is a potential attack surface. The kernel must validate *every* argument — pointers could be invalid, file descriptors could be out of range, paths could contain `../` traversals. A single missing check can be a privilege escalation vulnerability. This is why syscall auditing is one of the first things a security engineer does when assessing a kernel.
-
-#### The Dual Personality: Mach + BSD
-
-macOS (and Kiseki) have a unique twist: the same `svc #0x80` instruction serves *two* different syscall tables. The sign of the number in `x16` determines which one:
-
-| x16 value | Dispatch | Example |
-|-----------|----------|---------|
-| Positive  | BSD syscall table | `read(3)`, `open(5)`, `fork(2)` |
-| Negative  | Mach trap table | `mach_msg(-31)`, `task_self(-28)` |
-
-This is not an arbitrary design choice. It reflects macOS's hybrid kernel architecture: the Mach microkernel provides low-level primitives (tasks, threads, IPC), while the BSD layer provides the POSIX API that applications actually use. Both must be reachable from a single trap instruction because there is only one `svc` vector.
-
-```mermaid
-flowchart TD
-    SVC["svc #0x80<br/>User code traps to EL1"]
-    SVC --> VEC["vectors.S<br/>SAVE_REGS → trap_sync_el0()"]
-    VEC --> READ["Read x16 from trap frame"]
-    READ --> SIGN{"x16 < 0?"}
-    SIGN -- "Yes (negative)" --> MACH["mach_trap_dispatch()<br/>Mach traps: IPC, ports, tasks"]
-    SIGN -- "No (positive)" --> BSD["syscall_handler() switch<br/>BSD syscalls: files, processes, signals"]
-    MACH --> RET["syscall_return() or syscall_error()<br/>Set x0, set/clear carry"]
-    BSD --> RET
-    RET --> SIGCHK["signal_check() — deliver pending signals"]
-    SIGCHK --> ERET["RESTORE_REGS → eret<br/>Back to EL0"]
-```
-
-### 7.1 Syscall Calling Convention
-
-The syscall calling convention defines the contract between user space and the kernel: which registers hold which values, how errors are communicated, and what state is preserved. Getting this wrong means every program on the system breaks. Getting it *almost* right means subtle, hard-to-debug failures where some programs work and others don't.
-
-Kiseki uses the exact same convention as XNU on ARM64. This is not optional — real macOS binaries compiled with Apple's toolchain expect this convention, so any compatible implementation must follow it precisely.
-
-#### Register Layout
-
-| Register | Direction | Purpose |
-|----------|-----------|---------|
-| `x0`–`x5` | In | Syscall arguments (up to 6) |
-| `x16` | In | Syscall number (positive=BSD, negative=Mach) |
-| `x0` | Out | Return value (success) or errno (error) |
-| SPSR bit 29 (carry flag) | Out | 0 = success, 1 = error |
-
-Note that `x0` serves double duty: it is both the first argument *and* the return value. This works because the kernel reads all arguments before doing any work, so overwriting `x0` with the return value does not lose information.
-
-**Why x16?** On ARM64, `x16` and `x17` are designated as "intra-procedure-call scratch registers" (IP0/IP1). They are *not* preserved across function calls and are used by the linker for veneers and thunks. XNU chose `x16` for the syscall number because it does not conflict with the standard C calling convention (`x0`–`x7` for arguments, `x8` for indirect result location). This means a C function can set up all its arguments in `x0`–`x5` using normal calling conventions, then set `x16` separately.
-
-#### The Carry Flag Error Convention
-
-The most unusual aspect of the XNU syscall convention is how errors are reported. Most Unix systems use a simple rule: negative return values indicate errors. XNU does something different — it uses the **carry flag** in the processor status register (PSTATE, saved as SPSR during the exception):
+**The dual-personality dispatch** in `syscall_handler()`:
 
 ```c
-/* kernel/bsd/syscalls.c:49-61 */
-
-static inline void syscall_return(struct trap_frame *tf, int64_t retval)
+// syscalls.c (simplified)
+void syscall_handler(struct trap_frame *tf)
 {
-    tf->regs[0] = (uint64_t)retval;
-    /* Clear carry flag (success) */
-    tf->spsr &= ~SPSR_CARRY_BIT;    /* bit 29 */
-}
+    int64_t callnum = (int64_t)tf->regs[16];  // x16 = syscall number
 
-static inline void syscall_error(struct trap_frame *tf, int errno_val)
-{
-    tf->regs[0] = (uint64_t)errno_val;
-    /* Set carry flag (error) */
-    tf->spsr |= SPSR_CARRY_BIT;     /* bit 29 */
-}
-```
-
-The SPSR (Saved Program Status Register) is the snapshot of the user's PSTATE that was captured when the exception occurred. By modifying it *before* the `eret` instruction restores it, the kernel can communicate a single bit of information through the processor flags. After `eret`, the user-mode code can test this bit directly:
-
-```asm
-/* userland/libsystem/syscall.S:23-38 — The SYSCALL_STUB macro */
-
-.macro SYSCALL_STUB name, num
-    .globl \name
-\name:
-    mov     x16, #\num
-    svc     #0x80
-
-    /* Check carry flag (PSTATE.C = NZCV bit 29) */
-    mrs     x8, nzcv
-    tbnz    x8, #29, 1f        /* Branch if carry set (error) */
-    ret                         /* Success: x0 has return value */
-1:
-    neg     x0, x0              /* Error: negate errno to return -errno */
-    ret
-.endm
-```
-
-**Why not just use negative return values?** Because some syscalls legitimately return large positive values that, if interpreted as signed 64-bit integers, would be negative. For instance, `mmap()` returns addresses in the upper half of the 64-bit address space. A return value of `0xFFFF800000000000` looks negative if interpreted as `int64_t`, but it is a perfectly valid kernel address. The carry flag sidesteps this ambiguity entirely.
-
-> **macOS reference:** This carry-flag convention originates from the Mach/BSD split in the NeXTSTEP era and has been maintained through every macOS/iOS release. It is documented in the XNU source at `osfmk/arm64/locore.s` and `bsd/dev/arm/systemcalls.c`. Apple's `libsyscall` (the closed-source equivalent of Kiseki's `syscall.S`) uses the same `mrs`/`tbnz` pattern.
-
-#### The Entry Path in Detail
-
-When user code executes `svc #0x80`, the CPU performs these hardware-level actions automatically:
-
-1. **Save PSTATE** → `SPSR_EL1` (preserves interrupt mask, condition flags, execution state)
-2. **Save return address** → `ELR_EL1` (address of the instruction *after* `svc`)
-3. **Switch to EL1** (kernel privilege)
-4. **Mask interrupts** (PSTATE.I = 1 — IRQs disabled)
-5. **Jump to vector offset** 0x400 in VBAR_EL1 (synchronous exception from lower EL, AArch64)
-
-The software then takes over:
-
-```mermaid
-sequenceDiagram
-    participant U as User (EL0)
-    participant V as vectors.S
-    participant T as trap_sync_el0()
-    participant S as syscall_handler()
-    participant H as sys_read() / sys_open() / ...
-
-    U->>V: svc #0x80 (CPU auto-saves SPSR, ELR, switches to EL1)
-    V->>V: SAVE_REGS macro: push x0-x30, SP_EL0, ELR, SPSR, ESR to kernel stack
-    V->>T: bl trap_sync_el0 (pass trap_frame pointer in x0)
-    T->>T: Read ESR, extract EC (bits [31:26])
-    T->>T: EC = 0x15 (EC_SVC_A64) → syscall path
-    T->>T: Enable IRQs: msr daifclr, #0x2
-    T->>S: syscall_handler(tf)
-    S->>S: Read x16 from tf→regs[16]
-    S->>S: x16 positive → BSD switch statement
-    S->>H: Dispatch to specific handler (e.g. case SYS_read)
-    H->>H: Read args from tf→regs[0..5]
-    H->>H: Do the work (VFS, buffer cache, etc.)
-    H->>H: syscall_return(tf, result) — set x0, clear carry
-    H-->>S: return 0 (success) or errno
-    S->>S: If error≠0: syscall_error(tf, error)
-    S-->>T: return
-    T->>T: Mask IRQs: msr daifset, #0x2
-    T->>T: signal_check() — deliver pending signals
-    T-->>V: return
-    V->>V: RESTORE_REGS — pop all regs from kernel stack
-    V->>U: eret → CPU restores SPSR→PSTATE, ELR→PC, drops to EL0
-```
-
-A critical detail: the kernel **enables interrupts** during syscall processing (`kernel/kern/trap.c:201`). This is essential because syscalls can block (e.g., `read()` waiting for disk I/O, `mach_msg()` waiting for a message). If interrupts remained disabled, timer ticks would not fire on that CPU, preventing the scheduler from running and potentially deadlocking the entire system. XNU does the same thing via `ml_set_interrupts_enabled(TRUE)` early in its syscall path.
-
-#### Path Resolution
-
-One more piece of the syscall machinery deserves mention: **path resolution**. Many BSD syscalls accept file paths (`open`, `stat`, `unlink`, `chdir`, etc.). These paths can be relative (e.g., `"../foo"`) or absolute (e.g., `"/usr/bin/ls"`). The kernel must resolve relative paths against the process's current working directory, then canonicalise `.` and `..` components.
-
-```c
-/* kernel/bsd/syscalls.c:165-198 — resolve_user_path() */
-
-static int resolve_user_path(const char *user_path, char *abs_buf, uint32_t bufsz)
-{
-    if (!user_path || !user_path[0])
-        return EINVAL;
-
-    if (user_path[0] == '/') {
-        /* Already absolute */
-        sc_strncpy(abs_buf, user_path, bufsz);
+    if (callnum < 0) {
+        // Negative: Mach trap
+        mach_trap_dispatch(tf, (int32_t)callnum);
     } else {
-        /* Relative: prepend cwd */
-        struct proc *p = proc_current();
-        const char *cwd = (p && p->p_cwd_path[0]) ? p->p_cwd_path : "/";
-        /* ... concatenate cwd + "/" + user_path ... */
+        // Non-negative: BSD syscall
+        switch ((uint32_t)callnum) {
+            case SYS_read:    ... break;
+            case SYS_write:   ... break;
+            case SYS_fork:    ... break;
+            // ... 92 more cases
+            default: syscall_error(tf, ENOSYS);
+        }
     }
-
-    canonicalize_path(abs_buf);    /* Resolve "." and ".." */
-    return 0;
 }
 ```
 
-The `canonicalize_path()` function (`kernel/bsd/syscalls.c:99-154`) uses a stack-based algorithm to track directory depth, eliminating `.` (current directory) and `..` (parent directory) components. This is the same approach used by XNU's `vfs_lookup()` path (though XNU's version is significantly more complex, handling symlinks, mount-point crossings, and namespace isolation).
+**Calling convention (XNU ARM64 compatible):**
 
-> **Security implication:** Path canonicalisation bugs are a classic source of directory traversal vulnerabilities. If `..` is not properly handled, an attacker can escape a chroot jail or access files outside their intended sandbox. Kiseki's implementation handles the basic cases but does not yet implement `chroot()` or sandbox profiles, so the attack surface is limited to permission checks.
+| Register | Purpose |
+|----------|---------|
+| `x16` | Syscall number (signed). Positive = BSD, negative = Mach |
+| `x0`-`x5` | Arguments (up to 6) |
+| `x0` | Return value |
+| SPSR bit 29 (carry flag) | Set on error; `x0` then holds positive errno |
 
-### 7.2 The Syscall Table
+```c
+// Success: clear carry, return value in x0
+static void syscall_return(struct trap_frame *tf, uint64_t retval) {
+    tf->regs[0] = retval;
+    tf->spsr &= ~(1UL << 29);   // Clear carry
+}
 
-Kiseki implements over 80 BSD syscalls and 11 Mach traps. Together, these provide the complete API surface that userland needs to implement a Unix shell, a window system, a TCP/IP network stack (from the application side), and a GUI desktop.
+// Error: set carry, errno in x0
+static void syscall_error(struct trap_frame *tf, int err) {
+    tf->regs[0] = (uint64_t)err;
+    tf->spsr |= (1UL << 29);    // Set carry
+}
+```
 
-The syscall numbers are defined in a single shared header (`include/sys/syscall.h`) that is included by *both* kernel and userland code. This single-source-of-truth pattern prevents numbering mismatches — one of the most maddening bugs possible, where user code calls `open()` but the kernel dispatches `close()`.
+User-space libSystem checks the carry flag after `svc` returns. If set, it stores `x0` into `errno` and returns -1. This matches XNU's convention exactly.
 
-#### BSD Syscall Numbers
+### 7.2 BSD Syscall Catalogue
 
-The numbers are XNU-compatible. This is not coincidental — it means binaries compiled against macOS headers produce `svc #0x80` instructions with the right `x16` values, and the Kiseki kernel dispatches them correctly.
+**File:** `kernel/bsd/syscalls.c` (5,416 lines)
 
-| # | Name | Category | Signature |
-|---|------|----------|-----------|
-| 1 | `exit` | Process | `exit(int status)` |
-| 2 | `fork` | Process | `fork() → pid_t` |
-| 3 | `read` | File I/O | `read(int fd, void *buf, size_t count) → ssize_t` |
-| 4 | `write` | File I/O | `write(int fd, const void *buf, size_t count) → ssize_t` |
-| 5 | `open` | File I/O | `open(const char *path, int flags, mode_t mode) → int` |
-| 6 | `close` | File I/O | `close(int fd) → int` |
-| 7 | `wait4` | Process | `wait4(pid_t pid, int *status, int options, ...) → pid_t` |
-| 9 | `link` | Filesystem | `link(const char *old, const char *new) → int` |
-| 10 | `unlink` | Filesystem | `unlink(const char *path) → int` |
-| 12 | `chdir` | Filesystem | `chdir(const char *path) → int` |
-| 15 | `chmod` | Security | `chmod(const char *path, mode_t mode) → int` |
-| 16 | `chown` | Security | `chown(const char *path, uid_t uid, gid_t gid) → int` |
-| 20 | `getpid` | Process | `getpid() → pid_t` |
-| 23 | `setuid` | Security | `setuid(uid_t uid) → int` |
-| 24 | `getuid` | Process | `getuid() → uid_t` |
-| 25 | `geteuid` | Process | `geteuid() → uid_t` |
-| 33 | `access` | Security | `access(const char *path, int mode) → int` |
-| 36 | `sync` | Filesystem | `sync() → void` |
-| 37 | `kill` | Signal | `kill(pid_t pid, int sig) → int` |
-| 41 | `dup` | File I/O | `dup(int fd) → int` |
-| 42 | `pipe` | File I/O | `pipe(int fd[2]) → int` |
-| 46 | `sigaction` | Signal | `sigaction(int sig, ...) → int` |
-| 48 | `sigprocmask` | Signal | `sigprocmask(int how, ...) → int` |
-| 54 | `ioctl` | Device | `ioctl(int fd, unsigned long request, ...) → int` |
-| 59 | `execve` | Process | `execve(const char *path, char *const argv[], ...) → int` |
-| 73 | `munmap` | Memory | `munmap(void *addr, size_t len) → int` |
-| 74 | `mprotect` | Memory | `mprotect(void *addr, size_t len, int prot) → int` |
-| 93 | `select` | File I/O | `select(int nfds, ...) → int` |
-| 97 | `socket` | Network | `socket(int domain, int type, int protocol) → int` |
-| 98 | `connect` | Network | `connect(int fd, ...) → int` |
-| 104 | `bind` | Network | `bind(int fd, ...) → int` |
-| 106 | `listen` | Network | `listen(int fd, int backlog) → int` |
-| 128 | `rename` | Filesystem | `rename(const char *old, const char *new) → int` |
-| 136 | `mkdir` | Filesystem | `mkdir(const char *path, mode_t mode) → int` |
-| 184 | `sigreturn` | Signal | `sigreturn(struct ucontext *ctx) → int` |
-| 197 | `mmap` | Memory | `mmap(void *addr, size_t len, int prot, ...) → void *` |
-| 202 | `sysctl` | System | `sysctl(int *name, u_int namelen, ...) → int` |
-| 240 | `nanosleep` | Process | `nanosleep(const struct timespec *req, ...) → int` |
-| 286 | `pthread_kill` | Signal | `pthread_kill(pthread_t thread, int sig) → int` |
-| 338 | `stat` | Filesystem | `stat(const char *path, struct stat *buf) → int` |
-| 360 | `bsdthread_create` | Thread | `bsdthread_create(func, arg, stack, ...) → int` |
-| 500 | `getentropy` | Security | `getentropy(void *buf, size_t len) → int` |
-| 501 | `openpty` | Terminal | `openpty(int *master, int *slave, ...) → int` |
+Kiseki implements **92 BSD syscalls** (plus `_nocancel` variants). Here's the complete catalogue grouped by category:
 
-(This table shows a representative subset. The full list has 80+ entries; see `include/sys/syscall.h` for the complete set. Numbers 396–406 are `_nocancel` variants that share the same handler as their cancellable counterparts.)
-
-#### Mach Trap Numbers
+#### Process Lifecycle (13 syscalls)
 
 | # | Name | Purpose |
 |---|------|---------|
-| −26 | `mach_reply_port` | Allocate a reply port for an IPC transaction |
-| −27 | `thread_self_trap` | Get the current thread's Mach port |
-| −28 | `task_self_trap` | Get the current task's Mach port |
-| −31 | `mach_msg_trap` | Send and/or receive a Mach message |
-| −32 | `mach_msg_overwrite_trap` | Same, with overwrite semantics |
-| −36 | `mach_port_allocate` | Create a new Mach port |
-| −37 | `mach_port_deallocate` | Destroy a Mach port |
-| −39 | `mach_port_mod_refs` | Modify port reference counts |
-| −40 | `bootstrap_register` | Register a named service port |
-| −41 | `bootstrap_look_up` | Look up a named service port |
-| −42 | `bootstrap_check_in` | Claim a pre-registered service port |
+| 1 | `exit` | Terminate process, set exit status |
+| 2 | `fork` | Create child process (deep-copy address space) |
+| 7 | `wait4` | Wait for child, reap zombie |
+| 20 | `getpid` | Return current PID |
+| 39 | `getppid` | Return parent PID |
+| 24 | `getuid` | Return real user ID |
+| 25 | `geteuid` | Return effective user ID |
+| 23 | `setuid` | Set user ID (SUID handling) |
+| 47 | `getgid` | Return real group ID |
+| 43 | `getegid` | Return effective group ID |
+| 181 | `setgid` | Set group ID |
+| 59 | `execve` | Replace process image with Mach-O binary |
+| 327 | `issetugid` | Check if process is SUID/SGID |
 
-#### Dispatch Architecture
+#### File I/O (22 syscalls)
 
-The dispatch is a giant `switch` statement in `syscall_handler()` (`kernel/bsd/syscalls.c:352-736`). This is a deliberate simplification. XNU uses a **syscall table** — an array of `{ function_pointer, arg_count, ... }` structs indexed by syscall number — which allows O(1) dispatch and supports features like syscall auditing and argument munging (converting 32-bit arguments for 64-bit kernels). Kiseki's switch statement achieves the same dispatch semantics with simpler code:
+| # | Name | # | Name |
+|---|------|---|------|
+| 5 | `open` | 398 | `open_nocancel` |
+| 6 | `close` | 399 | `close_nocancel` |
+| 3 | `read` | 396 | `read_nocancel` |
+| 4 | `write` | 397 | `write_nocancel` |
+| 173 | `pread` | 174 | `pwrite` |
+| 199 | `lseek` | 41 | `dup` |
+| 90 | `dup2` | 42 | `pipe` |
+| 92 | `fcntl` | 406 | `fcntl_nocancel` |
+| 153 | `fstat` | 189 | `fstat64` |
+| 338 | `stat` | 340 | `lstat` |
+| 10 | `unlink` | 58 | `readlink` |
+| 9 | `link` | 95 | `fsync` |
+| 200 | `truncate` | 201 | `ftruncate` |
+
+#### Filesystem / Directory (11 syscalls)
+
+| # | Name | Purpose |
+|---|------|---------|
+| 12 | `chdir` | Change working directory |
+| 13 | `fchdir` | Change working directory (by fd) |
+| 304 | `getcwd` | Get current working directory |
+| 136 | `mkdir` | Create directory |
+| 137 | `rmdir` | Remove directory |
+| 128 | `rename` | Rename file/directory |
+| 15 | `chmod` | Change file permissions |
+| 124 | `fchmod` | Change file permissions (by fd) |
+| 16 | `chown` | Change file ownership |
+| 33 | `access` | Check file access permissions |
+| 196 | `getdirentries` | Read directory entries |
+
+#### Memory Management (3 syscalls)
+
+| # | Name | Purpose |
+|---|------|---------|
+| 197 | `mmap` | Map pages (anonymous or file-backed) |
+| 73 | `munmap` | Unmap pages |
+| 74 | `mprotect` | Change page protection |
+
+#### Signals (5 syscalls)
+
+| # | Name | Purpose |
+|---|------|---------|
+| 37 | `kill` | Send signal to process |
+| 46 | `sigaction` | Set signal handler |
+| 48 | `sigprocmask` | Block/unblock signals |
+| 184 | `sigreturn` | Return from signal handler |
+| 286 | `pthread_kill` | Send signal to specific thread |
+
+#### Network / Sockets (12 syscalls)
+
+| # | Name | # | Name |
+|---|------|---|------|
+| 97 | `socket` | 104 | `bind` |
+| 106 | `listen` | 30 | `accept` |
+| 98 | `connect` | 133 | `sendto` |
+| 29 | `recvfrom` | 134 | `shutdown` |
+| 105 | `setsockopt` | 118 | `getsockopt` |
+| 31 | `getpeername` | 32 | `getsockname` |
+
+#### Threading (4 syscalls)
+
+| # | Name | Purpose |
+|---|------|---------|
+| 360 | `bsdthread_create` | Create user thread (pthread_create backend) |
+| 361 | `bsdthread_terminate` | Terminate user thread |
+| 366 | `bsdthread_register` | Register thread entry point & stack info |
+| 372 | `thread_selfid` | Return current thread ID |
+
+#### System / Misc (12 syscalls)
+
+| # | Name | Purpose |
+|---|------|---------|
+| 54 | `ioctl` | Device I/O control |
+| 202 | `sysctl` | Query/set kernel parameters |
+| 55 | `reboot` | Reboot the system |
+| 93 | `select` | I/O multiplexing |
+| 240 | `nanosleep` | Sleep for specified time |
+| 36 | `sync` | Flush all filesystems |
+| 116 | `gettimeofday` | Get wall clock time |
+| 122 | `settimeofday` | Set wall clock time |
+| 157 | `statfs` | Get filesystem statistics |
+| 158 | `fstatfs` | Get filesystem statistics (by fd) |
+| 336 | `proc_info` | Query process information |
+| 60 | `umask` | Set file creation mask |
+
+#### Kiseki Extensions (2 syscalls)
+
+| # | Name | Purpose |
+|---|------|---------|
+| 500 | `getentropy` | Fill buffer with random bytes |
+| 501 | `openpty` | Allocate pseudo-terminal pair |
+
+### 7.3 How a Syscall Works End-to-End
+
+Let's trace a `write(1, "hello", 5)` call from user space through the kernel:
+
+```
+User code: write(1, "hello", 5)
+  |
+  libSystem's write() wrapper:
+    mov x0, #1          // fd
+    mov x1, <buf_ptr>   // buffer
+    mov x2, #5          // count
+    mov x16, #4         // SYS_write = 4
+    svc #0x80           // trap to kernel
+  |
+  v
+EL0 -> EL1 transition
+  |
+  SAVE_REGS (816-byte trap frame: x0-x30, SP, ELR, SPSR, ESR, FAR, NEON)
+  |
+  trap_sync_el0(tf)
+    ec = (ESR >> 26) = 0x15 (EC_SVC_A64)
+    --> syscall_handler(tf)
+          x16 = 4 (positive = BSD)
+          --> case SYS_write:
+                fd = tf->regs[0] = 1   (stdout)
+                buf = tf->regs[1]      (user pointer)
+                count = tf->regs[2] = 5
+                |
+                p = proc_current()
+                fp = p->p_fd.fd_ofiles[1]  (stdout file)
+                vp = fp->f_vnode
+                |
+                +-- Console write?
+                |     --> kprintf or fbconsole_write  (output to screen/UART)
+                +-- TTY write?
+                |     --> tty_write (line discipline, echo, etc.)
+                +-- VFS write?
+                      --> vfs_write -> ext4_write (write to filesystem)
+                |
+                syscall_return(tf, 5)  // wrote 5 bytes, clear carry
+  |
+  signal_check(thread, tf)  // deliver any pending signals
+  |
+  RESTORE_REGS -> eret to EL0
+  |
+  v
+User code resumes after svc:
+  Check carry flag: clear -> success
+  Return value in x0 = 5
+```
+
+### 7.4 Path Resolution
+
+**File:** `kernel/bsd/syscalls.c` (`resolve_user_path`)
+
+When a syscall receives a file path like `"../Documents/file.txt"`, the kernel must resolve it to an absolute path:
+
+1. If the path starts with `/`, it's already absolute -- use as-is.
+2. Otherwise, prepend the process's current working directory (`p->p_cwd_path`).
+3. Call `canonicalize_path()` to resolve `.` and `..` components.
+
+```
+Process CWD: "/home/user"
+User passes: "../Documents/file.txt"
+
+resolve_user_path():
+  relative -> prepend CWD: "/home/user/../Documents/file.txt"
+
+canonicalize_path():
+  /home/user/../Documents/file.txt
+  ^    ^     ^     ^
+  /home/user  [.. pops "user"]  -> /home
+  /home/Documents/file.txt
+
+Result: "/home/Documents/file.txt"
+```
+
+### 7.5 Signal Delivery
+
+**Files:** `kernel/include/bsd/signal.h` (213 lines), signal handling in `trap.c` and `syscalls.c`
+
+Kiseki implements 31 signals with Darwin-compatible numbering (SIGHUP=1 through SIGUSR2=31).
+
+**Per-process signal state:**
 
 ```c
-/* kernel/bsd/syscalls.c:352-378 (simplified) */
-
-void syscall_handler(struct trap_frame *tf)
-{
-    int64_t callnum = (int64_t)tf->regs[16];
-
-    if (callnum < 0) {
-        mach_trap_dispatch(tf, (int32_t)callnum);
-        return;
-    }
-
-    int error = 0;
-
-    switch ((uint32_t)callnum) {
-    case SYS_exit:   sys_exit(tf);  return;
-    case SYS_fork:   error = sys_fork(tf);   break;
-    case SYS_read:
-    case SYS_read_nocancel:
-                     error = sys_read(tf);   break;
-    case SYS_write:
-    case SYS_write_nocancel:
-                     error = sys_write(tf);  break;
-    /* ... 80+ more cases ... */
-    default:
-        kprintf("[syscall] unimplemented BSD syscall %ld\n", callnum);
-        error = ENOSYS;
-        break;
-    }
-
-    if (error != 0)
-        syscall_error(tf, error);
-    else
-        tf->spsr &= ~SPSR_CARRY_BIT;  /* Clear carry on success */
-}
-```
-
-Note the `_nocancel` variants: macOS provides cancellation-point syscalls (e.g., `read`) and non-cancellation variants (e.g., `read_nocancel`) for thread cancellation support. In Kiseki, both map to the same handler since thread cancellation is not implemented.
-
-#### A Representative Syscall: sys_open
-
-To see how a real syscall works end-to-end, let's trace `sys_open()` (`kernel/bsd/syscalls.c:1073-1093`):
-
-```c
-int sys_open(struct trap_frame *tf)
-{
-    const char *path = (const char *)tf->regs[0];   /* x0 = path */
-    uint32_t flags   = (uint32_t)tf->regs[1];        /* x1 = flags */
-    mode_t mode      = (mode_t)tf->regs[2];          /* x2 = mode */
-
-    if (path == NULL)
-        return EINVAL;
-
-    char abs_path[PATH_MAX_KERN];
-    int err = resolve_user_path(path, abs_path, sizeof(abs_path));
-    if (err)
-        return err;
-
-    int fd = vfs_open(abs_path, flags, mode);
-    if (fd < 0)
-        return (int)(-fd);   /* VFS returns negative errno */
-
-    syscall_return(tf, (int64_t)fd);
-    return 0;
-}
-```
-
-The pattern is consistent across all syscalls:
-
-1. **Extract arguments** from `tf->regs[0..5]`
-2. **Validate inputs** (null checks, range checks, permission checks)
-3. **Do the work** (delegate to a subsystem: VFS, network stack, scheduler, etc.)
-4. **Return result** via `syscall_return(tf, value)` on success, or return a positive `errno` which the dispatch loop converts to `syscall_error(tf, errno)`
-
-> **macOS reference:** XNU's real syscall table is generated from `bsd/kern/syscalls.master` by a Python script that produces `bsd/kern/init_sysent.c`. Each entry contains the handler function, the number of arguments, and flags for things like argument munging and return-value handling. Kiseki's approach is equivalent for the syscalls it implements; the table-driven approach would only become necessary when supporting the full ~550 XNU syscalls.
-
-#### The sysctl Subsystem
-
-One syscall deserves special mention: `sysctl` (number 202). This is the kernel's **query/configuration interface** — a hierarchical namespace of key-value pairs that expose system information and tunables.
-
-```
-CTL_KERN (1)              CTL_HW (6)              CTL_NET (4)
-├── KERN_OSTYPE     (1)   ├── HW_MACHINE    (1)   ├── NET_KISEKI_IFADDR (100)
-├── KERN_OSRELEASE  (2)   ├── HW_NCPU       (3)   ├── NET_KISEKI_IFMASK (101)
-├── KERN_VERSION    (4)   ├── HW_PAGESIZE   (7)   ├── NET_KISEKI_IFGW   (102)
-├── KERN_HOSTNAME  (10)   └── HW_MEMSIZE   (12)   └── NET_KISEKI_IFDNS  (103)
-├── KERN_PROC      (14)
-└── KERN_OSVERSION (65)
-```
-
-This is how `uname -a` gets the kernel version, how applications discover the number of CPUs, and how network utilities query interface addresses. The hierarchical namespace is addressed by an array of integers: `{CTL_KERN, KERN_OSTYPE}` returns `"Kiseki"`, while `{CTL_HW, HW_NCPU}` returns the SMP core count.
-
-> **Security implication:** `sysctl` is a significant information disclosure vector. An attacker can use it to fingerprint the kernel version, discover the network topology, and enumerate processes. macOS restricts many sysctl nodes to root or adds sandbox checks. Kiseki currently does not restrict read access to sysctl, which is typical for a development kernel but would need hardening for production use.
-
-### 7.3 Unix DAC & Credentials
-
-Every process has an identity. Every file has an owner and a set of permission bits. The rules that connect these — *who can read this file?*, *who can send this signal?*, *who can bind this port?* — constitute the **Discretionary Access Control** (DAC) model. "Discretionary" because the file *owner* decides who gets access (by setting permission bits), as opposed to Mandatory Access Control (MAC) where a system policy overrides the owner's wishes.
-
-This section covers Kiseki's implementation of the Unix credential system and permission checking, all in `kernel/bsd/security.c` (247 lines) and `kernel/include/bsd/security.h` (184 lines).
-
-#### The ucred Structure
-
-Every process carries a **credential** — a `struct ucred` that records its identity:
-
-```c
-/* kernel/include/bsd/security.h:68-78 */
-
-struct ucred {
-    uid_t       cr_uid;                 /* Effective user ID */
-    gid_t       cr_gid;                 /* Effective group ID */
-    uid_t       cr_ruid;                /* Real user ID */
-    gid_t       cr_rgid;                /* Real group ID */
-    uid_t       cr_svuid;               /* Saved user ID */
-    gid_t       cr_svgid;               /* Saved group ID */
-    gid_t       cr_groups[NGROUPS_MAX]; /* Supplementary group list (max 16) */
-    uint32_t    cr_ngroups;             /* Number of supplementary groups */
-    uint32_t    cr_ref;                 /* Reference count */
+struct sigacts {
+    struct sigaction actions[32];    // Per-signal handler + flags
+    uint32_t        pending;        // Bitmask of pending signals
+    uint32_t        blocked;        // Bitmask of blocked signals
+    uint64_t        altstack_sp;    // Alternate stack pointer
+    uint64_t        altstack_size;  // Alternate stack size
+    bool            altstack_active;
 };
 ```
 
-**Why three UIDs?** This is one of the most confusing aspects of Unix security, so let's be precise:
+**Signal delivery flow** (called from `signal_check()` on every return-to-user path):
 
-- **Real UID** (`cr_ruid`): The UID of the user who *started* the process. Never changes except via root calling `setuid()`. Used for accounting and determining who "really" owns the process.
-- **Effective UID** (`cr_uid`): The UID used for *permission checks*. This is what matters when opening files or sending signals. Can differ from the real UID after `exec()` of a SUID binary.
-- **Saved UID** (`cr_svuid`): A snapshot of the effective UID *before* a SUID exec changed it. Allows the process to temporarily drop privileges and restore them later.
-
-The same triple exists for group IDs (`cr_gid`, `cr_rgid`, `cr_svgid`).
-
-```mermaid
-stateDiagram-v2
-    [*] --> NormalProcess: fork() — inherits parent's credentials
-
-    NormalProcess --> NormalProcess: setuid(own_uid) — no-op
-    NormalProcess --> SUIDProcess: exec(SUID binary)
-    NormalProcess --> RootProcess: setuid(0) — only if already root
-
-    SUIDProcess --> SUIDProcess: cr_uid = file owner\ncr_svuid = old cr_uid\ncr_ruid unchanged
-    SUIDProcess --> DroppedPrivs: setuid(cr_ruid) — drop to real UID
-    DroppedPrivs --> SUIDProcess: setuid(cr_svuid) — restore saved UID
-
-    RootProcess --> AnyUID: setuid(any) — root can change to any UID
-
-    note right of SUIDProcess
-        The classic pattern:
-        1. exec /usr/bin/passwd (owned by root, SUID bit set)
-        2. cr_uid becomes 0, cr_ruid stays 501, cr_svuid = 501
-        3. Process does privileged work (update /etc/shadow)
-        4. Process calls setuid(501) to drop back to normal user
-    end note
+```
+signal_check(thread, tf):
+  |
+  pending_unblocked = sa->pending & ~sa->blocked
+  if none: return
+  |
+  Find lowest-numbered pending signal
+  Clear from pending set
+  |
+  +-- Handler == SIG_DFL?
+  |     SIGKILL/SIGTERM/etc: proc_exit(p, W_EXITCODE(0, signo))
+  |     SIGSTOP: set PROC_STOPPED
+  |     SIGCONT: resume
+  |     SIGCHLD/SIGWINCH: ignore (default-ignore signals)
+  |
+  +-- Handler == SIG_IGN?
+  |     Discard signal, continue
+  |
+  +-- Handler == user function?
+        Push signal frame onto user stack:
+          Save current tf->elr, tf->sp, tf->spsr, tf->regs[0..30]
+          onto user stack as a "signal context"
+        Rewrite trap frame:
+          tf->elr = handler address (user function)
+          tf->sp  = new stack (with saved context below)
+          tf->regs[0] = signo (first argument to handler)
+          tf->regs[30] = commpage sigreturn trampoline
+        When eret fires: user starts executing the signal handler
+        When handler returns: x30 -> sigreturn trampoline -> svc SYS_sigreturn
+          sigreturn restores original tf from saved context
 ```
 
-#### Credential Allocation
+The CommPage contains a `sigreturn_trampoline` that executes `mov x16, #184; svc #0x80` (SYS_sigreturn). This is how the kernel regains control after the user signal handler returns.
 
-Credentials are allocated from a fixed pool of 128 entries (`kernel/bsd/security.c:25-27`) using a free-list index chain. This is a common pattern in embedded and early-boot kernel code where dynamic memory allocation is not yet available or is too expensive:
+### 7.6 Demand Paging in the Trap Handler
+
+**File:** `kernel/kern/trap.c` (data abort handler)
+
+When a user program accesses an address that has a vm_map entry but no physical page yet (demand paging), or writes to a COW page, the trap handler resolves it:
+
+```
+User writes to VA 0x100008000 (mapped in vm_map but no PTE yet)
+  |
+  Data Abort! (Translation fault, level 3)
+  |
+  trap_sync_el0(tf)
+    ec = EC_DABT_LOWER (0x24)
+    --> handle_page_fault(tf)
+          FAR = 0x100008000   (faulting address)
+          DFSC = 0x07          (level 3 translation fault)
+          WnR = 1              (write)
+          |
+          +-- vm_map_lookup_entry(map, FAR)
+          |   Found entry: [0x100000000..0x100010000] RW, anonymous
+          |
+          +-- Translation fault?
+          |     Allocate page: pa = pmm_alloc_page()
+          |     Zero the page
+          |     Map: vmm_map_page(pgd, 0x100008000, pa, PTE_USER_RW)
+          |     Return (instruction retries, succeeds now)
+          |
+          +-- Permission fault + PTE_COW set?
+          |     vmm_copy_on_write(space, FAR)
+          |     (See Section 3.6)
+          |     Return (instruction retries with RW page)
+          |
+          +-- No vm_map entry?
+                Send SIGSEGV to process
+```
+
+This is also how kernel-mode accesses to user buffers work. When the kernel reads from a user pointer (e.g., copying a filename from user space), and the page hasn't been faulted in yet, `trap_sync_el1` handles the translation fault by demand-paging the page, then letting the kernel instruction retry.
+
+### 7.7 Security: DAC Permission Checks
+
+**File:** `kernel/bsd/security.c` (247 lines)
+
+**Credential structure:**
 
 ```c
-/* kernel/bsd/security.c:25-35 */
-
-#define UCRED_POOL_SIZE     128
-
-static struct ucred ucred_pool[UCRED_POOL_SIZE];
-static int32_t ucred_free_next[UCRED_POOL_SIZE];
-static int32_t ucred_free_head;
-static spinlock_t ucred_lock = SPINLOCK_INIT;
+struct ucred {
+    uid_t   cr_uid, cr_ruid, cr_svuid;     // Effective, real, saved UIDs
+    gid_t   cr_gid, cr_rgid, cr_svgid;     // Effective, real, saved GIDs
+    int     cr_ngroups;                      // Number of supplementary groups
+    gid_t   cr_groups[16];                   // Supplementary group list
+    int     cr_ref;                          // Reference count
+};
 ```
 
-The free list works by storing the index of the *next* free slot in `ucred_free_next[i]`. Allocation pops the head; deallocation pushes back:
+Credentials are managed from a pool of 128 `ucred` structs (no dynamic allocation).
 
-```c
-/* kernel/bsd/security.c:60-92 — ucred_create() */
+**Permission check:** `vfs_access(vnode, mode, cred)` implements standard Unix DAC:
 
-struct ucred *ucred_create(uid_t uid, gid_t gid)
-{
-    spin_lock_irqsave(&ucred_lock, &flags);
+1. **Root (UID 0)**: bypasses all checks.
+2. **Owner match** (`cred->cr_uid == vnode->v_uid`): check bits 8-6 (owner triad).
+3. **Group match** (effective GID or supplementary groups): check bits 5-3 (group triad).
+4. **Other**: check bits 2-0 (other triad).
 
-    if (ucred_free_head < 0) {
-        /* Pool exhausted */
-        spin_unlock_irqrestore(&ucred_lock, flags);
-        return NULL;
-    }
-
-    int32_t idx = ucred_free_head;
-    ucred_free_head = ucred_free_next[idx];
-    struct ucred *cr = &ucred_pool[idx];
-
-    spin_unlock_irqrestore(&ucred_lock, flags);
-
-    /* Initialise: all three UID/GID fields set to same value */
-    cr->cr_uid = cr->cr_ruid = cr->cr_svuid = uid;
-    cr->cr_gid = cr->cr_rgid = cr->cr_svgid = gid;
-    cr->cr_ngroups = 0;
-    cr->cr_ref = 1;
-
-    return cr;
-}
-```
-
-Credentials are **reference-counted**. When a process `fork()`s, the child shares the parent's credential (incrementing `cr_ref`). When either process changes credentials (e.g., `setuid()`), a new credential is allocated (copy-on-write semantics). When `cr_ref` drops to zero, the credential returns to the free list:
-
-```c
-/* kernel/bsd/security.c:105-128 — ucred_release() */
-
-void ucred_release(struct ucred *cr)
-{
-    spin_lock_irqsave(&ucred_lock, &flags);
-
-    cr->cr_ref--;
-    if (cr->cr_ref == 0) {
-        /* Return to free list */
-        int32_t idx = (int32_t)(cr - ucred_pool);
-        ucred_free_next[idx] = ucred_free_head;
-        ucred_free_head = idx;
-    }
-
-    spin_unlock_irqrestore(&ucred_lock, flags);
-}
-```
-
-#### VFS Permission Checks
-
-The core of DAC is `vfs_access()` (`kernel/bsd/security.c:167-195`), which implements the classic Unix permission check algorithm:
-
-```mermaid
-flowchart TD
-    START["vfs_access(vnode, requested_mode, credential)"]
-    START --> ROOT{"cr_uid == 0<br/>(root)?"}
-    ROOT -- "Yes" --> GRANT["GRANT — root bypasses all checks"]
-    ROOT -- "No" --> OWNER{"cr_uid == file owner?"}
-    OWNER -- "Yes" --> OBITS["Use owner bits (mode >> 6) & 0x7"]
-    OWNER -- "No" --> GROUP{"cr_gid matches file group?<br/>Or in supplementary groups?"}
-    GROUP -- "Yes" --> GBITS["Use group bits (mode >> 3) & 0x7"]
-    GROUP -- "No" --> OTHBITS["Use other bits (mode & 0x7)"]
-    OBITS --> CHECK{"(requested & granted)<br/>== requested?"}
-    GBITS --> CHECK
-    OTHBITS --> CHECK
-    CHECK -- "Yes" --> GRANT2["GRANT — return 0"]
-    CHECK -- "No" --> DENY["DENY — return -EACCES"]
-```
-
-The implementation:
-
-```c
-/* kernel/bsd/security.c:167-195 */
-
-int vfs_access(struct vnode *vp, int mode, struct ucred *cr)
-{
-    if (vp == NULL || cr == NULL)
-        return -EINVAL;
-
-    /* Root bypasses all permission checks */
-    if (cr->cr_uid == 0)
-        return 0;
-
-    mode_t file_mode = vp->v_mode;
-    int granted;
-
-    if (cr->cr_uid == vp->v_uid) {
-        /* Owner: use bits 8-6 */
-        granted = (int)((file_mode >> 6) & 0x7);
-    } else if (groupmember(vp->v_gid, cr)) {
-        /* Group member: use bits 5-3 */
-        granted = (int)((file_mode >> 3) & 0x7);
-    } else {
-        /* Other: use bits 2-0 */
-        granted = (int)(file_mode & 0x7);
-    }
-
-    /* Check that all requested bits are present */
-    if ((mode & granted) == mode)
-        return 0;
-
-    return -EACCES;
-}
-```
-
-The `mode_t` layout is a 12-bit value. The low 9 bits form three triads (owner, group, other), each containing read (4), write (2), and execute (1) permission:
-
-```
-  11  10   9   8   7   6   5   4   3   2   1   0
-┌────┬────┬────┬────┬────┬────┬────┬────┬────┬────┬────┬────┐
-│SUID│SGID│ T  │ r  │ w  │ x  │ r  │ w  │ x  │ r  │ w  │ x  │
-│    │    │    │    owner    │    group     │     other     │
-└────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┘
-```
-
-For example, `0755` means:
-- Owner: rwx (7 = 4+2+1)
-- Group: r-x (5 = 4+0+1)
-- Other: r-x (5 = 4+0+1)
-
-The `groupmember()` function (`kernel/bsd/security.c:134-150`) checks both the effective GID and the supplementary group list (up to `NGROUPS_MAX` = 16 entries):
-
-```c
-bool groupmember(gid_t gid, struct ucred *cr)
-{
-    if (cr->cr_gid == gid)
-        return true;
-
-    for (uint32_t i = 0; i < cr->cr_ngroups; i++) {
-        if (cr->cr_groups[i] == gid)
-            return true;
-    }
-
-    return false;
-}
-```
-
-#### Privilege Checks
-
-Beyond file permissions, certain operations require **privilege** — the ability to do something regardless of file ownership. Examples: mounting filesystems, sending signals to other users' processes, binding to ports below 1024, rebooting the system.
-
-Kiseki implements a simple privilege check (`kernel/bsd/security.c:205-216`):
-
-```c
-int priv_check(struct ucred *cr, int priv)
-{
-    (void)priv;     /* All privs granted to root */
-
-    if (cr == NULL)
-        return -EACCES;
-
-    if (cr->cr_uid == 0)
-        return 0;       /* Root has all privileges */
-
-    return -EACCES;
-}
-```
-
-The privilege constants defined in the header hint at a future capability-based model:
-
-| Constant | Value | Controls |
-|----------|-------|----------|
-| `PRIV_ROOT` | 0 | Generic root privilege |
-| `PRIV_NET_RAW` | 1 | Create raw sockets |
-| `PRIV_VFS_MOUNT` | 2 | Mount filesystems |
-| `PRIV_PROC_SIGNAL` | 3 | Signal arbitrary processes |
-| `PRIV_KERN_SYSCTL` | 4 | Modify sysctl values |
-
-Currently, all privileges reduce to "is UID 0?" — the traditional Unix superuser model. This is the same baseline that XNU starts from, before layering on its more sophisticated security mechanisms.
-
-#### SUID/SGID Handling
-
-When `execve()` loads a new binary, it calls `suid_check()` (`kernel/bsd/security.c:229-247`) to handle Set-User-ID and Set-Group-ID bits:
-
-```c
-void suid_check(struct ucred *cr, mode_t mode, uid_t uid, gid_t gid)
-{
-    if (mode & S_ISUID) {
-        cr->cr_svuid = cr->cr_uid;   /* Save old effective UID */
-        cr->cr_uid = uid;             /* Set new effective UID to file owner */
-    }
-
-    if (mode & S_ISGID) {
-        cr->cr_svgid = cr->cr_gid;   /* Save old effective GID */
-        cr->cr_gid = gid;            /* Set new effective GID to file group */
-    }
-}
-```
-
-This is the mechanism behind `passwd`, `su`, and `sudo` on Unix systems. The binary is owned by root and has the SUID bit set (mode `4755`). When a normal user `exec()`s it, the effective UID changes to 0 (root), giving the process temporary root privilege. The saved UID preserves the original effective UID so the process can drop privileges when done.
-
-```mermaid
-sequenceDiagram
-    participant Shell as bash (uid=501)
-    participant Kernel as Kernel
-    participant Passwd as passwd (uid→0)
-
-    Shell->>Kernel: execve("/usr/bin/passwd", ...)
-    Kernel->>Kernel: Load Mach-O from /usr/bin/passwd
-    Kernel->>Kernel: Check vnode: owner=0, mode=0104755 (SUID set)
-    Kernel->>Kernel: suid_check(cr, 0104755, uid=0, gid=0)
-    Note over Kernel: cr_svuid = 501 (save old effective)<br/>cr_uid = 0 (set to file owner)
-    Kernel->>Passwd: New process: ruid=501, euid=0, svuid=501
-    Passwd->>Passwd: Update /etc/shadow (needs euid=0)
-    Passwd->>Kernel: setuid(501) — drop privileges
-    Note over Kernel: cr_uid = 501 (back to normal)
-```
-
-> **Security implication:** SUID binaries are one of the oldest and most exploited attack vectors in Unix security. A vulnerability in any SUID-root binary is a direct path to root privilege escalation. macOS mitigates this with SIP (System Integrity Protection), entitlements, and sandboxing. Kiseki implements the base SUID mechanism but none of the mitigations, making it a useful teaching tool for understanding *why* those mitigations exist.
-
-#### Signal Permission Checks
-
-Sending signals (`kill` syscall) has its own permission rules, enforced directly in `sys_kill()` (`kernel/bsd/syscalls.c:968-1051`):
-
-```c
-/* Permission check (simplified) from the DO_KILL_ONE macro */
-if (sender->p_ucred.cr_uid != 0 &&                    /* Not root */
-    sender->p_ucred.cr_uid != target->p_ucred.cr_ruid && /* Not target's real uid */
-    sender->p_ucred.cr_ruid != target->p_ucred.cr_ruid)  /* Sender's real uid */
-{
-    found_no_perm = true;
-    break;
-}
-```
-
-The rules are:
-1. Root (UID 0) can signal any process
-2. Otherwise, the sender's effective *or* real UID must match the target's real UID
-
-This prevents a normal user from killing another user's processes, while still allowing a SUID process (which has euid=0) to signal anything.
-
-The `kill` syscall also handles process groups and broadcast semantics:
-- `pid > 0`: Signal a specific process
-- `pid == 0`: Signal all processes in the sender's process group
-- `pid == -1`: Signal all processes (except PID 0 and self)
-- `pid < -1`: Signal all processes in process group `|pid|`
-
-> **macOS reference:** XNU's real signal permission check is in `bsd/kern/kern_sig.c:cansignal()`. It is considerably more complex, checking for sandbox restrictions, audit session isolation, and Mach task access ports. The basic UID comparison, however, remains at the core — exactly as Kiseki implements it.
+**SUID/SGID handling:** During `execve`, if the executable has `S_ISUID` set, the process's effective UID becomes the file's owner UID (and the old effective UID is saved in `cr_svuid`). This is how `su` and `sudo` work.
 
 ---
 
-## Chapter 8: Filesystem — VFS, Ext4, Buffer Cache
+## Chapter 8: Filesystem -- VFS, Ext4, Buffer Cache
 
-Up to this point, we have covered processes, threads, memory, IPC, and syscalls. But none of that matters without *persistent storage*. When a user saves a file, closes their laptop, and reopens it a week later, the file must still be there. The filesystem is the subsystem that makes this possible.
+User programs think in terms of files and directories. The kernel's job is to translate `open("/etc/hosts")` into block reads from a disk device. Kiseki uses a three-layer filesystem architecture matching BSD/XNU:
 
-#### What Is a Filesystem?
-
-A filesystem is an *abstraction over raw disk blocks*. A disk drive (or in our case, a VirtIO block device emulated by QEMU) provides a flat array of 512-byte sectors — nothing more. There are no files, no directories, no names, no permissions. The filesystem layer imposes structure: it decides which sectors belong to which files, maintains a directory tree mapping names to data, tracks free space, and ensures consistency across crashes.
-
-There are many different filesystem formats (ext4, APFS, NTFS, FAT32, etc.), each with different on-disk layouts and trade-offs. The kernel needs a way to support multiple formats simultaneously — your root partition might be ext4 while a USB drive is FAT32. This is where the **Virtual File System** (VFS) layer comes in.
-
-#### The Three-Layer Sandwich
-
-Kiseki's filesystem architecture has three layers, exactly matching the BSD/XNU model:
-
-```mermaid
-flowchart TD
-    APP["User Process<br/>open(), read(), write(), stat()"]
-    APP --> SYSCALL["BSD Syscalls<br/>sys_open(), sys_read(), sys_write()"]
-    SYSCALL --> VFS["VFS Layer<br/>vfs_open(), vfs_lookup(), vfs_read()<br/>mount table, vnode pool, fd table"]
-    VFS --> |"vnode_ops→read()"| EXT4["ext4 Driver<br/>ext4_vop_read(), ext4_vop_write()"]
-    VFS --> |"vnode_ops→read()"| DEVFS["devfs Driver<br/>devfs_chr_read(), devfs_chr_write()"]
-    EXT4 --> BUFCACHE["Buffer Cache<br/>buf_read(), buf_write(), buf_release()"]
-    BUFCACHE --> BLKDEV["Block Device<br/>VirtIO block driver"]
-    BLKDEV --> DISK["Virtual Disk<br/>(QCOW2/raw image)"]
-    DEVFS --> |"Direct"| TTY["TTY / UART / Null / Zero"]
 ```
-
-1. **VFS layer** (`kernel/fs/vfs.c`, 1437 lines): Provides the filesystem-independent API. Manages mount points, vnodes (the in-memory representation of files), file descriptors, and path resolution. Delegates actual I/O to filesystem-specific code through function pointers.
-
-2. **Filesystem drivers** (`kernel/fs/ext4/ext4.c`, 2836 lines; `kernel/fs/devfs.c`, 548 lines): Implement the on-disk format. Know how to read inodes, traverse directory entries, allocate blocks, etc.
-
-3. **Buffer cache** (`kernel/fs/buf.c`, 416 lines): Sits between the filesystem driver and the block device. Caches recently-read disk blocks in memory to avoid redundant I/O. Uses LRU eviction and write-back (dirty buffers are flushed periodically or on demand).
+User space:  open(), read(), write(), close(), mkdir(), stat(), ...
+                |
+  ========== Kernel boundary (svc #0x80) ==========
+                |
+                v
+  +------ VFS Layer (vfs.c) ------+    Uniform API: vnodes, mounts
+  |   vnode_ops dispatch table    |    Path resolution, fd management
+  +-------------------------------+
+                |
+    +-----------+-----------+
+    |                       |
+    v                       v
+  ext4 driver           devfs driver      (one driver per FS type)
+  (ext4.c)              (devfs.c)
+    |                       |
+    v                       |
+  Buffer Cache (buf.c)      |
+    |                  (in-memory only)
+    v
+  VirtIO Block Device
+    |
+    v
+  QEMU disk image (ext4.img)
+```
 
 ### 8.1 The VFS Layer
 
-The VFS is the kernel's filesystem abstraction. It provides a uniform API to user space regardless of which filesystem type backs a given file. When user code calls `open("/Users/admin/hello.txt", O_RDONLY, 0)`, the VFS:
+**Files:** `kernel/fs/vfs.c` (1,454 lines), `kernel/include/fs/vfs.h` (799 lines)
 
-1. Walks the path to find the correct mount point
-2. Delegates to the filesystem-specific `lookup()` operation for each path component
-3. Allocates a vnode (if not already cached) and a file descriptor
-4. Returns the fd to user space
+**For the systems newcomer:** A **Virtual Filesystem Switch (VFS)** is an abstraction that lets the kernel support multiple filesystem formats (ext4, FAT32, NFS) behind a single API. Programs don't need to know which format the disk uses -- they just call `read()` and the VFS dispatches to the right driver.
 
-All of this is invisible to the application. It just gets an integer fd and can call `read()`/`write()` on it.
-
-#### Vnodes — The Universal File Object
-
-The **vnode** (virtual node) is the central abstraction. Every open file, directory, device, or symlink in the system is represented by a vnode. This concept was invented by Sun Microsystems in 1985 for SunOS and adopted by every BSD derivative since, including XNU.
+The central abstraction is the **vnode** (virtual node) -- an in-memory representation of a file or directory:
 
 ```c
-/* kernel/include/fs/vfs.h:183-197 */
-
+// vfs.h (abridged)
 struct vnode {
-    enum vtype          v_type;         /* VREG, VDIR, VLNK, VCHR, ... */
-    uint32_t            v_refcount;     /* Reference count */
-    uint64_t            v_ino;          /* Inode number */
-    uint64_t            v_size;         /* File size in bytes */
-    mode_t              v_mode;         /* Permission bits + type */
-    uid_t               v_uid;          /* Owner user ID */
-    gid_t               v_gid;          /* Owner group ID */
-    nlink_t             v_nlink;        /* Hard link count */
-    uint32_t            v_dev;          /* Device this vnode lives on */
-    void               *v_data;         /* Filesystem-private data */
-    struct vnode_ops   *v_ops;          /* Operation vector */
-    struct mount       *v_mount;        /* Owning mount */
-    spinlock_t          v_lock;         /* Protects v_refcount */
+    enum vtype      v_type;         // VREG, VDIR, VLNK, VCHR, etc.
+    uint32_t        v_refcount;     // How many references (open fds, lookups)
+    uint64_t        v_ino;          // Inode number (unique within filesystem)
+    uint64_t        v_size;         // File size in bytes
+    mode_t          v_mode;         // Permission bits (rwxrwxrwx)
+    uid_t           v_uid;          // Owner user ID
+    gid_t           v_gid;          // Owner group ID
+    nlink_t         v_nlink;        // Hard link count
+    void            *v_data;        // FS-private data (ext4_vnode_data, etc.)
+    struct vnode_ops *v_ops;        // Per-FS operation table
+    struct mount    *v_mount;       // Which filesystem this vnode belongs to
+    spinlock_t      v_lock;
 };
 ```
 
-The key field is `v_ops` — a pointer to a table of function pointers that implement filesystem-specific behaviour:
+Each filesystem registers an **operation table** that the VFS calls for file operations:
 
 ```c
-/* kernel/include/fs/vfs.h:52-177 (simplified) */
-
 struct vnode_ops {
-    int     (*lookup)(vnode *dir, const char *name, uint32_t namelen, vnode **result);
-    int64_t (*read)(vnode *vp, void *buf, uint64_t offset, uint64_t count);
-    int64_t (*write)(vnode *vp, const void *buf, uint64_t offset, uint64_t count);
-    int     (*readdir)(vnode *dir, struct dirent *buf, uint64_t *offset, uint32_t count);
-    int     (*create)(vnode *dir, const char *name, uint32_t namelen, mode_t mode, vnode **result);
-    int     (*mkdir)(vnode *dir, const char *name, uint32_t namelen, mode_t mode, vnode **result);
-    int     (*unlink)(vnode *dir, const char *name, uint32_t namelen);
-    int     (*getattr)(vnode *vp, struct stat *st);
-    int     (*setattr)(vnode *vp, struct stat *st);
-    int     (*readlink)(vnode *vp, char *buf, uint64_t buflen);
+    int (*lookup)(struct vnode *dir, const char *name, uint32_t namelen,
+                  struct vnode **result);
+    int (*read)(struct vnode *vp, void *buf, uint64_t offset, uint64_t count);
+    int (*write)(struct vnode *vp, const void *buf, uint64_t offset, uint64_t count);
+    int (*readdir)(struct vnode *dir, void *buf, uint64_t *offset, uint64_t count);
+    int (*create)(struct vnode *dir, const char *name, uint32_t namelen,
+                  mode_t mode, struct vnode **result);
+    int (*mkdir)(struct vnode *dir, const char *name, uint32_t namelen,
+                 mode_t mode, struct vnode **result);
+    int (*unlink)(struct vnode *dir, const char *name, uint32_t namelen);
+    int (*getattr)(struct vnode *vp, struct stat *st);
+    int (*setattr)(struct vnode *vp, struct stat *st);
+    int (*readlink)(struct vnode *vp, char *buf, uint64_t buflen);
 };
 ```
 
-This is the classic **strategy pattern**: the VFS calls `vp->v_ops->read(vp, buf, offset, count)` without knowing whether the vnode belongs to ext4, devfs, or any other filesystem. The filesystem driver fills in the function pointers at mount time.
-
-Vnodes are allocated from a fixed pool of 1024 entries (`kernel/fs/vfs.c:44-46`). They are reference-counted: `vnode_ref()` increments the count, `vnode_release()` decrements it, and when the count reaches zero the vnode is returned to the pool:
-
-```c
-/* kernel/fs/vfs.c:158-214 */
-
-struct vnode *vnode_alloc(void)
-{
-    spin_lock(&vnode_pool_lock);
-    for (uint32_t i = 0; i < VFS_MAX_VNODES; i++) {
-        if (vnode_pool[i].v_refcount == 0 && vnode_pool[i].v_type == VNON) {
-            struct vnode *vp = &vnode_pool[i];
-            vp->v_refcount = 1;
-            /* ... zero out fields ... */
-            spin_unlock(&vnode_pool_lock);
-            return vp;
-        }
-    }
-    spin_unlock(&vnode_pool_lock);
-    return NULL;    /* Pool exhausted */
-}
-```
-
-#### File Descriptors — Per-Process Indirection
-
-When user code opens a file, it does not get a vnode pointer (that would be a kernel address, unusable from EL0). Instead, it gets a small integer — a **file descriptor** (fd). The kernel maintains a per-process mapping from fd numbers to `struct file` objects:
-
-```mermaid
-flowchart LR
-    subgraph "Process A (p_fd)"
-        FD0A["fd 0 → file_pool[3]"]
-        FD1A["fd 1 → file_pool[3]"]
-        FD2A["fd 2 → file_pool[3]"]
-        FD3A["fd 3 → file_pool[7]"]
-    end
-
-    subgraph "Process B (p_fd)"
-        FD0B["fd 0 → file_pool[12]"]
-        FD1B["fd 1 → file_pool[12]"]
-        FD3B["fd 3 → file_pool[7]"]
-    end
-
-    subgraph "file_pool (system-wide)"
-        F3["file_pool[3]<br/>f_vnode → /dev/console<br/>f_offset = 0<br/>f_refcount = 3"]
-        F7["file_pool[7]<br/>f_vnode → /tmp/log<br/>f_offset = 4096<br/>f_refcount = 2"]
-        F12["file_pool[12]<br/>f_vnode → /dev/tty<br/>f_offset = 0<br/>f_refcount = 2"]
-    end
-```
-
-There are *two* levels of indirection:
-
-1. **Per-process fd table** (`p_fd.fd_ofiles[]`): Maps integer fd → `struct file *`. Each process has its own table, so fd 3 in process A and fd 3 in process B can refer to completely different files.
-
-2. **System-wide file pool** (`file_pool[]`, 512 entries): Contains `struct file` objects, each holding the file offset, flags, and a pointer to the backing vnode. Multiple fds can point to the same `struct file` (via `dup()` or `fork()`), sharing the offset.
-
-```c
-/* kernel/include/fs/vfs.h:375+ (simplified) */
-
-struct file {
-    uint32_t        f_refcount;     /* How many fds point here */
-    uint32_t        f_flags;        /* O_RDONLY, O_WRONLY, etc. */
-    uint64_t        f_offset;       /* Current read/write position */
-    struct vnode   *f_vnode;        /* Backing vnode (NULL for pipes/sockets) */
-    void           *f_pipe;         /* Pipe data (if pipe fd) */
-    void           *f_pty;          /* PTY data (if PTY fd) */
-    int             f_sockidx;      /* Socket index (if socket fd) */
-    spinlock_t      f_lock;
-};
-```
-
-This two-level design is critical for correctness. Consider what happens with `dup2(3, 1)` (redirect stdout to fd 3's file): the fd table entry for fd 1 is changed to point to the same `struct file` as fd 3, with `f_refcount` incremented. Now writes to fd 1 and fd 3 share the same offset and go to the same vnode.
-
-#### Mount Points
-
-A mount point associates a filesystem type with a path and a device. The mount table is a fixed array of 16 entries:
-
-```c
-/* kernel/fs/vfs.c:19-21 */
-
-static struct mount     mount_table[VFS_MAX_MOUNTS];    /* max 16 */
-static uint32_t         mount_count;
-```
-
-Each mount records:
-- `mnt_path`: The directory where this filesystem appears in the tree (e.g., `"/"`, `"/dev"`)
-- `mnt_ops`: Filesystem-level operations (`mount`, `unmount`, `sync`, `statfs`)
-- `mnt_root`: The root vnode of this filesystem
-- `mnt_dev`: Block device number (for disk-backed filesystems)
-
-When resolving a path, `mount_find()` (`kernel/fs/vfs.c:617-659`) performs **longest-prefix matching**: it finds the mount whose `mnt_path` is the longest prefix of the target path. This is how `/dev/console` resolves to the devfs mount at `/dev` rather than the ext4 mount at `/`.
-
-#### Path Resolution
-
-Path resolution is the process of converting a string like `"/Users/admin/Documents/report.txt"` into a vnode. It is implemented by `resolve_path()` (`kernel/fs/vfs.c:679-785`):
-
-```mermaid
-sequenceDiagram
-    participant VFS as VFS (resolve_path)
-    participant Mount as mount_find()
-    participant Ext4 as ext4_vop_lookup()
-
-    VFS->>Mount: Find mount for "/Users/admin/Documents/report.txt"
-    Mount-->>VFS: Root mount ("/"), remainder = "Users/admin/Documents/report.txt"
-    VFS->>VFS: current = root mount's root vnode
-
-    VFS->>VFS: Split: component = "Users", rest = "admin/Documents/report.txt"
-    VFS->>VFS: Check: is current a directory? ✓
-    VFS->>VFS: Check: execute permission on current? ✓
-    VFS->>Ext4: lookup(current, "Users", 5, &child)
-    Ext4-->>VFS: child vnode (inode 42, VDIR)
-
-    VFS->>VFS: current = child; component = "admin"
-    VFS->>Ext4: lookup(current, "admin", 5, &child)
-    Ext4-->>VFS: child vnode (inode 100, VDIR)
-
-    VFS->>VFS: current = child; component = "Documents"
-    VFS->>Ext4: lookup(current, "Documents", 9, &child)
-    Ext4-->>VFS: child vnode (inode 201, VDIR)
-
-    VFS->>VFS: current = child; component = "report.txt" (last)
-    VFS->>Ext4: lookup(current, "report.txt", 10, &child)
-    Ext4-->>VFS: child vnode (inode 305, VREG, size=4096)
-
-    VFS-->>VFS: result = child vnode
-```
-
-Key security detail: at each directory traversal step, the VFS checks **execute permission** on the directory (`vfs_check_permission(current, VEXEC)` at `kernel/fs/vfs.c:752`). This is a common point of confusion: on directories, the execute bit does not mean "run this directory as a program." It means "permission to traverse (search) this directory." Without `x` permission on `/Users`, you cannot resolve any path through it, regardless of the permissions on files inside.
-
-> **macOS reference:** XNU's VFS is in `bsd/vfs/vfs_lookup.c` and `bsd/vfs/vfs_vnops.c`. The vnode concept, operation tables, mount table, and path resolution algorithm are all structurally identical. XNU adds a name cache (vnode name lookup cache, or VNLC) for performance, union mounts, firmlinks, and sandbox policy enforcement at each step. Kiseki omits these but preserves the core design.
-
-### 8.2 The Buffer Cache
-
-Disk I/O is *slow*. Even on modern NVMe SSDs, a single read takes ~10 microseconds. On spinning disks, it can take 5-10 *milliseconds* — an eternity for a CPU executing billions of instructions per second. The buffer cache exists to avoid redundant disk reads by keeping recently-accessed blocks in memory.
-
-Kiseki's buffer cache (`kernel/fs/buf.c`, 416 lines) is a faithful implementation of the classic BSD buffer cache design. It uses a **fixed pool** of 256 buffers, each 4096 bytes (matching the typical filesystem block size), giving 1 MB of cache memory.
-
-#### Data Structures
-
-The cache uses two overlapping data structures to achieve O(1) lookup and efficient eviction:
-
-```mermaid
-flowchart LR
-    subgraph "Hash Table (64 buckets)"
-        H0["bucket 0: → buf(dev=0,blk=64) → buf(dev=0,blk=128) → NULL"]
-        H1["bucket 1: → buf(dev=0,blk=1) → NULL"]
-        H2["bucket 2: → NULL"]
-        Hdot["..."]
-        H63["bucket 63: → buf(dev=0,blk=63) → NULL"]
-    end
-
-    subgraph "LRU Doubly-Linked List"
-        direction LR
-        HEAD["HEAD (MRU)"] --> B1["buf(dev=0,blk=1)"]
-        B1 --> B2["buf(dev=0,blk=64)"]
-        B2 --> B3["buf(dev=0,blk=128)"]
-        B3 --> B4["buf(dev=0,blk=63)"]
-        B4 --> TAIL["TAIL (LRU)"]
-    end
-```
-
-1. **Hash table** (64 buckets): Keyed by `(device, block_number)`, allows O(1) lookup to check if a block is already cached. Collisions are handled by chaining.
-
-2. **LRU list**: A doubly-linked list ordered by recency of use. The head is the most-recently-used buffer; the tail is the least-recently-used. When a buffer is accessed, it moves to the head. When the cache is full and a new block needs to be loaded, the tail is evicted.
-
-```c
-/* kernel/fs/buf.c:29-49 — Core data structures */
-
-#define BUF_HASH_BUCKETS    64
-#define BUF_HASH(dev, blk)  (((uint64_t)(dev) ^ (blk)) % BUF_HASH_BUCKETS)
-
-static struct buf *hash_table[BUF_HASH_BUCKETS];
-static struct buf  buf_pool[BUF_POOL_SIZE];          /* 256 buffers */
-static uint8_t     buf_data[BUF_POOL_SIZE][BUF_BLOCK_SIZE]  /* 256 × 4096 bytes */
-                   __aligned(PAGE_SIZE);
-
-static struct buf *lru_head;    /* Most recently used */
-static struct buf *lru_tail;    /* Least recently used */
-static spinlock_t  buf_lock = SPINLOCK_INIT;
-```
-
-Each buffer has flags indicating its state:
-
-| Flag | Meaning |
-|------|---------|
-| `B_BUSY` | Buffer is currently being used for I/O; other threads must wait |
-| `B_VALID` | Buffer contains valid data from disk |
-| `B_DIRTY` | Buffer has been modified; must be written back before eviction |
-
-#### The Read Path: buf_read()
-
-`buf_read()` (`kernel/fs/buf.c:196-296`) is the primary cache interface. Filesystem code calls it with a device and block number, and gets back a pointer to 4096 bytes of data:
-
-```mermaid
-flowchart TD
-    START["buf_read(dev, block_no)"]
-    START --> LOCK["Acquire buf_lock"]
-    LOCK --> HIT{"Hash lookup:<br/>block in cache?"}
-
-    HIT -- "Yes (cache hit)" --> BUSY1{"B_BUSY set?"}
-    BUSY1 -- "Yes" --> SLEEP["Release lock<br/>thread_sleep_on(bp, 'biowait')<br/>→ goto retry"]
-    BUSY1 -- "No" --> MARK1["Set B_BUSY<br/>Increment refcount<br/>Move to LRU head"]
-    MARK1 --> UNLOCK1["Release lock<br/>Return buffer"]
-
-    HIT -- "No (cache miss)" --> VICTIM["Find LRU tail<br/>(skip busy buffers)"]
-    VICTIM --> DIRTY{"Victim dirty?"}
-    DIRTY -- "Yes" --> FLUSH["Set B_BUSY, release lock<br/>buf_do_write(victim)<br/>Re-acquire lock"]
-    DIRTY -- "No" --> RECONFIGURE["Set B_BUSY"]
-    FLUSH --> RECONFIGURE
-    RECONFIGURE --> REHASH["hash_remove(old)<br/>Assign new dev/block<br/>hash_insert(new)<br/>Move to LRU head"]
-    REHASH --> DISKREAD["Release lock<br/>buf_do_read(bp)<br/>Read from disk via blkdev_read()"]
-    DISKREAD --> DONE["Return buffer<br/>(caller must call buf_release when done)"]
-```
-
-The sleep/wakeup mechanism for busy buffers (`thread_sleep_on(bp, "biowait")` at line 217) is the standard BSD pattern. When a buffer is being read from disk by CPU 0, CPU 1 trying to read the same block will sleep until CPU 0 calls `buf_release()`, which clears `B_BUSY` and wakes all sleepers. This is the same `biodone()`/`biowait()` pattern used in XNU and FreeBSD.
-
-#### The Write Path: Delayed Write-Back
-
-When a filesystem modifies a cached block (e.g., writing file data or updating a directory entry), it calls `buf_write()` (`kernel/fs/buf.c:298-309`), which simply marks the buffer dirty:
-
-```c
-void buf_write(struct buf *bp)
-{
-    spin_lock_irqsave(&buf_lock, &flags);
-    bp->flags |= B_DIRTY;
-    spin_unlock_irqrestore(&buf_lock, flags);
-}
-```
-
-The actual disk write happens *later*, either:
-
-1. **On eviction**: When the LRU tail is dirty and needs to be reused for a new block, `buf_read()` flushes it first.
-2. **On explicit sync**: When user code calls `sync()` or the kernel calls `buf_sync()`.
-3. **Periodically**: A background kernel thread (`bufsync_thread`, `kernel/fs/buf.c:391-404`) flushes dirty buffers every 30 seconds.
-
-```c
-/* kernel/fs/buf.c:391-404 — Background sync daemon */
-
-static void bufsync_thread(void *arg)
-{
-    for (;;) {
-        thread_sleep_ticks(BUFSYNC_INTERVAL);   /* 30 seconds */
-        buf_sync_internal(true);                 /* Flush all dirty buffers */
-    }
-}
-```
-
-This **write-back** strategy (as opposed to write-through) significantly improves performance: many writes to the same block (e.g., appending to a log file) only result in a single disk write when the buffer is eventually flushed.
-
-> **Security implication:** Write-back caching means that a power failure can lose recently-written data. Real filesystems use journaling (ext4's journal, APFS's copy-on-write) to ensure consistency after crashes. Kiseki's ext4 driver does not implement journaling, so an unclean shutdown can leave the filesystem in an inconsistent state.
-
-> **macOS reference:** XNU's buffer cache is in `bsd/vfs/vfs_bio.c`. The design is identical in principle — hash table + LRU list, B_BUSY/B_VALID/B_DIRTY flags, sleep/wakeup on busy buffers. XNU additionally supports asynchronous I/O (B_ASYNC), buffer clustering for sequential reads, and integration with the Unified Buffer Cache (UBC) that unifies file data caching with the VM system.
-
-### 8.3 Ext4 On-Disk Layout
-
-Ext4 is the default Linux filesystem, found on billions of devices. Kiseki uses it as the root filesystem for two reasons: (1) mature tooling (`mkfs.ext4`, `debugfs`, `e2fsck`) makes it easy to create and debug disk images, and (2) its on-disk format is well-documented and relatively straightforward to implement.
-
-The ext4 driver (`kernel/fs/ext4/ext4.c`, 2836 lines) supports:
-- Extent-based file layout (for reading existing files)
-- Direct block mapping (for writing new files)
-- Linear directory iteration
-- 64-bit block addressing
-- Large inodes (> 128 bytes)
-- Block and inode allocation via bitmaps
-
-#### Block Groups
-
-An ext4 filesystem divides the disk into **block groups** — contiguous chunks of blocks that each contain their own metadata. This locality principle ensures that a file's data blocks and its inode are stored near each other, reducing seek time on spinning disks.
+**Static pools:**
+
+| Pool | Size | Purpose |
+|------|------|---------|
+| Vnodes | 1,024 | In-memory file/directory representations |
+| Files | 512 | System-wide open file descriptions |
+| Mounts | 16 | Simultaneously mounted filesystems |
+| FS types | 8 | Registered filesystem drivers |
+
+**Path resolution** (`vfs_lookup`): Given a path like `/usr/bin/ls`:
+
+1. Find the mount whose prefix best matches the path (longest prefix wins).
+2. Start at the mount's root vnode.
+3. For each path component (`usr`, `bin`, `ls`): verify current vnode is a directory, check execute permission, call `v_ops->lookup()`.
+4. Return the final vnode.
+
+**The open file table** is two-level, matching Unix:
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ Block 0: Boot sector (1024 bytes, unused by ext4)                       │
-├──────────────────────────────────────────────────────────────────────────┤
-│                          Block Group 0                                   │
-│  ┌────────────┬──────────────┬──────────────┬────────┬─────────────────┐ │
-│  │ Superblock │ Group Desc   │ Block Bitmap │ Inode  │ Data Blocks     │ │
-│  │ (block 0/1)│ Table        │ + Inode Bitmap│ Table │                 │ │
-│  └────────────┴──────────────┴──────────────┴────────┴─────────────────┘ │
-├──────────────────────────────────────────────────────────────────────────┤
-│                          Block Group 1                                   │
-│  ┌────────────┬──────────────┬──────────────┬────────┬─────────────────┐ │
-│  │ (Backup SB)│ Group Desc   │ Block Bitmap │ Inode  │ Data Blocks     │ │
-│  │            │ (backup)     │ + Inode Bitmap│ Table │                 │ │
-│  └────────────┴──────────────┴──────────────┴────────┴─────────────────┘ │
-├──────────────────────────────────────────────────────────────────────────┤
-│                     Block Group 2 ... N                                  │
-└──────────────────────────────────────────────────────────────────────────┘
+Per-process fd table              System-wide file pool
++--------+                       +------------------+
+| fd[0] -+----> file_pool[42]    | file_pool[42]    |
+| fd[1] -+----> file_pool[7]     |   f_vnode = ...  |
+| fd[2] -+----> file_pool[7]     |   f_offset = 100 |
+| fd[3] -+----> file_pool[91]    |   f_refcount = 2 |  <-- fd[1] and fd[2] share!
+|  ...   |                       +------------------+
++--------+
 ```
 
-The **superblock** (always at byte offset 1024) stores global filesystem parameters:
+Multiple fds can point to the same `struct file` (via `dup()` or `fork()`), sharing the offset. This is why `dup2(fd, STDOUT_FILENO)` redirects output -- both fds share the same file position.
 
-```c
-/* kernel/fs/ext4/ext4.c:30-48 — Per-mount state (derived from superblock) */
+### 8.2 The Ext4 Filesystem Driver
 
-struct ext4_mount_info {
-    struct ext4_super_block sb;         /* In-memory superblock copy */
-    uint32_t    block_size;             /* Typically 4096 */
-    uint32_t    inodes_per_group;
-    uint32_t    blocks_per_group;
-    uint32_t    inode_size;             /* Typically 256 bytes */
-    uint32_t    group_count;            /* Number of block groups */
-    uint32_t    desc_size;              /* Group descriptor size */
-    uint32_t    dev;                    /* Block device number */
-    uint8_t    *group_descs;            /* All group descriptors in memory */
-};
-```
+**Files:** `kernel/fs/ext4/ext4.c` (2,836 lines), `kernel/include/fs/ext4.h` (544 lines)
 
-Each **block group** has:
-- A **block bitmap**: One bit per block in the group (1 = allocated, 0 = free)
-- An **inode bitmap**: One bit per inode in the group
-- An **inode table**: Array of inode structures (each `inode_size` bytes, typically 256)
-- **Data blocks**: The actual file data
+Ext4 is the primary on-disk filesystem. Kiseki implements full read-write ext4 with extent trees, indirect blocks, block/inode allocation, and directory operations.
 
-The group descriptor table (stored after the superblock in block group 0) contains the block numbers of each group's bitmap and inode table. Kiseki reads the entire group descriptor table into memory at mount time.
-
-#### Inodes
-
-Every file, directory, symlink, and device has an **inode** (index node) — a fixed-size on-disk structure that stores the file's metadata and the location of its data:
-
-```c
-/* key fields of struct ext4_inode (kernel/include/fs/ext4.h) */
-
-struct ext4_inode {
-    uint16_t    i_mode;         /* File type + permission bits */
-    uint16_t    i_uid;          /* Owner UID (low 16 bits) */
-    uint32_t    i_size_lo;      /* File size (low 32 bits) */
-    uint32_t    i_atime;        /* Access time */
-    uint32_t    i_ctime;        /* Change time */
-    uint32_t    i_mtime;        /* Modification time */
-    uint16_t    i_gid;          /* Owner GID (low 16 bits) */
-    uint16_t    i_links_count;  /* Hard link count */
-    uint32_t    i_blocks_lo;    /* Block count (512-byte units) */
-    uint32_t    i_flags;        /* Ext4 flags (e.g., EXTENTS_FL) */
-    uint32_t    i_block[15];    /* Block pointers or extent tree */
-    /* ... more fields for extended attributes, etc. */
-};
-```
-
-The `i_block[15]` array is where things get interesting. It serves dual duty:
-
-- **Extent trees** (modern ext4): If `i_flags & EXTENTS_FL` is set, `i_block` contains an extent tree header followed by extent entries. Each extent maps a range of logical file blocks to physical disk blocks.
-- **Direct/indirect blocks** (legacy ext2/ext3): `i_block[0..11]` are direct block pointers, `i_block[12]` is a single-indirect pointer, `i_block[13]` is double-indirect, and `i_block[14]` is triple-indirect.
-
-Kiseki reads files using extents but writes new files using direct block mapping, which is simpler to implement correctly.
-
-### 8.4 Ext4 Read Path — Extents & Indirect Blocks
-
-When user code calls `read(fd, buf, count)`, the call chain is:
+**On-disk layout** (simplified for a small disk):
 
 ```
-sys_read() → vfs_read() → ext4_vop_read() → ext4 block lookup → buf_read()
-```
+Disk layout (1024-byte blocks):
 
-The interesting step is **block lookup**: given a logical byte offset in a file, find the physical disk block that contains that data.
-
-#### Extent Trees
-
-Most files on a modern ext4 filesystem use extent trees. An extent is a compact way of saying "logical blocks N through N+K are stored at physical blocks M through M+K":
-
-```
-Extent header (12 bytes):
-┌──────────┬───────────┬──────────┬──────────┐
-│ eh_magic │ eh_entries│ eh_max   │ eh_depth │
-│ 0xF30A   │ count     │ capacity │ tree depth│
-└──────────┴───────────┴──────────┴──────────┘
-
-Extent entry (12 bytes):
-┌──────────┬──────────┬──────────┬──────────┐
-│ ee_block │ ee_len   │ee_start_hi│ee_start_lo│
-│ logical  │ count    │ physical block (hi) │ physical block (lo)│
-└──────────┴──────────┴──────────┴──────────┘
-```
-
-For small files (typically < 4 extents), the entire extent tree fits inside the inode's `i_block` array (60 bytes = 1 header + 4 entries). For large fragmented files, the tree has internal nodes with pointers to blocks containing more extents (multi-level extent trees).
-
-The read path in `ext4_vop_read()` works like this:
-
-1. Calculate which filesystem block(s) contain the requested byte range
-2. For each logical block, walk the extent tree to find the physical block number
-3. Call `buf_read(dev, physical_block)` to get the data from the cache (or disk)
-4. Copy the relevant bytes into the user buffer
-5. Call `buf_release()` to unlock the cache buffer
-
-#### Direct Block Mapping (for writes)
-
-For newly-created files, Kiseki uses the simpler direct block mapping scheme:
-
-```
-i_block[0]  → physical block for logical block 0
-i_block[1]  → physical block for logical block 1
+Block 0:    Boot sector (unused by ext4)
+Block 1:    Superblock (1024 bytes at byte offset 1024)
+Block 2-N:  Block Group Descriptor Table
 ...
-i_block[11] → physical block for logical block 11
-i_block[12] → single indirect block (points to array of block pointers)
+Block Group 0:
+  +-- Block bitmap (1 block = tracks 32,768 blocks)
+  +-- Inode bitmap (1 block = tracks 32,768 inodes)
+  +-- Inode table (N blocks, each inode = 256 bytes)
+  +-- Data blocks
+Block Group 1:
+  +-- (same structure)
+...
 ```
 
-This limits new files to about 48 KB with direct blocks only (12 × 4096), or ~4 MB with single-indirect blocks. For the kernel's purposes (configuration files, logs, small binaries), this is sufficient.
+**Key on-disk structures:**
 
-### 8.5 Ext4 Write Path
+```c
+struct ext4_super_block {     // 1024 bytes at disk offset 1024
+    uint32_t s_inodes_count;
+    uint32_t s_blocks_count_lo;
+    uint32_t s_free_blocks_count_lo;
+    uint32_t s_free_inodes_count;
+    uint32_t s_first_data_block;
+    uint32_t s_log_block_size;   // block_size = 1024 << this
+    uint32_t s_blocks_per_group;
+    uint32_t s_inodes_per_group;
+    uint16_t s_magic;            // Must be 0xEF53
+    uint16_t s_inode_size;       // Typically 256
+    // ... many more fields
+};
 
-Writing is more complex than reading because it may require allocating new blocks, updating bitmaps, modifying directory entries, and writing back the inode. The write path for `ext4_vop_write()` involves:
-
-```mermaid
-sequenceDiagram
-    participant Caller as sys_write()
-    participant VOP as ext4_vop_write()
-    participant Alloc as ext4_alloc_block()
-    participant Buf as Buffer Cache
-    participant Inode as Inode Update
-
-    Caller->>VOP: write(vp, data, offset, count)
-    VOP->>VOP: Calculate which blocks need writing
-
-    loop For each block
-        VOP->>VOP: Check if block already allocated
-        alt Block not allocated
-            VOP->>Alloc: ext4_alloc_block(pref_group)
-            Alloc->>Alloc: Scan block bitmap for free bit
-            Alloc->>Alloc: Set bit, decrement free count
-            Alloc->>Buf: buf_write() — mark bitmap dirty
-            Alloc-->>VOP: New physical block number
-            VOP->>VOP: Update i_block[] with new mapping
-        end
-        VOP->>Buf: buf_read(dev, physical_block)
-        Buf-->>VOP: Buffer with block data
-        VOP->>VOP: Copy user data into buffer
-        VOP->>Buf: buf_write(bp) — mark dirty
-        VOP->>Buf: buf_release(bp)
-    end
-
-    VOP->>Inode: Update i_size, i_blocks, i_mtime
-    VOP->>Inode: Write inode back to disk via buffer cache
-    VOP-->>Caller: Bytes written
+struct ext4_inode {           // 128+ bytes (s_inode_size = 256 typically)
+    uint16_t i_mode;           // File type + permissions
+    uint16_t i_uid;
+    uint32_t i_size_lo;
+    uint32_t i_atime, i_ctime, i_mtime;
+    uint16_t i_gid;
+    uint16_t i_links_count;
+    uint32_t i_blocks_lo;
+    uint32_t i_flags;          // EXT4_EXTENTS_FL if extent-based
+    uint32_t i_block[15];      // 60 bytes: block map OR extent tree root
+};
 ```
 
-#### Block Allocation
+**Block mapping -- two strategies:**
 
-`ext4_alloc_block()` scans the block bitmap of the preferred group (chosen for locality), looking for a free bit. When found, it:
-
-1. Sets the bit in the bitmap
-2. Decrements the group's free block count
-3. Decrements the superblock's total free block count
-4. Marks the bitmap buffer as dirty
-
-This is a linear scan — O(N) in the number of blocks per group. Real ext4 uses a multi-level bitmap with preallocation groups (mballoc) for O(1) amortised allocation. Kiseki's approach is correct but not performant for large filesystems.
-
-#### Directory Operations
-
-Creating a file requires modifying the parent directory. Ext4 directories are stored as linked lists of variable-length entries:
+The `i_block[15]` field (60 bytes) stores either a traditional block map or an extent tree, depending on the `EXT4_EXTENTS_FL` flag:
 
 ```
-┌─────────┬─────────┬─────────┬─────────┬──────────────┐
-│ inode # │ rec_len │ name_len│ file_type│ name[]       │
-│ (4 bytes)│(2 bytes)│(1 byte) │(1 byte) │(name_len)    │
-└─────────┴─────────┴─────────┴─────────┴──────────────┘
+Strategy 1: Extent tree (modern, efficient for contiguous files)
+
+  i_block[0..59] = ext4_extent_header + ext4_extent entries
+  
+  Header: magic=0xF30A, entries, max, depth
+  
+  If depth==0 (leaf): entries are ext4_extent
+    { logical_block, length, physical_start }
+    "Blocks 0-99 of this file map to disk blocks 50000-50099"
+  
+  If depth>0 (internal): entries are ext4_extent_idx
+    { logical_block, child_block_ptr }
+    Points to another block containing the next level
+
+Strategy 2: Legacy indirect blocks (small files, writes)
+
+  i_block[0..11]  = direct block pointers (12 blocks)
+  i_block[12]     = single indirect (points to block of pointers)
+  i_block[13]     = double indirect
+  i_block[14]     = triple indirect
 ```
 
-`rec_len` is the distance to the *next* entry. The last entry's `rec_len` extends to the end of the block. To insert a new entry, the driver finds the last entry, shrinks its `rec_len` to fit its actual name, and appends the new entry in the freed space.
+**Mount process** (`ext4_fs_mount`):
 
-To unlink a file, the driver zeroes the entry's inode number and merges its `rec_len` with the previous entry (or marks it as a deleted entry that can be reclaimed later).
+1. Read superblock from byte offset 1024.
+2. Verify magic (`0xEF53`).
+3. Compute derived values: `block_size = 1024 << s_log_block_size`.
+4. Check incompatible feature flags (supports: FILETYPE, EXTENTS, 64BIT, FLEX_BG).
+5. Read entire group descriptor table into memory (up to 256 KB buffer).
+6. Read root inode (inode 2), create root vnode.
 
-### 8.6 devfs
+**Block allocation** (`ext4_alloc_block`): Linear scan of block bitmaps starting from a preferred group, wrapping around. Finds first free bit, marks it, updates group descriptor and superblock free counts.
 
-Not everything in `/dev` lives on disk. Device files like `/dev/console`, `/dev/null`, and `/dev/zero` are **synthetic** — they exist only in memory and map to kernel subsystems rather than on-disk data. This is the job of devfs (`kernel/fs/devfs.c`, 548 lines).
+### 8.3 The Buffer Cache
 
-devfs is mounted at `/dev` and creates vnodes for each device during boot. The key devices:
+**File:** `kernel/fs/buf.c` (416 lines)
 
-| Path | Device ID | Read Behaviour | Write Behaviour |
-|------|-----------|----------------|-----------------|
-| `/dev/console` | `DEVFS_CONSOLE` | Read from UART/keyboard | Write to framebuffer console |
-| `/dev/tty` | `DEVFS_TTY` | Alias for console | Alias for console |
-| `/dev/null` | `DEVFS_NULL` | Returns EOF (0 bytes) | Discards all data (succeeds) |
-| `/dev/zero` | `DEVFS_ZERO` | Returns NUL bytes | Discards all data (succeeds) |
+**For the systems newcomer:** Disk I/O is slow (even virtualised). The buffer cache keeps recently-used disk blocks in memory so repeated reads don't hit the disk. It's a fixed-size pool of 4 KB buffers with LRU (Least Recently Used) eviction and write-back (dirty buffers are only flushed when evicted or explicitly synced).
 
-Each devfs vnode has `v_type = VCHR` (character device) and uses `devfs_chr_ops` as its operation table. The `read` and `write` operations contain a `switch` on the device ID to dispatch to the appropriate behaviour:
-
-```mermaid
-flowchart TD
-    READ["devfs_chr_read(vp, buf, offset, count)"]
-    READ --> SWITCH{"vp→v_data→devid?"}
-    SWITCH -- "DEVFS_CONSOLE" --> UART["tty_read()<br/>Read from keyboard/UART via TTY layer"]
-    SWITCH -- "DEVFS_NULL" --> EOF["Return 0 (EOF)"]
-    SWITCH -- "DEVFS_ZERO" --> ZERO["Fill buf with 0x00 bytes<br/>Return count"]
-    SWITCH -- "DEVFS_TTY" --> UART
+```c
+struct buf {
+    uint32_t    flags;          // B_VALID, B_DIRTY, B_BUSY
+    uint32_t    dev;            // Device number
+    uint64_t    block_no;       // Block number (4 KB units)
+    uint32_t    refcount;
+    uint8_t     *data;          // Pointer to 4 KB data area
+    struct buf  *lru_next, *lru_prev;  // LRU doubly-linked list
+    struct buf  *hash_next;            // Hash bucket chain
+};
 ```
 
-devfs also implements the directory operations (`lookup`, `readdir`, `getattr`) so that `ls /dev` works correctly, listing all registered device nodes.
+**Pool:** 256 buffers x 4 KB = **1 MB** total cache.
 
-> **macOS reference:** macOS's devfs is significantly more dynamic — device nodes are created and destroyed as hardware is attached and removed (IOKit publishes nodes via `devfs_make_node()`). Kiseki's devfs is static, which is appropriate for a fixed hardware target (QEMU virt machine) but would need to become dynamic for real hardware support.
+**Operations:**
+
+```
+buf_read(dev, block_no):
+  |
+  +-- Hash lookup: O(1) by (dev, block_no)
+  |     Hit?  -> return cached buffer (move to LRU head)
+  |     Miss? -> Evict LRU tail victim:
+  |                If dirty: flush to disk first
+  |                Reconfigure for new (dev, block_no)
+  |                Read from disk via VirtIO block device
+  |                Return fresh buffer
+  |
+  +-- Buffer is returned LOCKED (B_BUSY)
+
+buf_write(bp):
+  +-- Mark B_DIRTY (actual disk write deferred)
+
+buf_release(bp):
+  +-- Clear B_BUSY, move to LRU head
+  +-- Wake threads sleeping on this buffer (biowait pattern)
+
+buf_sync():
+  +-- Flush all dirty, non-busy buffers to disk
+```
+
+**Background sync daemon:** A kernel thread (`bufsync`) runs at low priority, sleeping for ~30 seconds between passes. It flushes all dirty buffers to disk, similar to BSD's `syncer` or Linux's `pdflush`.
+
+### 8.4 The Device Filesystem (devfs)
+
+**File:** `kernel/fs/devfs.c` (548 lines)
+
+Devfs is a synthetic (in-memory) filesystem mounted at `/dev`. It exposes hardware devices as files:
+
+| Path | Type | Behaviour |
+|------|------|-----------|
+| `/dev/console` | TTY | Serial console (UART read/write) |
+| `/dev/tty` | TTY | Alias for controlling terminal |
+| `/dev/null` | Special | Writes succeed, reads return EOF |
+| `/dev/zero` | Special | Reads return zero bytes, writes discarded |
+| `/dev/fbcon0` | TTY | Framebuffer console |
+
+Devfs nodes are created during boot (up to 16 device slots). Each device vnode has `v_type = VCHR` (character device) and a devfs-specific operation table that routes reads/writes to the appropriate driver (TTY subsystem, UART, framebuffer console).
+
+### 8.5 How It All Fits Together
+
+Let's trace `cat /etc/hosts` through all layers:
+
+```
+1. Shell calls: execve("/bin/cat", ["/bin/cat", "/etc/hosts"], envp)
+
+2. cat calls: fd = open("/etc/hosts", O_RDONLY)
+     |
+     vfs_open("/etc/hosts", O_RDONLY, 0)
+       mount_find("/etc/hosts") --> ext4 mount at "/"
+       resolve_path("/etc/hosts", root_vnode)
+         lookup(root, "etc") --> vnode for /etc/
+         lookup(/etc/, "hosts") --> vnode for /etc/hosts
+       Allocate fd, create struct file { vnode, offset=0 }
+       Return fd=3
+
+3. cat calls: n = read(3, buf, 4096)
+     |
+     vfs_read(3, buf, 4096)
+       fp = proc->p_fd.fd_ofiles[3]
+       vp = fp->f_vnode
+       vp->v_ops->read(vp, buf, fp->f_offset, 4096)
+         ext4_vop_read(vp, buf, 0, 4096)
+           ext4_bmap(vp, logical_block=0) --> physical_block=50042
+           buf_read(dev, 50042) --> buffer cache
+             Hash miss --> read from VirtIO block device
+           Copy data from buffer to user buf
+       fp->f_offset += n
+
+4. cat calls: write(1, buf, n)
+     |
+     vfs_write(1, buf, n)
+       fp = proc->p_fd.fd_ofiles[1]   (stdout)
+       fp->f_vnode is console/PTY device
+       --> tty_write or fbconsole_write
+       --> Characters appear on screen
+
+ 5. cat calls: close(3)
+     |
+     vfs_close(3)
+       Decrement file refcount
+       If refcount == 0: release vnode
+```
 
 ---
 
-## Chapter 9: Networking — TCP/IP Stack
+## Chapter 9: Networking -- TCP/IP Stack
 
-Kiseki includes a complete, self-contained TCP/IP network stack — from Ethernet framing up through BSD sockets. This is not a port of lwIP or any external library; it is written from scratch, following the same architectural patterns as XNU's BSD networking layer.
+Kiseki includes a complete, from-scratch networking stack that speaks real TCP/IP over a
+VirtIO virtual NIC. Userland programs can `socket()`, `bind()`, `listen()`, `accept()`,
+`connect()`, `send()`, and `recv()` just like on any POSIX system -- the difference is
+that every byte of the implementation lives in roughly 4,000 lines of kernel C, with no
+code borrowed from lwIP, musl, or any other existing stack.
 
-#### How Does Network Communication Actually Work?
+### 9.1 Stack Overview
 
-If you have never looked inside a network stack, the process of sending a single HTTP request might seem like magic. In reality, it is a precisely layered pipeline where each layer adds its own header, wrapping the data like nested envelopes:
+#### 9.1.1 What *Is* a Networking Stack?
+
+If you have never worked below the `socket()` API, here is the one-paragraph version:
+an application calls `send(fd, "hello", 5)`. The kernel wraps those five bytes in a
+**TCP segment** (adding sequence numbers and checksums), wraps *that* in an **IP packet**
+(adding source/destination addresses and a TTL), wraps *that* in an **Ethernet frame**
+(adding MAC addresses), and hands the resulting ~70-byte blob to the network hardware.
+On the receiving end the process runs in reverse: the NIC delivers a frame, the kernel
+peels off headers layer by layer, and deposits the five payload bytes into the
+destination socket's receive buffer for `recv()` to read.
+
+Each "wrap" step is called **encapsulation**; each "peel" step is **decapsulation**.
+The layers are numbered bottom-to-top:
 
 ```
-Application data:    "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
-                     ▼
-TCP segment:         [TCP Header: src_port, dst_port, seq, ack, flags] + data
-                     ▼
-IP packet:           [IP Header: src_ip, dst_ip, proto=TCP, ttl] + TCP segment
-                     ▼
-Ethernet frame:      [Eth Header: src_mac, dst_mac, type=IP] + IP packet + [CRC]
-                     ▼
-Wire:                Electrical/optical signals on the physical medium
+  Layer   Protocol(s)         Kiseki Source File     Header Size
+  -----   ------------------  ---------------------  -----------
+    4     TCP / UDP           tcp.c, udp.c           20 / 8 B
+    3     IPv4, ICMP          ip.c, icmp.c           20 B
+    2     Ethernet, ARP       eth.c                  14 B
+    1     VirtIO-net (HW)     virtio_net.c           10 B (*)
+
+  (*) The 10-byte virtio_net_hdr is a hypervisor envelope, not a
+      real wire header.  It is stripped before eth_input() sees
+      the frame.
 ```
 
-Each layer only understands its own header. The Ethernet driver does not know about TCP. TCP does not know about Ethernet. This separation of concerns is what makes the Internet work — you can swap Ethernet for Wi-Fi and TCP does not change at all.
+#### 9.1.2 Architecture & Static Resource Pools
 
-```mermaid
-flowchart TB
-    subgraph "Send Path (top→down)"
-        direction TB
-        APP_S["Application: write(sockfd, data, len)"]
-        SOCK_S["BSD Socket Layer<br/>socket.c: net_send()"]
-        TCP_S["TCP Layer<br/>tcp.c: tcp_output()"]
-        IP_S["IP Layer<br/>ip.c: ip_output()"]
-        ETH_S["Ethernet Layer<br/>eth.c: eth_output()"]
-        NIC_S["VirtIO NIC Driver<br/>nic_send()"]
-    end
+Every data structure in the networking stack is **statically allocated** -- there are no
+`kmalloc()` calls. This is a deliberate design choice: bounded memory usage, no
+fragmentation, no allocation failure paths. The pools are:
 
-    subgraph "Receive Path (bottom→up)"
-        direction TB
-        NIC_R["VirtIO NIC Driver<br/>virtio_net_recv()"]
-        ETH_R["Ethernet Layer<br/>eth.c: eth_input()"]
-        IP_R["IP Layer<br/>ip.c: ip_input()"]
-        TCP_R["TCP Layer<br/>tcp.c: tcp_input()"]
-        SOCK_R["Socket Receive Buffer<br/>sockbuf_write()"]
-        APP_R["Application: read(sockfd, buf, len)"]
-    end
+| Resource              | Pool Size | Unit Size   | Total Memory |
+|-----------------------|-----------|-------------|--------------|
+| Sockets               | 64        | ~8.3 KB     | ~530 KB      |
+| TCP control blocks    | 64        | ~80 B       | ~5 KB        |
+| ARP cache entries     | 32        | ~12 B       | ~384 B       |
+| ARP pending queue     | 4         | ~1.5 KB     | ~6 KB        |
+| RX buffers (VirtIO)   | 16        | 2,048 B     | 32 KB        |
+| TX buffer (VirtIO)    | 1         | 2,048 B     | 2 KB         |
+| Unix PCBs             | 64        | ~112 B      | ~7 KB        |
 
-    APP_S --> SOCK_S --> TCP_S --> IP_S --> ETH_S --> NIC_S
-    NIC_R --> ETH_R --> IP_R --> TCP_R --> SOCK_R --> APP_R
+#### 9.1.3 Packet Flow Overview
+
+**Receive path** -- a packet arrives from the virtual NIC and travels up:
+
+```
+ +---------------------+
+ | VirtIO used ring    |   virtio_net_recv()  [virtio_net.c:261]
+ +---------------------+
+           |
+           | strip 10-byte virtio_net_hdr
+           v
+ +---------------------+
+ | eth_input()         |   [eth.c:315]
+ | Check dest MAC,     |
+ | strip 14-byte header|
+ +-----+-------+-------+
+       |               |
+  EtherType          EtherType
+  0x0806 (ARP)       0x0800 (IP)
+       |               |
+       v               v
+ arp_input()      ip_input()         [ip.c:178]
+ Update cache     Validate checksum,
+ Reply if ours    strip 20-byte header
+                       |
+          +------------+------------+
+          |            |            |
+      proto 1      proto 6      proto 17
+      (ICMP)       (TCP)        (UDP)
+          |            |            |
+          v            v            v
+    icmp_input()  tcp_input()  udp_input()
+    Ping reply    State mach.  --> socket rcv buf
+    or deliver    Data -> buf  --> or dhcp_input()
+    to socket
 ```
 
-### 9.1 The Network Stack Overview
+**Transmit path** -- a `send()` syscall travels down:
 
-The network stack comprises five source files:
+```
+  Userland: sendto(fd, buf, len, ...)
+       |
+       v
+  sys_sendto()              [syscalls.c:4747]
+  fd -> socket index
+       |
+       +--- TCP: sockbuf_write(so_snd) -> tcp_output()
+       |
+       +--- UDP: udp_output()
+       |
+       +--- ICMP: ip_output() directly
+       |
+       v
+  ip_output()               [ip.c:263]
+  Build 20-byte IP header
+  Route: on-link or gateway
+       |
+       v
+  eth_output()              [eth.c:448]
+  ARP lookup for next-hop
+  Build 14-byte Ethernet header
+       |
+       v
+  nic_send() -> virtio_net_send()   [virtio_net.c:343]
+  Prepend 10-byte virtio_net_hdr
+  Submit to TX virtqueue
+  Poll for completion
+```
 
-| File | Lines | Layer | Purpose |
-|------|-------|-------|---------|
-| `kernel/net/eth.c` | 555 | Link | Ethernet framing + ARP |
-| `kernel/net/ip.c` | 319 | Network | IPv4 routing + checksum |
-| `kernel/net/tcp.c` | 785 | Transport | TCP state machine |
-| `kernel/net/udp.c` | 148 | Transport | UDP datagrams |
-| `kernel/net/dhcp.c` | 399 | Application | DHCP client (IP auto-configuration) |
-| `kernel/net/socket.c` | 1021 | API | BSD sockets |
+#### 9.1.4 Initialisation Sequence
 
-Total: ~3,227 lines for the entire stack. For comparison, XNU's TCP alone is over 15,000 lines, and the full networking subsystem exceeds 100,000 lines. Kiseki implements the core protocols correctly but omits advanced features (window scaling, SACK, congestion control, IP fragmentation reassembly).
+Networking is initialised in phase 15 of `kmain()` via `net_init()` (`socket.c:200`):
+
+```
+net_init()
+  |
+  +-- memset(socket_table, 0, ...)   Clear 64 socket slots
+  |
+  +-- tcp_init()                     Zero 64 TCB pool slots
+  |
+  +-- eth_init()                     Clear 32 ARP cache entries
+  |
+  +-- virtio_net_init()              Probe VirtIO MMIO bus:
+  |     |                              - Find device_id == 1 (net)
+  |     +-- Reset -> ACKNOWLEDGE -> DRIVER
+  |     +-- Negotiate VIRTIO_NET_F_MAC only
+  |     +-- Read MAC from config space offset 0x100
+  |     +-- Setup RX queue (queue 0) + TX queue (queue 1)
+  |     +-- DRIVER_OK
+  |     +-- Fill RX ring with 16 buffers
+  |     +-- Enable IRQ via GIC
+  |
+  +-- dhcp_configure()               DHCP handshake:
+        |                              - Up to 5 DISCOVER attempts
+        +-- On success: eth_set_ip(), ip_set_netmask(), ip_set_gateway()
+        +-- On failure: static fallback 192.168.64.10/24, gw .1
+```
 
 ### 9.2 Ethernet & ARP
 
-The Ethernet layer (`kernel/net/eth.c`) handles two things: framing outgoing packets and resolving IP addresses to MAC addresses via ARP.
+**Source**: `kernel/net/eth.c` (555 lines)
 
-#### Ethernet Framing
+#### 9.2.1 Ethernet Framing
 
-Every packet on a local network is wrapped in an Ethernet frame:
+Ethernet is the **Layer 2** protocol -- it gets packets from one machine to the next
+machine on the same physical (or virtual) network segment. Every Ethernet frame looks
+like this:
 
 ```
- 0                   6                  12      14
-┌───────────────────┬──────────────────┬────────┬──────────────────────┐
-│ Destination MAC   │ Source MAC       │EtherType│ Payload (46-1500 B) │
-│ (6 bytes)         │ (6 bytes)        │(2 bytes)│                      │
-└───────────────────┴──────────────────┴────────┴──────────────────────┘
+  0                   6                   12     14
+  +-------------------+-------------------+------+-----------+
+  | Destination MAC   | Source MAC        | Type | Payload   |
+  | (6 bytes)         | (6 bytes)         | (2B) | (46-1500) |
+  +-------------------+-------------------+------+-----------+
+  |<------------ 14-byte header --------->|
+  |<------------ up to 1514 bytes total ----------------->|
 ```
 
-`eth_output()` constructs this header, resolves the destination MAC via ARP (or uses broadcast), and hands the complete frame to the VirtIO NIC driver via `nic_send()`. The transmit buffer is protected by `eth_tx_lock` for SMP safety.
+The **EtherType** field identifies what is inside the payload:
 
-#### ARP — Address Resolution Protocol
+| EtherType | Value    | Meaning        |
+|-----------|----------|----------------|
+| IP        | `0x0800` | IPv4 packet    |
+| ARP       | `0x0806` | ARP message    |
+| IPv6      | `0x86DD` | IPv6 packet    |
 
-When the IP layer wants to send a packet to `10.0.2.15`, it needs to know the destination's MAC address (the Ethernet-level address). ARP (RFC 826) handles this translation.
-
-The ARP cache is a fixed table of 32 entries (`kernel/net/eth.c:71-80`):
+The kernel defines these structures in `eth.c` (file-local, not in a header):
 
 ```c
-struct arp_entry {
-    uint32_t    ip_addr;                /* IPv4 address */
-    uint8_t     mac_addr[ETH_ALEN];     /* MAC address */
-    bool        valid;
+struct eth_hdr {                   /* eth.c:37 */
+    uint8_t     eth_dst[6];        /* Destination MAC address */
+    uint8_t     eth_src[6];        /* Source MAC address */
+    uint16_t    eth_type;          /* EtherType (network byte order) */
+} __packed;
+```
+
+**MAC addresses** are 6-byte hardware identifiers. Kiseki's default MAC is
+`52:54:00:12:34:56` (the QEMU convention), overridden by the actual device MAC read
+during VirtIO probe. The broadcast MAC `FF:FF:FF:FF:FF:FF` means "deliver to everyone".
+
+#### 9.2.2 Module State
+
+```c
+/* eth.c:86-99 */
+static uint8_t  local_mac[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+static uint32_t local_ip     = 0;      /* Set by DHCP or static config */
+static uint8_t  broadcast_mac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+static uint8_t    eth_tx_buf[1514];    /* Shared transmit buffer */
+static spinlock_t eth_tx_lock;         /* Protects eth_tx_buf */
+
+static struct arp_entry   arp_cache[32];         /* ARP cache */
+static spinlock_t         arp_lock;              /* Protects ARP cache */
+static struct arp_pending arp_pending_queue[4];   /* Packets awaiting ARP */
+static spinlock_t         arp_pending_lock;
+```
+
+#### 9.2.3 Receiving Frames: `eth_input()`
+
+`eth_input()` (`eth.c:315`) is the **main entry point** for all received data. The VirtIO
+driver calls it after stripping the 10-byte `virtio_net_hdr`.
+
+```
+eth_input(frame, len)
+  |
+  +-- len < 14?  Drop (runt frame)
+  |
+  +-- Check destination MAC:
+  |     - Our MAC?         Accept
+  |     - Broadcast?       Accept
+  |     - Multicast (bit 0 of byte 0 set)?  Accept
+  |     - Other?           Drop (not for us)
+  |
+  +-- Strip 14-byte eth_hdr, extract EtherType
+  |
+  +-- Dispatch:
+        0x0800  -->  ip_input(payload, payload_len)
+        0x0806  -->  arp_input(payload, payload_len)
+        other   -->  silently dropped
+```
+
+#### 9.2.4 Transmitting Frames: `eth_output()`
+
+`eth_output()` (`eth.c:448`) is called by `ip_output()` to send an IP packet. It must
+resolve the **next-hop IP** to a **MAC address** via ARP before it can build the frame.
+
+```
+eth_output(dst_ip, ethertype, data, len)
+  |
+  +-- len > 1500 (MTU)?  Return -E2BIG
+  |
+  +-- Is dst_ip broadcast (0xFFFFFFFF)?
+  |     Yes --> use broadcast MAC
+  |     No  --> arp_lookup(dst_ip, mac)
+  |               |
+  |               +-- Found?  Build frame and send
+  |               |
+  |               +-- Miss?   arp_enqueue_pending(dst_ip, data, len)
+  |                           arp_send(ARP_REQUEST, broadcast, dst_ip)
+  |                           return 0  (queued, will send after reply)
+  |
+  +-- Build Ethernet frame in eth_tx_buf (under eth_tx_lock):
+  |     [dst_mac | local_mac | ethertype | payload]
+  |
+  +-- nic_send(eth_tx_buf, 14 + len)
+```
+
+#### 9.2.5 ARP -- Address Resolution Protocol
+
+ARP answers one question: "what is the MAC address for IP address X?" It works by
+broadcasting a request and waiting for the owner of that IP to reply.
+
+**ARP message format** (28 bytes for IPv4-over-Ethernet):
+
+```
+  0     2     4   5   6     8        14       20        26
+  +-----+-----+---+---+-----+--------+--------+--------+--------+
+  | HRD | PRO |HLN|PLN| OP  | Sender | Sender | Target | Target |
+  |(0001|0800)| 6 | 4 |     | MAC    | IP     | MAC    | IP     |
+  +-----+-----+---+---+-----+--------+--------+--------+--------+
+  |<--- 8-byte fixed header ------->| |<-- 20 bytes for Ethernet/IPv4 -->|
+```
+
+**ARP cache** -- 32 entries, each storing an (IP, MAC, valid) triple. Lookup is a linear
+scan under `arp_lock`. When the cache is full, slot 0 is overwritten (simple eviction):
+
+```c
+struct arp_entry {             /* eth.c:73 */
+    uint32_t ip_addr;          /* IPv4 address (network order) */
+    uint8_t  mac_addr[6];      /* Resolved MAC address */
+    bool     valid;            /* Entry is populated */
 };
-
-static struct arp_entry arp_cache[ARP_CACHE_SIZE];
 ```
 
-When ARP needs to resolve an address:
-
-```mermaid
-sequenceDiagram
-    participant IP as IP Layer
-    participant ARP as ARP (eth.c)
-    participant Net as Network
-
-    IP->>ARP: eth_output(dst_ip=10.0.2.2, ...)
-    ARP->>ARP: Search ARP cache for 10.0.2.2
-    alt Cache hit
-        ARP->>Net: Send frame with cached MAC
-    else Cache miss
-        ARP->>Net: Broadcast ARP Request: "Who has 10.0.2.2?"
-        Net-->>ARP: ARP Reply: "10.0.2.2 is at 52:54:00:AB:CD:EF"
-        ARP->>ARP: Store in ARP cache
-        ARP->>Net: Send frame with resolved MAC
-    end
-```
-
-> **Security implication:** ARP has no authentication. Any device on the local network can send a spoofed ARP reply claiming to be the gateway, redirecting all traffic through the attacker (ARP spoofing / ARP poisoning). This is one of the reasons modern networks use 802.1X authentication and dynamic ARP inspection (DAI). Kiseki's ARP implementation has no defences against this.
-
-### 9.3 IPv4
-
-The IP layer (`kernel/net/ip.c`, 319 lines) sits between Ethernet and the transport protocols. It handles:
-
-1. **Output**: Constructing IP headers (version, TTL, protocol, checksum, addresses) and passing the complete packet to `eth_output()`
-2. **Input**: Validating incoming IP packets (checksum, version, length) and demultiplexing to the correct transport protocol based on the protocol field
+**ARP pending queue** -- when a packet must be sent but the MAC is unknown, the packet
+is stored (up to 4 pending) while an ARP request is broadcast:
 
 ```c
-/* kernel/net/ip.c:48-59 — IPv4 header structure */
-
-struct ip_hdr {
-    uint8_t     ip_vhl;         /* Version (4) + IHL (5) = 0x45 */
-    uint8_t     ip_tos;
-    uint16_t    ip_len;         /* Total length */
-    uint16_t    ip_id;          /* Identification */
-    uint16_t    ip_off;         /* Flags + fragment offset */
-    uint8_t     ip_ttl;         /* Time to live (default 64) */
-    uint8_t     ip_proto;       /* 6=TCP, 17=UDP, 1=ICMP */
-    uint16_t    ip_sum;         /* Header checksum */
-    uint32_t    ip_src;         /* Source address */
-    uint32_t    ip_dst;         /* Destination address */
+struct arp_pending {           /* eth.c:110 */
+    uint8_t  data[1514];      /* Saved IP payload */
+    uint32_t len;              /* Payload length */
+    uint32_t dst_ip;           /* IP we are resolving */
+    uint16_t ethertype;        /* EtherType to use when sending */
+    bool     valid;
 };
 ```
 
-The IP checksum (`kernel/net/ip.c:95+`) is the standard RFC 1071 one's complement algorithm — sum all 16-bit words, fold carry bits, then bitwise-NOT:
+**Key ARP functions**:
+
+| Function | Line | Purpose |
+|----------|------|---------|
+| `arp_lookup()` | 166 | Search cache for IP -> MAC mapping |
+| `arp_update()` | 189 | Insert or update cache entry |
+| `arp_send()` | 233 | Build and transmit an ARP request or reply |
+| `arp_input()` | 278 | Process incoming ARP: update cache, reply if targeted at us |
+| `arp_enqueue_pending()` | 358 | Queue a packet awaiting ARP resolution |
+| `arp_drain_pending()` | 400 | Check cache and send any resolved pending packets |
+
+**ARP resolution flow**:
+
+```
+  Application calls send()
+       |
+       v
+  eth_output() -- ARP cache miss for 10.0.0.5
+       |
+       +-- Save packet in arp_pending_queue[slot]
+       |
+       +-- arp_send(ARP_REQUEST, broadcast, 10.0.0.5)
+       |     |
+       |     v
+       |   Ethernet frame:  [FF:FF:FF:FF:FF:FF | our_mac | 0x0806]
+       |   ARP payload:     "Who has 10.0.0.5? Tell <our_ip>"
+       |
+       v
+  (later) NIC receives ARP reply
+       |
+       v
+  eth_input() --> arp_input()
+       |
+       +-- arp_update(10.0.0.5, responder_mac)
+       |
+       +-- arp_drain_pending()
+             |
+             +-- pending[slot].dst_ip matches cache? Yes!
+             +-- Build Ethernet frame with resolved MAC
+             +-- nic_send()  -- original packet finally goes out
+```
+
+### 9.3 IPv4 & ICMP
+
+**Source**: `kernel/net/ip.c` (319 lines), `kernel/net/icmp.c` (152 lines)
+
+#### 9.3.1 IPv4 Header
+
+IP (Internet Protocol) is the **Layer 3** workhorse -- it routes packets across networks
+using 32-bit addresses. Every IP packet starts with a 20-byte header:
+
+```
+  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |Version|  IHL  |    TOS        |         Total Length          |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |       Identification          |Flags|    Fragment Offset      |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |  TTL  |  Protocol             |       Header Checksum         |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                    Source IP Address                           |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                 Destination IP Address                         |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
 
 ```c
-static uint16_t ip_checksum(const void *data, uint32_t len)
-{
-    const uint16_t *ptr = (const uint16_t *)data;
+struct ip_hdr {                    /* ip.c:48 */
+    uint8_t  ip_vhl;               /* Version (4) | IHL (5) = 0x45 */
+    uint8_t  ip_tos;               /* Type of service (always 0) */
+    uint16_t ip_len;               /* Total length (network order) */
+    uint16_t ip_id;                /* Identification (incrementing) */
+    uint16_t ip_off;               /* Flags + fragment offset */
+    uint8_t  ip_ttl;               /* Time to live (64) */
+    uint8_t  ip_proto;             /* Protocol: 1=ICMP, 6=TCP, 17=UDP */
+    uint16_t ip_sum;               /* Header checksum */
+    uint32_t ip_src;               /* Source address */
+    uint32_t ip_dst;               /* Destination address */
+} __packed;
+```
+
+Key constants:
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `IP_VHL_V4` | `0x45` | IPv4, 5 DWORDs (20 bytes), no options |
+| `IP_DF` | `0x4000` | "Don't Fragment" flag |
+| `IP_DEFAULT_TTL` | 64 | Hop limit before packet is discarded |
+| `IP_MAX_PACKET` | 1500 | Maximum IP packet size (MTU) |
+
+#### 9.3.2 The IP Checksum (RFC 1071)
+
+The IP checksum is a **one's-complement sum** of the header's 16-bit words. If the header
+is correct, re-computing the checksum over the entire header (including the checksum field
+itself) yields zero. This is used for IP, TCP, UDP, and ICMP.
+
+```c
+uint16_t ip_checksum(const void *data, uint32_t len) {  /* ip.c:95 */
+    const uint16_t *words = data;
     uint32_t sum = 0;
-
-    while (len > 1) {
-        sum += *ptr++;
-        len -= 2;
-    }
-    if (len == 1)
-        sum += *(const uint8_t *)ptr;
-
-    sum = (sum >> 16) + (sum & 0xFFFF);
-    sum += (sum >> 16);
-    return (uint16_t)(~sum);
+    while (len > 1) { sum += *words++; len -= 2; }
+    if (len == 1) sum += *(const uint8_t *)words;  /* odd trailing byte */
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);  /* fold carry */
+    return (uint16_t)~sum;
 }
 ```
 
-**Routing** is minimal: if the destination IP is on the local subnet (determined by `subnet_mask`), the packet is sent directly via ARP. Otherwise, it is sent to the default gateway. This is sufficient for QEMU's user-mode networking.
+#### 9.3.3 Receiving IP Packets: `ip_input()`
 
-### 9.4 TCP
+`ip_input()` (`ip.c:178`) validates and demultiplexes incoming packets:
 
-TCP (`kernel/net/tcp.c`, 785 lines) is the most complex protocol in the stack. It provides reliable, ordered, byte-stream delivery over unreliable IP packets. The implementation follows the RFC 793 state machine with 11 states:
-
-```mermaid
-stateDiagram-v2
-    [*] --> CLOSED
-
-    CLOSED --> LISTEN: listen() (passive open)
-    CLOSED --> SYN_SENT: connect() (active open)\nsend SYN
-
-    LISTEN --> SYN_RCVD: Receive SYN\nsend SYN+ACK
-    SYN_SENT --> ESTABLISHED: Receive SYN+ACK\nsend ACK
-    SYN_RCVD --> ESTABLISHED: Receive ACK
-
-    ESTABLISHED --> FIN_WAIT_1: close()\nsend FIN
-    ESTABLISHED --> CLOSE_WAIT: Receive FIN\nsend ACK
-
-    FIN_WAIT_1 --> FIN_WAIT_2: Receive ACK of FIN
-    FIN_WAIT_1 --> CLOSING: Receive FIN\nsend ACK
-    FIN_WAIT_1 --> TIME_WAIT: Receive FIN+ACK\nsend ACK
-    FIN_WAIT_2 --> TIME_WAIT: Receive FIN\nsend ACK
-    CLOSING --> TIME_WAIT: Receive ACK
-
-    CLOSE_WAIT --> LAST_ACK: close()\nsend FIN
-    LAST_ACK --> CLOSED: Receive ACK
-
-    TIME_WAIT --> CLOSED: 2MSL timeout
+```
+ip_input(data, len)
+  |
+  +-- Validate:
+  |     len >= 20?                (minimum IP header)
+  |     version == 4?             (we only speak IPv4)
+  |     IHL >= 5, IHL*4 <= len?   (header length sane)
+  |     ip_len <= len?            (total length sane)
+  |     ip_checksum() == 0?       (header not corrupted)
+  |
+  +-- Destination check:
+  |     Our IP?        Accept
+  |     Broadcast?     Accept
+  |     local_ip == 0? Accept (DHCP bootstrap -- no IP yet)
+  |     Other?         Drop
+  |
+  +-- Strip IP header (20+ bytes), extract protocol number
+  |
+  +-- Dispatch by ip_proto:
+        IPPROTO_ICMP (1)  -->  icmp_input(src, dst, payload, len)
+        IPPROTO_TCP  (6)  -->  tcp_input(src, dst, payload, len)
+        IPPROTO_UDP  (17) -->  udp_input(src, dst, payload, len)
+        other             -->  log and drop
 ```
 
-#### The TCP Control Block
+**Note**: There is no IP fragmentation/reassembly. Kiseki always sets the **Don't Fragment**
+flag on outgoing packets, and drops incoming fragments. This is fine for a VM environment
+where the MTU is consistent.
 
-Each connection is tracked by a `struct tcpcb` (`kernel/include/net/tcp.h:85-115`), allocated from a pool of 64:
+#### 9.3.4 Sending IP Packets: `ip_output()`
+
+`ip_output()` (`ip.c:263`) constructs an IP header and routes the packet:
 
 ```c
-struct tcpcb {
-    enum tcp_state  t_state;        /* CLOSED, LISTEN, SYN_SENT, ... */
-    bool            t_active;
+int ip_output(uint32_t src, uint32_t dst, uint8_t proto,
+              const void *data, uint32_t len)
+```
 
-    /* Sequence number bookkeeping */
-    uint32_t        snd_una;        /* Oldest unacknowledged */
-    uint32_t        snd_nxt;        /* Next to send */
-    uint32_t        snd_wnd;        /* Send window */
-    uint32_t        rcv_nxt;        /* Next expected receive */
-    uint32_t        rcv_wnd;        /* Receive window */
-    uint32_t        iss;            /* Initial send sequence # */
-    uint32_t        irs;            /* Initial receive sequence # */
+1. Build header in `ip_tx_buf` with `ip_vhl = 0x45`, `ip_ttl = 64`, `ip_off = IP_DF`
+2. Set `ip_id` from incrementing counter (`ip_id_counter++`)
+3. If `src == 0`, use `local_ip_addr`
+4. Compute header checksum
+5. Copy payload after header
+6. **Routing decision** (simple next-hop):
+   - If `dst` is broadcast: next_hop = dst
+   - If `(dst & subnet_mask) != (local_ip_addr & subnet_mask)`: **off-link** -> next_hop = gateway
+   - Otherwise: **on-link** -> next_hop = dst
+7. Call `eth_output(next_hop, ETHERTYPE_IP, ip_tx_buf, total_len)`
 
-    /* Endpoints */
-    uint32_t        local_addr, remote_addr;
-    uint16_t        local_port, remote_port;
+#### 9.3.5 ICMP -- Internet Control Message Protocol
 
-    struct socket   *t_socket;      /* Back-pointer to BSD socket */
-    uint32_t        t_rxtcur;       /* Retransmit timeout (ms) */
-    spinlock_t      t_lock;
+ICMP (`icmp.c`, 152 lines) handles only **echo request** (ping) and **echo reply**:
+
+```c
+struct icmp_hdr {              /* icmp.c:27 */
+    uint8_t  icmp_type;        /* 8 = echo request, 0 = echo reply */
+    uint8_t  icmp_code;        /* 0 for echo */
+    uint16_t icmp_cksum;       /* ICMP checksum (same algorithm as IP) */
+    uint16_t icmp_id;          /* Identifier (set by sender) */
+    uint16_t icmp_seq;         /* Sequence number (set by sender) */
 };
 ```
 
-#### The Three-Way Handshake (Active Open)
+**Kernel ping responder**: when `icmp_input()` receives an ECHO_REQUEST (type 8), it
+copies the entire ICMP message, changes the type to ECHO_REPLY (0), recomputes the
+checksum, and sends it back via `ip_output()` with swapped source/destination addresses.
+This all happens in kernel context -- no userland process is involved.
 
-When user code calls `connect()`:
+**Userland ping**: when `icmp_input()` receives an ECHO_REPLY (type 0), it delivers the
+full ICMP packet to the first socket with `so_protocol == IPPROTO_ICMP` via
+`icmp_deliver_to_socket()` (`icmp.c:68`). The `ping` utility creates a raw socket
+(`socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)`) to send echo requests and receive replies.
 
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Sock as BSD Socket
-    participant TCP as TCP Layer
-    participant IP as IP/Ethernet
-    participant Remote as Remote Host
+### 9.4 UDP & DHCP
 
-    App->>Sock: connect(sockfd, &addr, len)
-    Sock->>TCP: tcp_connect(so)
-    TCP->>TCP: Allocate tcpcb, set iss = counter++
-    TCP->>TCP: State: CLOSED → SYN_SENT
-    TCP->>IP: Send SYN (seq=iss)
-    IP->>Remote: [IP + TCP SYN]
+**Source**: `kernel/net/udp.c` (148 lines), `kernel/net/dhcp.c` (399 lines)
 
-    Remote-->>IP: [IP + TCP SYN+ACK (seq=irs, ack=iss+1)]
-    IP->>TCP: tcp_input(SYN+ACK)
-    TCP->>TCP: rcv_nxt = irs+1, snd_una = iss+1
-    TCP->>TCP: State: SYN_SENT → ESTABLISHED
-    TCP->>IP: Send ACK (ack=irs+1)
-    TCP->>Sock: so_state = SS_CONNECTED
-    Sock-->>App: connect() returns 0
+#### 9.4.1 UDP -- User Datagram Protocol
+
+UDP is the simplest transport protocol: no connection state, no retransmission, no flow
+control. Each datagram is independently addressed and delivered (or lost).
+
+```
+  0      2      4      6      8
+  +------+------+------+------+------------ - -
+  | Src  | Dst  | Len  | Csum | Payload ...
+  | Port | Port |      |      |
+  +------+------+------+------+------------ - -
+  |<---- 8-byte UDP header --->|
 ```
 
-> **Security implication:** TCP's three-way handshake is vulnerable to SYN flood attacks: an attacker sends millions of SYN packets from spoofed addresses, filling the server's connection table with half-open connections. Modern stacks use SYN cookies to mitigate this. Kiseki's pool of 64 TCBs would be trivially exhausted. The simple ISS counter (`tcp_iss_counter++`) is also predictable — real stacks use RFC 6528 (keyed hash) to prevent sequence number prediction attacks.
-
-### 9.5 UDP & DHCP
-
-UDP (`kernel/net/udp.c`, 148 lines) is the simplest transport protocol — it adds a 4-field header (source port, destination port, length, checksum) and provides no reliability, ordering, or flow control. Packets can arrive out of order, be duplicated, or be lost entirely.
-
-The primary consumer of UDP in Kiseki is the **DHCP client** (`kernel/net/dhcp.c`, 399 lines), which runs during boot to obtain an IP address automatically.
-
-#### DHCP — Dynamic Host Configuration Protocol
-
-DHCP (RFC 2131) is a four-message protocol:
-
-```mermaid
-sequenceDiagram
-    participant Client as Kiseki (0.0.0.0)
-    participant Server as DHCP Server (e.g., 10.0.2.2)
-
-    Client->>Server: DHCPDISCOVER (broadcast)\n"I need an IP address"
-    Server-->>Client: DHCPOFFER\n"How about 10.0.2.15?"
-    Client->>Server: DHCPREQUEST (broadcast)\n"I'll take 10.0.2.15"
-    Server-->>Client: DHCPACK\n"Confirmed. Here's your config:"
-    Note over Client: IP: 10.0.2.15<br/>Mask: 255.255.255.0<br/>Gateway: 10.0.2.2<br/>DNS: 10.0.2.3
+```c
+struct udp_hdr {               /* udp.c:23 */
+    uint16_t uh_sport;         /* Source port */
+    uint16_t uh_dport;         /* Destination port */
+    uint16_t uh_len;           /* Length (header + data) */
+    uint16_t uh_sum;           /* Checksum (set to 0 -- optional in IPv4) */
+} __packed;
 ```
 
-After receiving the DHCPACK, the client configures the local IP address, subnet mask, gateway, and DNS server by calling `eth_set_ip()`, `ip_set_netmask()`, and `ip_set_gateway()`.
+**Note**: Kiseki does not compute UDP checksums (`uh_sum = 0`). This is legal in IPv4
+(RFC 768 makes UDP checksum optional). In a VM environment with no real wire corruption,
+this is a reasonable simplification.
+
+**`udp_input()`** (`udp.c:62`):
+1. Validate minimum size (8 bytes)
+2. **DHCP shortcut**: if `dport == 68`, call `dhcp_input()` directly (before socket lookup)
+3. Scan `socket_table` for a matching socket (`so_protocol == IPPROTO_UDP` and
+   `so_local.sin_port == dport`)
+4. Store sender info in `so_remote` (for `recvfrom()`)
+5. Deliver payload to `so_rcv` buffer
+
+**`udp_output()`** (`udp.c:123`):
+1. Build 8-byte UDP header (checksum = 0)
+2. Copy payload after header
+3. Call `ip_output()` with `IPPROTO_UDP`
+
+#### 9.4.2 DHCP Client
+
+DHCP (Dynamic Host Configuration Protocol) runs over UDP and automatically configures
+the OS's IP address, subnet mask, gateway, and DNS server at boot time.
+
+**The DHCP handshake** (a "DORA" exchange):
+
+```
+  Kiseki (client)                          DHCP Server
+       |                                        |
+       |--- DHCPDISCOVER (broadcast) ---------->|  "I need an IP"
+       |                                        |
+       |<-- DHCPOFFER -------------------------+|  "How about 192.168.64.5?"
+       |                                        |
+       |--- DHCPREQUEST (broadcast) ----------->|  "Yes, I want 192.168.64.5"
+       |                                        |
+       |<-- DHCPACK ---------------------------+|  "It's yours, here's the config"
+       |                                        |
+```
+
+All DHCP messages are sent as UDP: client port 68, server port 67. During DISCOVER, the
+client has no IP address yet, so it sends from `0.0.0.0` to `255.255.255.255` (broadcast).
+
+**DHCP message structure** (548+ bytes, `dhcp.c:67`):
+
+```
+  +-------+-------+-------+------+-------+
+  | op(1) |htype  | hlen  | hops | xid   |    Fixed header: 236 bytes
+  |       |(1)    | (6)   | (0)  | (4B)  |
+  +-------+-------+-------+------+-------+
+  | secs  | flags | ciaddr       |yiaddr |    Your IP (offered by server)
+  +-------+-------+--------------+-------+
+  |siaddr |giaddr | chaddr (16)  | sname |    Client MAC in chaddr
+  +-------+-------+--------------+-------+
+  | file (128)    | magic cookie (4)     |    0x63825363
+  +---------------+----------------------+
+  | options (variable, TLV-encoded)      |    Type-Length-Value chain
+  +--------------------------------------+
+```
+
+**DHCP options** use TLV (type-length-value) encoding. Important option types:
+
+| Code | Name | Length | Meaning |
+|------|------|--------|---------|
+| 1 | Subnet Mask | 4 | e.g., 255.255.255.0 |
+| 3 | Router | 4 | Default gateway IP |
+| 6 | DNS | 4+ | DNS server IP |
+| 50 | Requested IP | 4 | Client requests specific IP |
+| 51 | Lease Time | 4 | Seconds until address expires |
+| 53 | Message Type | 1 | DISCOVER(1), OFFER(2), REQUEST(3), ACK(5) |
+| 54 | Server ID | 4 | DHCP server's own IP |
+| 55 | Param Request | N | List of options client wants |
+| 255 | End | 0 | Terminates option chain |
+
+**`dhcp_configure()`** (`dhcp.c:322`) -- the boot-time entry point:
+
+```
+dhcp_configure()
+  |
+  +-- Set IP to 0 (no address yet)
+  +-- Brief busy-wait for vmnet init (~500K iterations)
+  |
+  +-- for attempt in 1..5:
+  |     |
+  |     +-- dhcp_state = 1 (DISCOVERING)
+  |     +-- dhcp_send(DHCPDISCOVER, 0, 0)
+  |     |     Build: op=1, broadcast flag, our MAC in chaddr
+  |     |     Options: [53:DISCOVER] [55:1,3,6] [255:END]
+  |     |     Send via ip_output(0.0.0.0, 255.255.255.255, UDP)
+  |     |
+  |     +-- Poll for ~3 seconds (300 iterations):
+  |           virtio_net_recv()  -- pump the NIC
+  |           if g_dhcp_complete: break
+  |
+  +-- if complete:
+  |     eth_set_ip(offered_ip)
+  |     ip_set_netmask(mask)       (defaults /24 if none offered)
+  |     ip_set_gateway(gateway)
+  |     return 0
+  |
+  +-- if timeout after 5 attempts:
+        return -1  (caller uses static fallback)
+```
+
+The DHCP state machine in `dhcp_input()` (`dhcp.c:255`):
+- **State 1 + OFFER**: Record offered IP, server IP, subnet, gateway. Send DHCPREQUEST.
+- **State 2 + ACK**: Record final config. Set `g_dhcp_complete = 1`.
+- **State 2 + NAK**: Reset to state 0 (start over).
+
+### 9.5 TCP
+
+**Source**: `kernel/net/tcp.c` (785 lines), `kernel/include/net/tcp.h` (187 lines)
+
+TCP (Transmission Control Protocol) is **the** reliable, ordered, byte-stream protocol.
+It is far more complex than UDP because it must handle: connection setup (3-way
+handshake), reliable delivery (sequence numbers + ACKs), flow control (window
+advertisements), and connection teardown (4-way close).
+
+#### 9.5.1 TCP Segment Header
+
+```
+  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |          Source Port          |       Destination Port        |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                        Sequence Number                        |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                    Acknowledgment Number                      |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  | Offset| Rsvd  |U|A|P|R|S|F|       Window Size                |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |           Checksum            |        Urgent Pointer         |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                    Options (if Offset > 5)                    |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+```c
+struct tcp_hdr {                   /* tcp.h:36 */
+    uint16_t th_sport;             /* Source port */
+    uint16_t th_dport;             /* Destination port */
+    uint32_t th_seq;               /* Sequence number */
+    uint32_t th_ack;               /* Acknowledgment number */
+    uint8_t  th_off_rsvd;          /* Data offset (high 4 bits) */
+    uint8_t  th_flags;             /* TCP flags (FIN|SYN|RST|PSH|ACK|URG) */
+    uint16_t th_win;               /* Window size */
+    uint16_t th_sum;               /* Checksum */
+    uint16_t th_urp;               /* Urgent pointer */
+} __packed;
+
+/* Flag bits */
+#define TH_FIN   0x01
+#define TH_SYN   0x02
+#define TH_RST   0x04
+#define TH_PUSH  0x08
+#define TH_ACK   0x10
+#define TH_URG   0x20
+```
+
+#### 9.5.2 The TCP Control Block (TCB)
+
+Each TCP connection has a **TCB** -- a per-connection state block that tracks sequence
+numbers, windows, and retransmission state:
+
+```c
+struct tcpcb {                     /* tcp.h:85 */
+    enum tcp_state t_state;        /* Current state (CLOSED..TIME_WAIT) */
+    bool           t_active;       /* Slot allocated in pool */
+
+    /* Sequence number bookkeeping */
+    uint32_t snd_una;              /* Oldest unACKed byte we sent */
+    uint32_t snd_nxt;              /* Next sequence number to send */
+    uint32_t snd_wnd;              /* Send window (from remote) */
+    uint32_t rcv_nxt;              /* Next byte we expect to receive */
+    uint32_t rcv_wnd;              /* Our receive window (= SOCKBUF_SIZE = 4096) */
+
+    uint32_t iss;                  /* Initial Send Sequence number */
+    uint32_t irs;                  /* Initial Receive Sequence number */
+
+    /* Endpoint cache (copied from socket) */
+    uint32_t local_addr, remote_addr;   /* IP addresses */
+    uint16_t local_port, remote_port;   /* Ports */
+
+    struct socket *t_socket;       /* Back-pointer to owning socket */
+
+    /* Retransmission (simplified) */
+    uint32_t t_rxtcur;            /* RTO in ms (starts at 1000) */
+    uint32_t t_rxtshift;          /* Backoff exponent */
+
+    spinlock_t t_lock;            /* Per-connection lock */
+};
+```
+
+The TCB pool is a static array of 64 entries (`tcpcb_pool[TCP_MAX_CONNECTIONS]`).
+
+#### 9.5.3 TCP State Machine
+
+TCP connections move through 11 states. Here is the complete state diagram:
+
+```
+                              +------------+
+                              |   CLOSED   |
+                              +-----+------+
+                   active open      |      passive open
+                   (send SYN)       |      (listen)
+                         +----------+---------+
+                         v                    v
+                  +-----------+         +-----------+
+                  | SYN_SENT  |         |  LISTEN   |
+                  +-----+-----+         +-----+-----+
+                        |                     |
+               recv SYN-ACK              recv SYN
+               send ACK                  send SYN-ACK
+                        |                     |
+                        v                     v
+                  +-----+-----+         +-----------+
+                  |ESTABLISHED|<--------|  SYN_RCVD |
+                  +-----+-----+ recv ACK+-----+-----+
+                        |                     |
+            +-----------+-----------+         |
+            |                       |         |
+       close (send FIN)      recv FIN    recv RST
+            |               send ACK         |
+            v                   v            v
+      +-----------+      +-----------+  +--------+
+      |FIN_WAIT_1 |      |CLOSE_WAIT |  | CLOSED |
+      +-----+-----+      +-----+-----+  +--------+
+            |                   |
+      +-----+-----+      close (send FIN)
+      |           |             |
+   recv ACK   recv FIN          v
+      |       send ACK    +-----------+
+      v           |       | LAST_ACK  |
++-----------+     |       +-----+-----+
+|FIN_WAIT_2 |     v             |
++-----+-----+ +--------+  recv ACK
+      |        |CLOSING |       |
+   recv FIN    +---+----+       v
+   send ACK        |       +--------+
+      |        recv ACK    | CLOSED |
+      v            |       +--------+
+ +-----------+     v
+ | TIME_WAIT |<----+
+ +-----------+
+      |
+   (timeout)  *Kiseki: immediate
+      |
+      v
+ +--------+
+ | CLOSED |
+ +--------+
+```
+
+**Kiseki simplification**: TIME_WAIT immediately transitions to CLOSED (no 2MSL timer).
+This means old duplicate segments could confuse a new connection on the same port, but
+in a controlled VM environment this is acceptable.
+
+#### 9.5.4 TCP Checksum
+
+TCP uses a **pseudo-header checksum** that covers the IP addresses (protecting against
+misdelivered packets) plus the entire TCP segment:
+
+```c
+struct tcp_pseudo_hdr {        /* tcp.c:219 */
+    uint32_t src_addr;         /* Source IP from IP header */
+    uint32_t dst_addr;         /* Destination IP from IP header */
+    uint8_t  zero;             /* Reserved (must be 0) */
+    uint8_t  protocol;         /* Always 6 (IPPROTO_TCP) */
+    uint16_t tcp_len;          /* TCP segment length (network order) */
+} __packed;
+```
+
+The `tcp_checksum()` function (`tcp.c:227`) sums the pseudo-header words, then the TCP
+segment words, folds to 16 bits, and returns the one's complement -- same RFC 1071
+algorithm used for IP.
+
+#### 9.5.5 Connection Setup: The Three-Way Handshake
+
+**Active open** (client calls `connect()`):
+
+```
+  Client (tcp_connect)                  Server (tcp_input/LISTEN)
+       |                                      |
+  1.   |--- SYN (seq=ISS_C) ----------------->|
+       |    t_state = SYN_SENT                 |
+       |                                       |
+       |                           tcp_accept_alloc() creates child socket
+       |                           child TCB: irs=ISS_C, rcv_nxt=ISS_C+1
+       |                           child generates ISS_S
+       |                                       |
+  2.   |<-- SYN+ACK (seq=ISS_S, ack=ISS_C+1) -|
+       |    snd_una = ISS_C+1                  |
+       |    irs = ISS_S                        |  child t_state = SYN_RCVD
+       |    rcv_nxt = ISS_S + 1                |
+       |    t_state = ESTABLISHED              |
+       |                                       |
+  3.   |--- ACK (seq=ISS_C+1, ack=ISS_S+1) -->|
+       |                                       |  child snd_una = ISS_S+1
+       |                                       |  child t_state = ESTABLISHED
+       |                                       |  child socket: SS_CONNECTED
+```
+
+**ISS generation**: `tcp_new_iss()` (`tcp.c:108`) increments a global counter by 64,000
+per connection. This is a simplification -- production systems use RFC 6528 (SipHash) to
+prevent sequence number prediction attacks.
+
+**MSS option**: During SYN and SYN-ACK, Kiseki includes a TCP MSS (Maximum Segment Size)
+option: kind=2, length=4, MSS=1460 (= 1500 MTU - 20 IP - 20 TCP). This tells the peer
+not to send segments larger than 1460 bytes of data.
+
+#### 9.5.6 Data Transfer
+
+Once ESTABLISHED, data flows via `tcp_output()` (`tcp.c:275`):
+
+```
+net_send(sockfd, buf, len)           [socket.c:551]
+  |
+  +-- Write data into so_snd circular buffer (sockbuf_write)
+  |     caps at SOCKBUF_SIZE = 4096 bytes
+  |
+  +-- tcp_output(tp)
+        |
+        +-- Pull data from so_snd (up to TCP_MAX_SEGMENT = 1460 bytes)
+        +-- Build TCP header:
+        |     th_seq = tp->snd_nxt
+        |     th_ack = tp->rcv_nxt
+        |     th_flags = TH_ACK | TH_PUSH (if data present)
+        |     th_win = tp->rcv_wnd (4096)
+        +-- Advance snd_nxt by data_len
+        +-- Compute TCP checksum (pseudo-header + segment)
+        +-- ip_output(local_addr, remote_addr, IPPROTO_TCP, ...)
+```
+
+On the receive side, `tcp_input()` in ESTABLISHED state (`tcp.c:688`):
+1. If RST: immediately CLOSED
+2. If ACK: advance `snd_una` (the remote has consumed bytes up to `seg_ack`)
+3. If payload present: write to `so_rcv` buffer, set `rcv_nxt = seg_seq + data_len`
+4. If FIN: transition to CLOSE_WAIT, set socket SS_DISCONNECTED
+5. Send ACK back via `tcp_output()`
+
+**What Kiseki does NOT implement** (compared to a production TCP):
+- No congestion control (slow start, AIMD, cubic)
+- No Nagle algorithm (small segments are sent immediately)
+- No selective acknowledgments (SACK)
+- No window scaling (max window = 65535 bytes)
+- No kernel-driven retransmission timer -- retransmission is done by the caller's
+  busy-wait loop in `net_connect()` for SYN retransmits only
+- No out-of-order segment reassembly
+
+#### 9.5.7 Connection Teardown
+
+Closing a TCP connection (`tcp_close()`, `tcp.c:166`) is state-dependent:
+
+| Current State | Action | New State |
+|---------------|--------|-----------|
+| CLOSED / LISTEN | Free TCB immediately | CLOSED |
+| SYN_SENT / SYN_RCVD | Abort (free TCB) | CLOSED |
+| ESTABLISHED | Send FIN+ACK | FIN_WAIT_1 |
+| CLOSE_WAIT | Send FIN+ACK | LAST_ACK |
+
+The full graceful close:
+
+```
+  Client (initiator)                    Server (responder)
+       |                                      |
+  1.   |--- FIN+ACK ---------------------------->|
+       |    FIN_WAIT_1                            |
+       |                                          |
+  2.   |<-- ACK ---------------------------------+|  CLOSE_WAIT
+       |    FIN_WAIT_2                            |
+       |                                          |
+  3.   |<-- FIN+ACK -----------------------------+|  LAST_ACK
+       |                                          |
+  4.   |--- ACK --------------------------------->|
+       |    TIME_WAIT --> CLOSED (immediate)       |  CLOSED
+```
+
+#### 9.5.8 Connection Lookup: `tcp_find_tcb()`
+
+When a segment arrives, the kernel must find the matching TCB. `tcp_find_tcb()`
+(`tcp.c:427`) does a **two-pass search**:
+
+1. **Exact 4-tuple match**: scan all 64 TCBs for one where
+   `(local_addr == dst || local_addr == 0) && local_port == dst_port &&
+    remote_addr == src && remote_port == src_port`
+2. **Listening wildcard**: scan for any TCB in `TCPS_LISTEN` where
+   `local_port == dst_port && (local_addr == 0 || local_addr == dst_addr)`
+
+The exact match takes priority. This allows a server to have one listening TCB plus
+many established connections on the same port.
+
+#### 9.5.9 RST Handling
+
+If `tcp_input()` receives a segment for which **no TCB exists** (`tcp.c:476`), it
+sends a RST (reset) back:
+
+- If the incoming segment has ACK: RST with `seq = their_ack`
+- If no ACK: RST+ACK with `seq = 0`, `ack = their_seq + payload + SYN?1:0 + FIN?1:0`
+
+This tells the remote side that no connection exists and it should clean up.
 
 ### 9.6 BSD Sockets
 
-The BSD socket API (`kernel/net/socket.c`, 1021 lines) provides the user-facing interface to the network stack. It maps the familiar `socket()`, `bind()`, `listen()`, `accept()`, `connect()`, `send()`, `recv()` calls to internal operations on the socket table.
+**Source**: `kernel/net/socket.c` (1,021 lines)
 
-#### The Socket Structure
+The socket layer is the **userland-facing API**. It maps file descriptors to socket
+objects and dispatches operations to the appropriate protocol (TCP, UDP, ICMP, or
+AF_UNIX).
 
-Each socket is allocated from a fixed pool of `NET_MAX_SOCKETS` entries:
+#### 9.6.1 The Socket Structure
 
 ```c
-struct socket {
-    bool            so_active;
-    int             so_type;        /* SOCK_STREAM, SOCK_DGRAM */
-    int             so_protocol;    /* IPPROTO_TCP, IPPROTO_UDP */
-    int             so_family;      /* AF_INET */
-    enum so_state   so_state;       /* SS_UNCONNECTED, SS_CONNECTED, ... */
-    int             so_error;
+struct socket {                    /* net.h:184 */
+    int  so_type;                  /* SOCK_STREAM, SOCK_DGRAM, SOCK_RAW */
+    int  so_protocol;              /* IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMP */
+    int  so_family;                /* AF_INET, AF_UNIX */
+    int  so_state;                 /* SS_UNCONNECTED .. SS_DISCONNECTED */
+    int  so_error;                 /* Pending error */
+    int  so_options;               /* SO_REUSEADDR etc. */
+    int  so_sflags;                /* Shutdown flags */
+    bool so_active;                /* Slot in use */
 
-    /* Endpoints */
-    uint32_t        so_local_addr, so_remote_addr;
-    uint16_t        so_local_port, so_remote_port;
+    struct sockaddr_in so_local;   /* Local address/port */
+    struct sockaddr_in so_remote;  /* Remote address/port */
 
-    /* Receive and send buffers (ring buffers) */
-    struct sockbuf  so_rcv;         /* Receive buffer */
-    struct sockbuf  so_snd;         /* Send buffer */
+    struct sockbuf so_snd;         /* Send buffer (4 KB circular) */
+    struct sockbuf so_rcv;         /* Receive buffer (4 KB circular) */
 
-    /* Protocol control block */
-    struct tcpcb   *so_pcb;         /* TCP control block (for SOCK_STREAM) */
+    void *so_pcb;                  /* Protocol control block */
+                                   /*   TCP: struct tcpcb * */
+                                   /*   UNIX: struct unpcb * */
 
-    spinlock_t      so_lock;
+    int  so_qlimit;                /* Listen backlog limit */
+    int  so_qlen;                  /* Current backlog count */
+    int  so_listener;              /* Parent listener index (-1 if none) */
+    bool so_accepted;              /* accept() has returned this socket */
+
+    spinlock_t so_lock;
 };
 ```
 
-The socket buffers (`struct sockbuf`) are ring buffers of `SOCKBUF_SIZE` bytes. When TCP receives data, it writes into `so_rcv`. When the application calls `read()` on the socket fd, it reads from `so_rcv`. This decouples the network stack's receive rate from the application's read rate.
+The **socket table** is a global array of 64 sockets (`socket_table[NET_MAX_SOCKETS]`).
+Each socket occupies ~8.3 KB due to the two 4 KB circular buffers embedded inline.
 
-#### Integration with the VFS
+#### 9.6.2 Circular Send/Receive Buffers
 
-Sockets are integrated with the file descriptor table through the VFS layer's `f_sockidx` field:
+Each socket has two `sockbuf` -- one for sending, one for receiving. They are simple
+circular (ring) buffers:
 
-```mermaid
-flowchart LR
-    FD["fd 5 → file_pool[x]<br/>f_sockidx = 3"]
-    FD --> SOCK["socket_table[3]<br/>AF_INET, SOCK_STREAM<br/>state = SS_CONNECTED"]
-    SOCK --> TCB["tcpcb_pool[y]<br/>state = ESTABLISHED<br/>local 10.0.2.15:49152<br/>remote 93.184.216.34:80"]
+```
+  sockbuf (4096 bytes):
+
+  +---+---+---+---+---+---+---+---+---+---+---+
+  |   |   | D | A | T | A |   |   |   |   |   |
+  +---+---+---+---+---+---+---+---+---+---+---+
+            ^               ^
+            head (read)     tail (write)
+            sb_len = 4
+
+  sockbuf_write(): writes bytes at tail, advances tail, increments sb_len
+  sockbuf_read():  reads bytes at head, advances head, decrements sb_len
+  Both wrap around modulo SOCKBUF_SIZE (4096).
+  Both are protected by sb_lock (spinlock).
 ```
 
-When user code calls `read(5, buf, len)`, the syscall handler detects that fd 5 is a socket (via `vfs_get_sockidx()`) and routes the call to `net_recv()` instead of the VFS `read` path. Similarly, `write()` on a socket fd calls `net_send()`.
+#### 9.6.3 Socket API Implementation
 
-> **macOS reference:** XNU's socket layer is in `bsd/kern/uipc_socket.c` and `bsd/kern/uipc_socket2.c`. The design is identical in structure — a socket table with protocol control blocks, send/receive buffers (mbufs in XNU, ring buffers in Kiseki), and integration with the fd table. XNU's implementation is vastly more complete, supporting kqueues, socket filters, multipath TCP, and the Network Kernel Extensions (NKE) framework for deep packet inspection.
+| Function | Line | Operation |
+|----------|------|-----------|
+| `net_socket()` | 260 | Allocate socket slot, validate domain/type/protocol |
+| `net_bind()` | 322 | Copy local address into socket, set SS_BOUND |
+| `net_listen()` | 352 | Allocate listening TCB, set SS_LISTENING |
+| `net_accept()` | 395 | Poll for child socket in SS_CONNECTED, return it |
+| `net_connect()` | 458 | TCP: send SYN, poll for SYN-ACK; UDP: just record remote |
+| `net_send()` | 551 | TCP: write to so_snd + tcp_output; UDP: udp_output directly |
+| `net_recv()` | 595 | Read from so_rcv; return -EAGAIN if empty, 0 if EOF |
+| `net_close()` | 640 | TCP: send FIN via tcp_close; mark socket inactive |
+
+**Blocking model**: Kiseki uses **busy-wait polling** rather than sleep/wakeup:
+
+- `net_accept()`: polls up to 50,000 times, calling `virtio_net_recv()` + `sched_yield()`
+  each iteration, looking for a child socket
+- `net_connect()`: polls up to 3,000 times (~30s) for the TCP handshake to complete,
+  retransmitting SYN every ~100 polls (5 retries max)
+- `sys_recvfrom()`: retries up to 500 times with `virtio_net_recv()` pumping between
+  attempts (~500ms total)
+
+This is simpler than implementing proper wait channels but wastes CPU. The
+`sched_yield()` calls ensure other threads can run during the busy-wait.
+
+#### 9.6.4 AF_UNIX -- Unix Domain Sockets
+
+Unix domain sockets (`socket.c:668-1021`) provide IPC between processes on the same
+machine, bypassing the entire network stack. Data written by one process appears directly
+in the peer's receive buffer -- a pure memory copy.
+
+**Key differences from AF_INET**:
+
+| Aspect | AF_INET | AF_UNIX |
+|--------|---------|---------|
+| Addressing | IP + port | Filesystem path (up to 104 chars) |
+| Data path | Through TCP/IP + NIC | Direct memory copy to peer's buffer |
+| PCB | `struct tcpcb` | `struct unpcb` (peer index + path) |
+| Connect | Three-way handshake | Find listener by path, link peers |
+
+```c
+struct unpcb {                     /* net.h:111 */
+    int  unp_peer;                 /* Peer socket index (-1 if none) */
+    char unp_path[104];            /* Bound path */
+    bool unp_bound;                /* bind() was called */
+};
+```
+
+**AF_UNIX connect flow** (`unix_connect()`, `socket.c:827`):
+1. Find a listening socket with matching path
+2. Check backlog (`qlen < qlimit`)
+3. Allocate a child socket + unpcb
+4. Link peers bidirectionally: `connector->unp_peer = child`, `child->unp_peer = connector`
+5. Both sockets transition to SS_CONNECTED
+
+**AF_UNIX send** (`unix_send()`, `socket.c:921`): writes data directly into the
+**peer's** `so_rcv` buffer. No headers, no checksums, no protocol machinery.
+
+#### 9.6.5 Syscall Integration
+
+Userland socket calls are translated by syscall wrappers in `syscalls.c` (lines
+4616-4914). Each wrapper:
+
+1. Reads arguments from trap frame registers (`x0`-`x5`)
+2. Translates the file descriptor to a socket index via `vfs_get_sockidx(fd)`
+3. Calls the corresponding `net_*()` function
+4. Returns the result via `syscall_return()`
+
+The networking syscall numbers (from `syscall.h`):
+
+| Syscall | Number | Handler |
+|---------|--------|---------|
+| `SYS_socket` | 97 | `sys_socket` |
+| `SYS_connect` | 98 | `sys_connect_sc` |
+| `SYS_bind` | 104 | `sys_bind` |
+| `SYS_setsockopt` | 105 | `sys_setsockopt` (stub) |
+| `SYS_listen` | 106 | `sys_listen_sc` |
+| `SYS_accept` | 30 | `sys_accept_sc` |
+| `SYS_sendto` | 133 | `sys_sendto` |
+| `SYS_recvfrom` | 29 | `sys_recvfrom` |
+| `SYS_shutdown` | 134 | `sys_shutdown_sc` |
+
+**Interesting detail**: `sys_sendto()` calls `virtio_net_recv()` *before* sending, to
+pump the NIC for any pending ARP replies. Similarly, `sys_connect_sc()` pre-polls for
+the same reason. This ensures the ARP cache is warm before the first packet goes out.
+
+#### 9.6.6 Comparison with XNU/macOS
+
+| Feature | Kiseki | XNU/macOS |
+|---------|--------|-----------|
+| Socket allocation | Static 64-slot array | Dynamic `zalloc()` from socket zone |
+| Buffer management | 4 KB embedded circular buffer | `mbuf` chains, variable size |
+| TCP connections | Static 64-slot TCB pool | Dynamic, limited by system memory |
+| ARP | 32-entry linear-scan cache | Hash table with timeout/aging |
+| Fragmentation | None (DF always set) | Full reassembly with 60s timeout |
+| Blocking model | Busy-wait polling | `msleep()`/`wakeup()` wait channels |
+| UDP checksum | Disabled (= 0) | Mandatory computation |
+| TCP congestion | None | NewReno / CUBIC |
+| Multicast | Accept frames only | Full IGMP group management |
+| IPv6 | Header constants only | Full dual-stack |
 
 ---
 
 ## Chapter 10: IOKit & Device Drivers
 
-IOKit is macOS's device driver framework. It is unusual among OS driver frameworks because it uses an object-oriented design with inheritance, virtual dispatch, and a global device registry — concepts typically associated with C++ or Java, not kernel programming. On real macOS, IOKit is written in a restricted subset of C++ called Embedded C++ (no exceptions, no RTTI, no STL). Kiseki implements the same architecture in **pure C**, using struct embedding for inheritance and function-pointer tables for virtual dispatch.
+Kiseki reimplements Apple's IOKit driver framework in **plain C** (macOS uses C++ with
+libkern). This chapter covers the framework's object model, the I/O Registry, driver
+matching, user-client bridging, and every hardware driver: VirtIO GPU, block, network,
+input; GICv2 interrupt controller; PL011 UART; TTY/PTY subsystem; and framebuffer
+console.
 
-#### What Is IOKit?
+### 10.1 What Is IOKit?
 
-Every piece of hardware attached to a Mac — GPU, keyboard, trackpad, USB hub, NVMe controller, Thunderbolt bridge — is managed by an IOKit driver. IOKit provides:
+On macOS, **IOKit** is the kernel framework through which all hardware drivers are
+written. It provides:
 
-1. **An object model** with a class hierarchy rooted at `IOObject` → `IORegistryEntry` → `IOService` → specific drivers
-2. **A device registry** (the "I/O Registry") — a tree of all hardware and pseudo-hardware in the system
-3. **A matching system** that automatically loads the correct driver for each device
-4. **User-space communication** via Mach ports, allowing unprivileged code to talk to drivers safely
+1. An **object-oriented runtime** with reference counting and RTTI
+2. An **I/O Registry** -- a live tree of device/driver objects
+3. A **matching system** that pairs devices with drivers automatically
+4. **IOUserClient** -- a bridge that lets userland talk to kernel drivers via Mach ports
+5. **Work loops** for serialised, interrupt-safe driver execution
 
-### 10.1 IOKit Object Model
+Kiseki implements all of these in C using embedded structs and function-pointer vtables
+instead of C++ virtual methods. The framework lives in 11 source files (~4,900 lines)
+under `kernel/iokit/`.
 
-Kiseki's IOKit class hierarchy mirrors XNU's exactly:
+**Why IOKit matters**: when the WindowServer wants to draw pixels, it opens an
+IOFramebuffer user client, maps the GPU's VRAM into its address space, and calls
+external methods to flush regions. When it wants mouse/keyboard events, it opens an
+IOHIDSystem user client and maps the HID event ring buffer. All of this happens through
+the IOKit framework.
 
-```mermaid
-classDiagram
-    class io_object {
-        +vtable : io_object_vtable*
-        +meta : io_class_meta*
-        +retain_count : int32_t
-        +iokit_port : ipc_port*
-    }
+### 10.2 The IOKit Object Model
 
-    class io_registry_entry {
-        +entry_id : uint32_t
-        +name[64] : char
-        +prop_table : io_prop_table
-        +planes[3] : io_plane_link
-    }
+#### 10.2.1 Class Hierarchy
 
-    class io_service {
-        +provider : io_service*
-        +clients[16] : io_service*
-        +state[2] : uint32_t
-        +work_loop : io_work_loop*
-        +service_port : ipc_port*
-    }
+IOKit uses a single-inheritance hierarchy implemented via struct embedding:
 
-    class io_user_client {
-        +owning_task : task*
-        +owner_service : io_service*
-        +dispatch_table : io_external_method_dispatch*
-        +mappings[16] : io_memory_map*
-        +connect_port : ipc_port*
-    }
-
-    class io_framebuffer {
-        +fb_phys_addr : uint64_t
-        +fb_width, fb_height : uint32_t
-        +fb_pitch, fb_bpp : uint32_t
-    }
-
-    class io_hid_system {
-        +ring_mem_desc : io_memory_descriptor*
-        +active : bool
-    }
-
-    io_object <|-- io_registry_entry
-    io_registry_entry <|-- io_service
-    io_service <|-- io_user_client
-    io_service <|-- io_framebuffer
-    io_service <|-- io_hid_system
-    io_user_client <|-- io_framebuffer_user_client
-    io_user_client <|-- io_hid_system_user_client
+```
+  io_object                 Base: vtable, refcount, RTTI
+      |
+      +-- io_registry_entry     Registry node: name, properties, plane links
+              |
+              +-- io_service        Driver: probe/start/stop, matching, work loop
+                      |
+                      +-- io_user_client   Userland bridge: external methods, memory mapping
+                      |
+                      +-- io_framebuffer   GPU driver service
+                      |
+                      +-- io_hid_system    Input event service
 ```
 
-**Inheritance via struct embedding**: Each child struct contains its parent as the *first field*. This means a `struct io_service *` can be safely cast to `struct io_registry_entry *` or `struct io_object *` because they share the same starting address. This is the standard C idiom for single inheritance, and it is exactly how the Linux kernel implements its class hierarchies (e.g., `cdev` → `kobject`).
+Each level adds fields *after* its parent's fields, so a pointer to `io_service` can be
+safely cast to `io_registry_entry *` or `io_object *` -- the parent struct is always at
+offset 0. This is the C equivalent of C++ inheritance.
+
+#### 10.2.2 RTTI -- Runtime Type Information
+
+Every class has a **class metadata** descriptor:
 
 ```c
-/* kernel/include/iokit/io_object.h:69 */
-struct io_object {
-    const struct io_object_vtable   *vtable;
-    const struct io_class_meta      *meta;
-    volatile int32_t                retain_count;
-    struct ipc_port                 *iokit_port;
-};
-
-/* kernel/include/iokit/io_service.h:131 — inherits from io_registry_entry */
-struct io_service {
-    struct io_registry_entry    entry;      /* ← parent struct, first field */
-    struct io_service           *provider;
-    struct io_service           *clients[16];
-    /* ... */
+struct io_class_meta {             /* io_object.h:35 */
+    const char *class_name;        /* "IOService", "IOFramebuffer", etc. */
+    const struct io_class_meta *super_meta;  /* Parent class metadata */
+    uint32_t instance_size;        /* sizeof(struct io_framebuffer) etc. */
 };
 ```
 
-**Virtual dispatch via vtables**: Each class has a vtable struct that also uses embedding:
+Type checking walks the `super_meta` chain:
 
 ```c
-struct io_object_vtable {
+bool io_object_is_class(struct io_object *obj,
+                        const struct io_class_meta *target_meta) {
+    const struct io_class_meta *m = obj->meta;
+    while (m) {
+        if (m == target_meta) return true;
+        m = m->super_meta;
+    }
+    return false;
+}
+```
+
+This is equivalent to `dynamic_cast` in C++ -- it checks whether an object's class is
+the target class or any subclass of it.
+
+#### 10.2.3 Reference Counting
+
+Every `io_object` has an atomic `retain_count`:
+
+```c
+struct io_object {                 /* io_object.h:69 */
+    const struct io_object_vtable *vtable;
+    const struct io_class_meta *meta;
+    volatile int32_t retain_count; /* Atomic refcount */
+    uint32_t _pad;
+    struct ipc_port *iokit_port;   /* Mach port for userland access */
+};
+```
+
+- `io_object_retain()`: atomically increments `retain_count`
+- `io_object_release()`: atomically decrements; if it reaches zero, calls
+  `vtable->free(obj)` to destroy the object
+
+All IOKit objects are allocated from **static pools** (no `kmalloc`):
+
+| Pool | Size | Purpose |
+|------|------|---------|
+| `io_object` pool | 256 | Base objects |
+| `io_registry_entry` pool | 256 | Registry nodes |
+| `io_service` pool | 256 | Driver instances |
+| `io_user_client` pool | 64 | User-client connections |
+| `io_work_loop` pool | 32 | Work loops |
+| `io_event_source` pool | 64 | Event sources |
+| `io_interrupt_event_source` pool | 32 | IRQ event sources |
+| `io_command_gate` pool | 32 | Command gates |
+| `io_memory_descriptor` pool | 64 | Memory descriptors |
+| `io_memory_map` pool | 64 | Memory mappings |
+
+#### 10.2.4 Vtables
+
+Each class level defines a vtable struct that extends the parent's:
+
+```c
+struct io_object_vtable {                    /* io_object.h:47 */
     void (*free)(struct io_object *obj);
 };
 
-struct io_service_vtable {
-    struct io_registry_entry_vtable base;       /* ← parent vtable */
-    struct io_service *(*probe)(struct io_service *, struct io_service *, int32_t *);
-    bool (*start)(struct io_service *, struct io_service *);
-    void (*stop)(struct io_service *, struct io_service *);
-    IOReturn (*newUserClient)(struct io_service *, struct task *, uint32_t, struct io_user_client **);
+struct io_registry_entry_vtable {            /* io_registry_entry.h:61 */
+    struct io_object_vtable base;            /* Inherits free() */
+    const struct io_prop_value *(*getProperty)(...);
+    IOReturn (*setProperty)(...);
+};
+
+struct io_service_vtable {                   /* io_service.h:37 */
+    struct io_registry_entry_vtable base;    /* Inherits above */
+    struct io_service *(*probe)(...);        /* Can this driver handle provider? */
+    bool (*start)(...);                      /* Initialise driver on provider */
+    void (*stop)(...);                       /* Tear down driver */
+    struct io_work_loop *(*getWorkLoop)(...);
+    IOReturn (*message)(...);
+    IOReturn (*newUserClient)(...);          /* Create user-client for this service */
+};
+
+struct io_user_client_vtable {               /* io_user_client.h:82 */
+    struct io_service_vtable base;           /* Inherits above */
+    IOReturn (*externalMethod)(...);         /* Handle method call from userland */
+    IOReturn (*clientMemoryForType)(...);    /* Provide memory for mapping */
+    IOReturn (*clientClose)(...);            /* User closed connection */
 };
 ```
 
-The `probe()`/`start()`/`stop()` lifecycle is identical to XNU's `IOService::probe()`/`start()`/`stop()`.
-
-### 10.2 The I/O Registry
-
-The I/O Registry (`kernel/iokit/io_registry.c`, 423 lines) is a global tree structure that represents all devices and their relationships. It has a root entry named `"IOResources"` and supports three planes:
-
-| Plane | ID | Purpose |
-|-------|-----|---------|
-| Service | 0 | Logical driver hierarchy (provider → client) |
-| Device Tree | 1 | Physical device tree (from FDT/ACPI) |
-| Power | 2 | Power management domains |
-
-Each registry entry can store **properties** — a key-value table with up to 64 entries, supporting strings, numbers, booleans, and raw data:
+When the kernel needs to call, say, `start()` on a driver, it does:
 
 ```c
-/* kernel/include/iokit/io_property.h:87 */
-struct io_prop_table {
-    struct io_prop_entry    entries[64];
-    uint32_t                count;
+((struct io_service_vtable *)service->entry.obj.vtable)->start(service, provider);
+```
+
+### 10.3 The I/O Registry
+
+The I/O Registry is a **live tree** of all devices and drivers in the system. It is
+organised into **planes** -- different views of the same objects:
+
+| Plane ID | Name | Purpose |
+|----------|------|---------|
+| `IO_PLANE_SERVICE` (0) | IOService | Driver attachment hierarchy |
+| `IO_PLANE_DEVICE_TREE` (1) | IODeviceTree | Hardware device tree |
+| `IO_PLANE_POWER` (2) | IOPower | Power management |
+
+Each registry entry tracks its parent and children in each plane:
+
+```c
+struct io_plane_link {                 /* io_registry_entry.h:48 */
+    struct io_registry_entry *parent;
+    struct io_registry_entry *children[32];  /* Max 32 children per plane */
+    uint32_t child_count;
+};
+
+struct io_registry_entry {             /* io_registry_entry.h:95 */
+    struct io_object obj;              /* Base object (vtable, refcount) */
+    uint32_t entry_id;                 /* Unique ID assigned by registry */
+    char name[64];                     /* e.g., "Root", "VirtIOGPU" */
+    char location[64];                 /* e.g., "0x0a000000" */
+    struct io_prop_table prop_table;   /* Key-value properties */
+    struct io_plane_link planes[3];    /* One link per plane */
+    mutex_t arb_lock;                  /* Arbitration lock */
+    /* ... pool management fields */
 };
 ```
 
-The registry also maintains a **catalogue** of driver personalities — descriptions of what hardware each driver can handle:
+#### 10.3.1 Property Tables
+
+Instead of XNU's `OSDictionary` (a C++ dictionary class), Kiseki uses flat arrays:
 
 ```c
-/* kernel/include/iokit/io_registry.h:55 */
-struct io_driver_personality {
-    char                    class_name[64];     /* e.g. "IOFramebuffer" */
-    char                    provider_class[64]; /* e.g. "IOPCIDevice" */
-    int32_t                 probe_score;        /* Higher = preferred */
-    io_driver_init_fn       init_fn;            /* Factory function */
+struct io_prop_value {                 /* io_property.h:50 */
+    io_prop_type_t type;               /* STRING, NUMBER, BOOL, DATA */
+    union {
+        char     string[128];
+        uint64_t number;
+        bool     boolean;
+        struct { uint8_t bytes[256]; uint32_t length; } data;
+    } u;
+};
+
+struct io_prop_entry {                 /* io_property.h:75 */
+    char key[64];
+    struct io_prop_value value;
+};
+
+struct io_prop_table {                 /* io_property.h:87 */
+    struct io_prop_entry entries[64];  /* Max 64 properties per object */
+    uint32_t count;
 };
 ```
 
-### 10.3 Driver Matching
+Properties are how drivers advertise capabilities and how the matching system finds
+drivers. For example, a framebuffer driver sets `IOClass = "IOFramebuffer"` and
+`IOProviderClass = "IOService"`.
 
-When a new device appears in the registry, IOKit runs the **matching algorithm** to find the best driver:
-
-```mermaid
-flowchart TD
-    NEW["New device registered<br/>in I/O Registry"]
-    NEW --> SCAN["Scan catalogue for personalities<br/>where provider_class matches device class"]
-    SCAN --> PROBE["For each matching personality:<br/>call driver→probe(device, &score)"]
-    PROBE --> BEST["Select personality with<br/>highest probe_score"]
-    BEST --> START["Call driver→start(device, provider)"]
-    START --> REG["Register driver as client<br/>of the device in the registry"]
-```
-
-The matching is done by comparing properties: if a personality says `provider_class = "IOPCIDevice"` and `match_properties = { "vendor-id": 0x1AF4 }`, it will match any PCI device with VirtIO's vendor ID.
-
-### 10.4 IOFramebuffer — The GPU Driver
-
-The framebuffer driver (`kernel/iokit/io_framebuffer.c`, 746 lines) provides the display surface that WindowServer composites into. It wraps the VirtIO GPU hardware (`kernel/drivers/virtio/virtio_gpu.c`, 923 lines) behind an IOKit service interface.
-
-The framebuffer exposes three **external methods** to user-space clients:
-
-| Selector | Method | Inputs | Output |
-|----------|--------|--------|--------|
-| 0 | `GetInfo` | (none) | width, height, pitch, bpp, format |
-| 1 | `FlushRect` | x, y, w, h | (none) |
-| 2 | `FlushAll` | (none) | (none) |
-
-User space (WindowServer) accesses the framebuffer through this sequence:
-
-```mermaid
-sequenceDiagram
-    participant WS as WindowServer (EL0)
-    participant Mach as Mach IPC
-    participant IOKit as IOKit kobject dispatch
-    participant FB as IOFramebuffer
-
-    WS->>Mach: mach_msg(kIOServiceGetMatchingServiceMsg,<br/>"IOFramebuffer")
-    Mach->>IOKit: iokit_kobject_server()
-    IOKit->>IOKit: Scan registry for "IOFramebuffer"
-    IOKit-->>WS: service_port (Mach send right)
-
-    WS->>Mach: mach_msg(kIOServiceOpenMsg, service_port,<br/>connect_type=0)
-    Mach->>FB: newUserClient(task, type=0)
-    FB-->>WS: connect_port (IOUserClient Mach port)
-
-    WS->>Mach: mach_msg(kIOConnectMapMemoryMsg,<br/>connect_port, type=kIOFBMemoryTypeVRAM)
-    Mach->>FB: clientMemoryForType(VRAM)
-    FB->>FB: Create io_memory_descriptor for VRAM
-    FB->>FB: Map into WindowServer's address space
-    FB-->>WS: vram_address + size
-
-    Note over WS: WindowServer now has direct<br/>pointer to VRAM — can write pixels
-
-    WS->>WS: Draw into VRAM (memcpy, compositing)
-    WS->>Mach: mach_msg(kIOConnectCallMethodMsg,<br/>selector=kIOFBMethodFlushAll)
-    Mach->>FB: externalMethod(selector=2)
-    FB->>FB: VirtIO TRANSFER_TO_HOST_2D + RESOURCE_FLUSH
-    Note over FB: GPU displays updated pixels
-```
-
-The VRAM is backed by physical pages allocated during VirtIO GPU initialisation (up to 4096 pages / 16 MB). The `clientMemoryForType` call creates an `io_memory_descriptor` wrapping these pages and maps them into the user process's address space, giving WindowServer zero-copy access to the display surface.
-
-### 10.5 IOHIDSystem — Input Events
-
-IOHIDSystem (`kernel/iokit/io_hid_system.c`, 438 lines) provides keyboard and mouse input to user space. The VirtIO input driver (`kernel/drivers/virtio/virtio_input.c`, 939 lines) handles two devices:
-
-- **Keyboard**: VirtIO input device with EV_KEY capability. Converts hardware scancodes to ASCII using a US QWERTY keymap.
-- **Tablet** (absolute pointing device): VirtIO input device with EV_ABS capability. Provides absolute cursor coordinates, avoiding the complexity of mouse acceleration.
-
-Events from both devices are written into a shared **ring buffer** that user space maps via IOKit:
-
-```mermaid
-flowchart LR
-    KBD["VirtIO Keyboard IRQ<br/>virtio_input.c"]
-    MOUSE["VirtIO Tablet IRQ<br/>virtio_input.c"]
-    KBD --> RING["HID Event Ring Buffer<br/>(shared memory mapped to WindowServer)"]
-    MOUSE --> RING
-    RING --> WS["WindowServer reads ring<br/>→ dispatches to windows"]
-```
-
-### 10.6 VirtIO Drivers
-
-Kiseki runs on QEMU's `virt` machine, which provides VirtIO devices for all I/O. The VirtIO specification defines a standard interface: devices advertise features, the driver negotiates, and data is exchanged through **virtqueues** (ring buffers in shared memory).
-
-| Device | File | Lines | QEMU Device |
-|--------|------|-------|-------------|
-| Block (disk) | `kernel/drivers/virtio/virtio_blk.c` | — | `virtio-blk-device` |
-| GPU | `kernel/drivers/virtio/virtio_gpu.c` | 923 | `virtio-gpu-device` |
-| Input (kbd) | `kernel/drivers/virtio/virtio_input.c` | 939 | `virtio-keyboard-device` |
-| Input (tablet) | `kernel/drivers/virtio/virtio_input.c` | — | `virtio-tablet-device` |
-| Network | `kernel/drivers/virtio/virtio_net.c` | — | `virtio-net-device` |
-
-The VirtIO GPU implements the 2D command set:
-1. `GET_DISPLAY_INFO` — Query display resolution
-2. `RESOURCE_CREATE_2D` — Allocate a 2D resource (width × height × BGRA)
-3. `RESOURCE_ATTACH_BACKING` — Attach physical pages as backing storage
-4. `SET_SCANOUT` — Associate resource with a display scanout
-5. `TRANSFER_TO_HOST_2D` — Copy a rectangle from guest pages to host resource
-6. `RESOURCE_FLUSH` — Tell the host to display the updated resource
-
-### 10.7 GICv2 — The Interrupt Controller
-
-The Generic Interrupt Controller v2 (`kernel/drivers/gic/gicv2.c`, 150 lines) manages all hardware interrupts on the ARM64 virt platform. It has two components:
-
-- **Distributor** (GICD): Routes interrupts to CPUs. Manages enable/disable, priority, and target CPU for each IRQ.
-- **CPU Interface** (GICC): Each CPU has its own interface. Handles interrupt acknowledgement and completion.
-
-Key operations:
+#### 10.3.2 The Global Registry
 
 ```c
-/* kernel/drivers/gic/gicv2.c */
+struct io_registry {                   /* io_registry.h:77 */
+    struct io_registry_entry *root;    /* Root of the tree */
+    struct io_driver_personality catalogue[64];  /* Driver catalogue */
+    uint32_t catalogue_count;
+    mutex_t lock;
+    uint32_t next_entry_id;           /* Auto-incrementing */
+    bool initialised;
+    struct ipc_port *master_port;      /* IOKit master Mach port */
+};
 
-void gic_init(void);                          /* Line 57: Global init */
-void gic_init_percpu(void);                   /* Line 94: Per-CPU init */
-void gic_enable_irq(uint32_t irq);            /* Line 103 */
-uint32_t gic_acknowledge(void);               /* Line 119: Read IAR */
-void gic_end_of_interrupt(uint32_t irq);      /* Line 124: Write EOIR */
-void gic_send_sgi(uint32_t sgi, uint32_t cpu);/* Line 129: Inter-processor interrupt */
+extern struct io_registry g_io_registry;   /* Single global instance */
 ```
 
-The interrupt flow:
+### 10.4 Driver Matching & Lifecycle
 
-```mermaid
-sequenceDiagram
-    participant HW as Hardware (e.g., Timer)
-    participant GICD as GIC Distributor
-    participant GICC as GIC CPU Interface
-    participant CPU as ARM64 Core
-    participant VEC as vectors.S
-    participant TRAP as trap_irq_el1()
-    participant DRV as timer_handler()
+#### 10.4.1 Driver Personalities
 
-    HW->>GICD: Assert IRQ line (e.g., IRQ 27 = timer)
-    GICD->>GICC: Route to target CPU (based on ITARGETSR)
-    GICC->>CPU: Assert IRQ signal
-    CPU->>VEC: Take IRQ exception (vector offset 0x280)
-    VEC->>VEC: SAVE_REGS
-    VEC->>TRAP: trap_irq_el1(tf)
-    TRAP->>GICC: gic_acknowledge() → IRQ 27
-    TRAP->>DRV: irq_dispatch(27) → timer_handler()
-    DRV->>DRV: Increment tick_count, rearm timer
-    DRV->>DRV: sched_tick() — possibly trigger preemption
-    TRAP->>GICC: gic_end_of_interrupt(27)
-    TRAP-->>VEC: return
-    VEC->>VEC: RESTORE_REGS → eret
+Each driver registers one or more **personalities** in the catalogue. A personality
+describes what hardware the driver can handle:
+
+```c
+struct io_driver_personality {         /* io_registry.h:55 */
+    bool active;
+    char class_name[64];               /* "IOFramebuffer" */
+    char provider_class[64];           /* "IOService" -- what I attach to */
+    int32_t probe_score;               /* Higher = preferred */
+    char match_category[64];           /* For priority grouping */
+    struct io_prop_table match_properties;  /* Must-match properties */
+    io_driver_init_fn init_fn;         /* Factory function */
+};
 ```
 
-> **macOS reference:** Real macOS uses the Apple Interrupt Controller (AIC) on Apple Silicon, not GICv2. However, the overall pattern — hardware IRQ → controller acknowledgement → dispatch → handler → EOI → return — is universal. XNU's interrupt handling is in `osfmk/arm64/sleh.c` and `osfmk/arm/machine_routines_asm.s`.
+#### 10.4.2 The Matching Algorithm
+
+When a new service registers (`io_service_register()`), the framework calls
+`io_catalogue_start_matching()`. This implements XNU's matching algorithm:
+
+```
+io_catalogue_start_matching(provider)
+  |
+  +-- io_catalogue_find_drivers_for_service(provider)
+  |     |
+  |     +-- For each personality in catalogue:
+  |     |     1. Filter by IOProviderClass -- personality's provider_class must
+  |     |        match a class in provider's meta chain
+  |     |     2. Filter by IOPropertyMatch -- all match_properties must exist
+  |     |        in provider's property table with equal values
+  |     |     3. Collect matching personalities
+  |     |
+  |     +-- Sort by IOProbeScore (descending)
+  |     +-- Group by IOMatchCategory (only highest score per category wins)
+  |
+  +-- For each winning personality:
+        1. Call init_fn(provider) -- creates driver instance
+        2. Call driver->probe(driver, provider, &score)
+        3. If probe succeeds and score is highest:
+             Call driver->start(driver, provider)
+             Attach driver to provider in IOService plane
+             Register driver (triggers recursive matching for its children)
+```
+
+#### 10.4.3 Initialisation Sequence
+
+`iokit_init()` (`io_registry.c`) runs during `kmain()` phase 14:
+
+```
+iokit_init()
+  |
+  +-- io_registry_init()            Create root entry, init catalogue
+  |
+  +-- Create master port             ipc_port_alloc() with IKOT_MASTER_DEVICE
+  |   Register as "uk.co.avltree9798.iokit" in bootstrap
+  |
+  +-- io_framebuffer_init_driver()  Register IOFramebuffer personality
+  |     Sets: IOClass="IOFramebuffer", IOProviderClass="IOService"
+  |     init_fn creates io_framebuffer, links to VirtIO GPU
+  |
+  +-- io_hid_system_init_driver()   Register IOHIDSystem personality
+  |     Sets: IOClass="IOHIDSystem", IOProviderClass="IOService"
+  |     init_fn creates io_hid_system, links to HID event ring
+  |
+  +-- io_catalogue_start_matching(root)  Trigger matching for registered drivers
+```
+
+### 10.5 IOUserClient & External Methods
+
+IOUserClient is the bridge between userland and kernel drivers. When a user process
+wants to talk to a driver, it:
+
+1. Finds the service via `IOServiceGetMatchingService()` (Mach message to master port)
+2. Opens a connection via `IOServiceOpen()` -> calls `service->newUserClient()`
+3. Calls methods via `IOConnectCallMethod()` -> dispatched through external method table
+4. Maps memory via `IOConnectMapMemory()` -> maps driver memory into user address space
+
+#### 10.5.1 External Method Dispatch
+
+Each user client has a **dispatch table** -- an array of method descriptors:
+
+```c
+struct io_external_method_dispatch {       /* io_user_client.h:68 */
+    io_external_method_fn function;        /* The actual handler */
+    uint32_t checkScalarInputCount;        /* Expected # of input scalars */
+    uint32_t checkStructureInputSize;      /* Expected input struct size */
+    uint32_t checkScalarOutputCount;       /* Expected # of output scalars */
+    uint32_t checkStructureOutputSize;     /* Expected output struct size */
+};
+```
+
+When userland calls `IOConnectCallMethod(connection, selector, ...)`, the kernel:
+
+1. Validates `selector < dispatch_table_count`
+2. Validates scalar/structure counts against the dispatch entry
+3. Calls `dispatch[selector].function(client, NULL, args)`
+
+Arguments are passed in a unified structure:
+
+```c
+struct io_external_method_args {           /* io_user_client.h:37 */
+    const uint64_t *scalarInput;           /* Up to 16 scalar inputs */
+    uint32_t scalarInputCount;
+    const void *structureInput;            /* Up to 4096 bytes */
+    uint32_t structureInputSize;
+    uint64_t *scalarOutput;                /* Up to 16 scalar outputs */
+    uint32_t scalarOutputCount;
+    void *structureOutput;                 /* Up to 4096 bytes */
+    uint32_t structureOutputSize;
+};
+```
+
+#### 10.5.2 Memory Mapping
+
+`IOConnectMapMemory()` maps driver-owned physical memory into the calling process:
+
+```
+io_user_client_map_memory(client, type, task, ...)
+  |
+  +-- vtable->clientMemoryForType(client, type, &options, &mem_desc)
+  |     Driver returns an io_memory_descriptor for the requested type
+  |     (e.g., type 0 = VRAM for IOFramebuffer, event ring for IOHIDSystem)
+  |
+  +-- io_memory_descriptor_map(mem_desc, task, ...)
+  |     1. vm_map_enter() -- allocate VA range in task's address space
+  |     2. For each physical page in descriptor:
+  |          vmm_map_page(task->vm_map.pml4, va, pa, prot, cache_mode)
+  |     3. Return io_memory_map with virtual address
+  |
+  +-- Store mapping in client->mappings[] (up to 16)
+  +-- Return virtual address to caller
+```
+
+Cache modes for ARM64 PTE attributes:
+
+| IOKit Mode | ARM64 PTE | Use Case |
+|------------|-----------|----------|
+| `kIOMapInhibitCache` | Device-nGnRnE (MAIR index 1) | MMIO registers |
+| `kIOMapWriteCombineCache` | Normal Non-Cacheable (MAIR index 2) | GPU VRAM |
+| `kIOMapCopybackCache` | Normal Write-Back (MAIR index 0) | Regular memory |
+
+#### 10.5.3 Mach IPC Integration
+
+IOKit operations arrive as Mach messages on IOKit ports. The kernel-side dispatcher is
+`iokit_kobject_server()` (`iokit_mach.c`), which handles messages based on `msgh_id`:
+
+| Message ID | Operation | Port Type |
+|------------|-----------|-----------|
+| 2804 | `GetMatchingServices` | `IKOT_MASTER_DEVICE` |
+| 2873 | `GetMatchingService` | `IKOT_MASTER_DEVICE` |
+| 2812 | `GetProperty` | `IKOT_IOKIT_OBJECT` |
+| 2828 | `SetProperty` | `IKOT_IOKIT_OBJECT` |
+| 2862 | `ServiceOpen` | `IKOT_IOKIT_OBJECT` |
+| 2816 | `ServiceClose` | `IKOT_IOKIT_CONNECT` |
+| 2863 | `MapMemory` | `IKOT_IOKIT_CONNECT` |
+| 2864 | `UnmapMemory` | `IKOT_IOKIT_CONNECT` |
+| 2865 | `CallMethod` | `IKOT_IOKIT_CONNECT` |
+
+The handler allocates reply/scratch buffers from PMM (8 pages = 32 KB) to avoid stack
+overflow, validates all user-supplied string lengths and scalar counts, and dispatches
+to the appropriate IOKit function.
+
+### 10.6 IOFramebuffer -- The GPU Driver
+
+**Source**: `kernel/iokit/io_framebuffer.c`
+
+IOFramebuffer wraps the VirtIO GPU device and exposes it through the IOKit framework.
+
+#### 10.6.1 Data Structures
+
+```c
+struct io_framebuffer {                /* io_framebuffer.h:60 */
+    struct io_service service;         /* Inherits from io_service */
+    uint64_t fb_phys_addr;            /* Physical address of VRAM */
+    uint32_t fb_width, fb_height;     /* Display resolution */
+    uint32_t fb_pitch;                /* Bytes per scanline */
+    uint32_t fb_bpp;                  /* Bits per pixel (32) */
+    uint32_t fb_format;               /* Pixel format */
+    bool fb_active;
+    struct io_memory_descriptor *fb_mem_desc;  /* For memory mapping */
+};
+
+struct io_framebuffer_user_client {    /* io_framebuffer.h:81 */
+    struct io_user_client uc;          /* Inherits from io_user_client */
+    struct io_framebuffer *framebuffer;
+};
+```
+
+#### 10.6.2 External Methods
+
+The framebuffer exposes 3 methods to userland:
+
+| Selector | Name | Inputs | Action |
+|----------|------|--------|--------|
+| 0 | `GetInfo` | None | Returns width, height, pitch, bpp, format as 5 scalars |
+| 1 | `FlushRect` | 4 scalars: x, y, w, h | Calls `virtio_gpu_flush(x, y, w, h)` |
+| 2 | `FlushAll` | None | Calls `virtio_gpu_flush_all()` |
+
+**Memory type 0** (`kIOFBMemoryTypeVRAM`): returns the framebuffer's `fb_mem_desc`,
+which describes the contiguous physical VRAM. The WindowServer maps this into its
+address space with `kIOMapWriteCombineCache` and draws directly into it.
+
+**Important side effect**: when `newUserClient()` is called (WindowServer opening the
+framebuffer), `fbconsole_disable()` is called to stop the text console from painting
+over the GUI. When `clientClose()` is called, `fbconsole_enable()` re-enables it.
+
+### 10.7 IOHIDSystem -- Input Events
+
+**Source**: `kernel/iokit/io_hid_system.c`
+
+IOHIDSystem exposes the HID event ring buffer to userland processes (the WindowServer).
+
+#### 10.7.1 The HID Event Ring
+
+```c
+struct hid_event {                     /* hid_event.h:60 */
+    uint32_t type;                     /* KEY_DOWN, KEY_UP, MOUSE_MOVE, etc. */
+    uint32_t keycode;                  /* Linux keycode or button ID */
+    uint32_t abs_x, abs_y;            /* Absolute tablet coordinates */
+    uint32_t buttons;                  /* Button state bitmask */
+    uint32_t flags;                    /* Modifier flags (shift/ctrl/alt/caps) */
+    uint64_t timestamp;                /* Timer tick count */
+};
+
+struct hid_event_ring {                /* hid_event.h:81 */
+    volatile uint32_t write_idx;       /* Producer (IRQ handler) */
+    volatile uint32_t read_idx;        /* Consumer (WindowServer) */
+    uint32_t size;                     /* 256 */
+    uint32_t _pad;
+    struct hid_event events[256];      /* Ring buffer */
+};
+```
+
+This is a **single-producer, single-consumer (SPSC)** lock-free ring buffer:
+- **Producer**: VirtIO input IRQ handler writes events and advances `write_idx`
+- **Consumer**: WindowServer reads events and advances `read_idx`
+- No locks needed because there is exactly one writer and one reader, and the indices
+  are `volatile` (compiler barrier) with natural ARM64 release/acquire semantics
+
+**Event types**:
+
+| Type | Value | Meaning |
+|------|-------|---------|
+| `HID_EVENT_KEY_DOWN` | 1 | Key pressed |
+| `HID_EVENT_KEY_UP` | 2 | Key released |
+| `HID_EVENT_MOUSE_MOVE` | 3 | Cursor moved (abs_x, abs_y updated) |
+| `HID_EVENT_MOUSE_DOWN` | 4 | Mouse button pressed |
+| `HID_EVENT_MOUSE_UP` | 5 | Mouse button released |
+| `HID_EVENT_SCROLL` | 6 | Scroll wheel event |
+
+**Memory type 0** (`kIOHIDMemoryTypeEventRing`): maps the entire `hid_event_ring`
+structure (header + 256 events) into the WindowServer's address space. The WindowServer
+polls `write_idx != read_idx` to check for new events.
+
+### 10.8 VirtIO Transport Layer
+
+VirtIO is a standard para-virtualised device interface. Instead of emulating real
+hardware (e.g., an Intel E1000 NIC), the hypervisor exposes a simple, efficient
+abstraction. Kiseki uses the **MMIO transport** (memory-mapped I/O), which QEMU's
+`-machine virt` provides.
+
+#### 10.8.1 MMIO Device Discovery
+
+QEMU places up to 32 VirtIO devices at fixed MMIO addresses:
+
+```
+  Base address:  VIRTIO_MMIO_BASE   = 0x0A000000
+  Stride:        VIRTIO_MMIO_STRIDE = 0x200  (512 bytes per slot)
+  IRQ base:      VIRTIO_MMIO_IRQ_BASE = 48   (SPI 48, 49, 50, ...)
+  Count:         32 slots
+
+  Slot i:  base = 0x0A000000 + i * 0x200
+           IRQ  = 48 + i
+```
+
+Each slot has a 512-byte register region. A driver probes by reading:
+- `VIRTIO_MMIO_MAGIC` (offset 0x000): must be `0x74726976` ("virt")
+- `VIRTIO_MMIO_DEVICE_ID` (offset 0x008): device type (0 = empty slot)
+
+#### 10.8.2 VirtIO MMIO Registers
+
+Key registers (all 32-bit, at offsets from slot base):
+
+```
+  Offset  Register              Direction  Purpose
+  ------  --------------------  ---------  ---------------------------
+  0x000   MagicValue            R          Must be 0x74726976
+  0x004   Version               R          1=legacy, 2=modern (v1.0+)
+  0x008   DeviceID              R          1=net, 2=blk, 16=GPU, 18=input
+  0x010   DeviceFeatures        R          Features device supports
+  0x014   DeviceFeaturesSel     W          Select feature word (0 or 1)
+  0x020   DriverFeatures        W          Features driver accepts
+  0x024   DriverFeaturesSel     W          Select feature word
+  0x030   QueueSel              W          Select queue by index
+  0x034   QueueNumMax           R          Max descriptors for selected queue
+  0x038   QueueNum              W          Set actual queue size
+  0x044   QueueReady            W          Mark queue as ready (modern)
+  0x050   QueueNotify           W          Notify device of new buffers
+  0x060   InterruptStatus       R          Pending interrupt bits
+  0x064   InterruptACK          W          Acknowledge (clear) interrupts
+  0x070   Status                R/W        Device status register
+  0x080   QueueDescLow/High     W          Descriptor table phys addr (modern)
+  0x090   QueueAvailLow/High    W          Available ring phys addr (modern)
+  0x0A0   QueueUsedLow/High     W          Used ring phys addr (modern)
+```
+
+#### 10.8.3 Device Initialisation Protocol
+
+Every VirtIO device follows this sequence:
+
+```
+1. Reset:       Write 0 to Status register
+2. ACKNOWLEDGE: Set status bit 0 -- "I see you"
+3. DRIVER:      Set status bit 1 -- "I know how to drive you"
+4. Negotiate:   Read DeviceFeatures, AND with driver features,
+                write to DriverFeatures
+5. FEATURES_OK: Set status bit 3 -- "We agree on features" (modern only)
+6. Queue setup: For each virtqueue:
+                  - Select queue (QueueSel)
+                  - Read QueueNumMax
+                  - Allocate descriptor/avail/used ring memory
+                  - Write addresses to QueueDesc/Avail/Used registers
+                  - Set QueueReady = 1
+7. DRIVER_OK:   Set status bit 2 -- "I'm ready to operate"
+```
+
+#### 10.8.4 Virtqueues
+
+A **virtqueue** is a pair of ring buffers shared between driver and device:
+
+```
+  +-------------------------------------------+
+  | Descriptor Table                          |
+  | (array of virtq_desc, each 16 bytes)      |
+  |  +------+------+-------+------+------+    |
+  |  | addr | len  | flags | next | ...  |    |
+  |  +------+------+-------+------+------+    |
+  +-------------------------------------------+
+  | Available Ring (driver -> device)          |
+  |  flags | idx | ring[0] | ring[1] | ...    |
+  +-------------------------------------------+
+  | Used Ring (device -> driver)               |
+  |  flags | idx | {id,len}[0] | {id,len}[1]  |
+  +-------------------------------------------+
+```
+
+```c
+struct virtq_desc {                /* virtio.h:111, 16 bytes */
+    uint64_t addr;                 /* Physical address of buffer */
+    uint32_t len;                  /* Buffer length */
+    uint16_t flags;                /* NEXT=1, WRITE=2, INDIRECT=4 */
+    uint16_t next;                 /* Next descriptor in chain */
+} __packed;
+```
+
+**How it works**:
+
+1. **Driver posts a request**: allocates descriptor(s) from the free list, fills in
+   buffer addresses, chains them with `VIRTQ_DESC_F_NEXT` + `next`. Writes the head
+   descriptor index to `avail->ring[avail->idx % num]`, increments `avail->idx`,
+   writes to `QueueNotify`.
+
+2. **Device processes the request**: reads from the available ring, follows the
+   descriptor chain, reads/writes the buffers, then posts the completed descriptor head
+   to `used->ring[used->idx % num]` with total bytes written, increments `used->idx`.
+
+3. **Driver collects the response**: compares `used->idx` with its `last_used_idx`.
+   For each new entry: processes the result, frees descriptors back to the free list.
+
+Free descriptors are managed as a **singly-linked list** through the `next` field,
+with `free_head` tracking the list head and `num_free` the count.
+
+#### 10.8.5 Shared VirtIO Helpers
+
+`kernel/drivers/virtio/virtio_blk.c` contains shared initialisation functions used by
+all VirtIO drivers:
+
+| Function | Line | Purpose |
+|----------|------|---------|
+| `virtio_init_device()` | -- | Reset, ACKNOWLEDGE, DRIVER status |
+| `virtio_negotiate_features()` | -- | Read device features, AND with driver, write back |
+| `virtio_alloc_queue()` | -- | Allocate and set up a virtqueue (descriptors + rings) |
+
+### 10.9 VirtIO GPU Protocol
+
+**Source**: `kernel/drivers/virtio/virtio_gpu.c` (1,137 lines),
+`kernel/include/drivers/virtio_gpu.h` (294 lines)
+
+#### 10.9.1 GPU Architecture
+
+The VirtIO GPU is a **2D display controller**. It does not do 3D rendering (that would
+require the VirGL extension, which Kiseki does not use). The driver allocates a
+**host resource** (a rectangle of pixels), attaches **backing storage** (physical pages
+that serve as VRAM), and tells the GPU to scanout (display) that resource.
+
+```
+  +---------------------------+
+  | Guest Physical Memory     |
+  | (VRAM backing pages)      |  <-- CPU writes pixels here
+  +---------------------------+
+           |
+           | TRANSFER_TO_HOST_2D
+           v
+  +---------------------------+
+  | Host Resource (GPU-side)  |  <-- GPU's internal copy
+  +---------------------------+
+           |
+           | RESOURCE_FLUSH
+           v
+  +---------------------------+
+  | Display Output            |  <-- What you see on screen
+  +---------------------------+
+```
+
+#### 10.9.2 Framebuffer Info
+
+```c
+struct framebuffer_info {              /* virtio_gpu.h:228 */
+    uint64_t phys_addr;               /* Physical address of VRAM */
+    uint32_t width, height;           /* Resolution (e.g., 1024x768) */
+    uint32_t pitch;                   /* Bytes per row (width * 4) */
+    uint32_t bpp;                     /* Bits per pixel (32) */
+    uint32_t format;                  /* VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM */
+    bool active;
+};
+```
+
+#### 10.9.3 GPU Command Protocol
+
+All commands go through the **controlq** (queue 0). Each command is a request-response
+pair: the driver builds a request struct, posts it as a descriptor, and the GPU writes
+a response struct to a second descriptor.
+
+Key command types:
+
+| Command | ID | Purpose |
+|---------|----|---------|
+| `GET_DISPLAY_INFO` | 0x0100 | Query available displays and resolutions |
+| `RESOURCE_CREATE_2D` | 0x0101 | Allocate a GPU-side pixel buffer |
+| `RESOURCE_ATTACH_BACKING` | 0x0106 | Link guest physical pages to resource |
+| `SET_SCANOUT` | 0x0103 | Assign resource to a display output |
+| `TRANSFER_TO_HOST_2D` | 0x0105 | Copy pixels from guest to host resource |
+| `RESOURCE_FLUSH` | 0x0104 | Push host resource to display |
+
+#### 10.9.4 GPU Initialisation
+
+```
+virtio_gpu_init()
+  |
+  +-- Scan MMIO slots for device_id == 16 (GPU)
+  +-- Standard VirtIO init (reset, negotiate, queue setup)
+  |     Features: none requested (2D only, no VirGL)
+  |
+  +-- GET_DISPLAY_INFO
+  |     Response contains display resolution (e.g., 1024x768)
+  |
+  +-- Allocate VRAM backing pages:
+  |     pmm_alloc_pages(order)  -- contiguous physical pages
+  |     Remap as Non-Cacheable (ARM64 Normal-NC) for DMA coherence
+  |
+  +-- RESOURCE_CREATE_2D (resource_id=1, format=B8G8R8X8, width, height)
+  |
+  +-- RESOURCE_ATTACH_BACKING (resource_id=1, backing pages as scatter-gather)
+  |     Uses 3-descriptor chain: [request | page_list | response]
+  |     Each entry: { phys_addr, length }
+  |
+  +-- SET_SCANOUT (scanout=0, resource_id=1, rect=full screen)
+  |
+  +-- Initial TRANSFER_TO_HOST_2D + RESOURCE_FLUSH (display initial content)
+  |
+  +-- Fill framebuffer_info struct
+  +-- Enable IRQ via GIC
+```
+
+#### 10.9.5 Flush Operation
+
+When the WindowServer (or fbconsole) modifies pixels in VRAM:
+
+```
+virtio_gpu_flush(x, y, width, height)       [virtio_gpu.c]
+  |
+  +-- Build TRANSFER_TO_HOST_2D command
+  |     rect = {x, y, width, height}
+  |     offset = y * pitch + x * 4
+  |     resource_id = 1
+  |
+  +-- Post to controlq, notify device
+  |
+  +-- Poll for response (busy-wait on used ring)
+  |
+  +-- Build RESOURCE_FLUSH command
+  |     rect = {x, y, width, height}
+  |     resource_id = 1
+  |
+  +-- Post to controlq, notify device
+  |
+  +-- Poll for response
+```
+
+**QEMU TCG compatibility note**: the GPU driver uses `spin_lock_irqsave` but
+**re-enables IRQs** during the poll loop. QEMU's TCG (Tiny Code Generator) is
+single-threaded, so if IRQs are disabled during the poll, the virtual device can never
+complete the request -- deadlock. The re-enable window lets timer ticks and other IRQs
+fire during the wait.
+
+### 10.10 VirtIO Block, Network & Input
+
+#### 10.10.1 VirtIO Block Device
+
+**Source**: `kernel/drivers/virtio/virtio_blk.c` (582 lines)
+
+The block device provides sector-level read/write access to a virtual disk. It uses
+a single virtqueue (queue 0) with 3-descriptor chains:
+
+```
+  Descriptor 0 (device-read):    struct virtio_blk_req header
+  Descriptor 1 (device-read or   Data buffer (sector data)
+                device-write):
+  Descriptor 2 (device-write):   1-byte status (0=OK, 1=IOERR, 2=UNSUPP)
+```
+
+```c
+struct virtio_blk_req {            /* virtio.h:170 */
+    uint32_t type;                 /* VIRTIO_BLK_T_IN (read) or _OUT (write) */
+    uint32_t reserved;
+    uint64_t sector;               /* Starting sector (512 bytes each) */
+} __packed;
+```
+
+For reads: desc 0 flags = `F_NEXT`, desc 1 flags = `F_NEXT | F_WRITE`, desc 2 = `F_WRITE`
+For writes: desc 0 flags = `F_NEXT`, desc 1 flags = `F_NEXT`, desc 2 = `F_WRITE`
+
+The driver is **polling-based** (no IRQ-driven completion) -- after submitting a request,
+it busy-waits on the used ring with `spin_lock` (IRQs enabled during poll for TCG compat).
+
+The block device registers with the block device abstraction layer (`blkdev_register()`),
+which provides a uniform `blkdev_read()` / `blkdev_write()` interface used by the ext4
+filesystem.
+
+#### 10.10.2 VirtIO Network Device
+
+Covered in detail in Chapter 9 (section 9.1). Key points:
+- Device ID 1, two queues (RX=0, TX=1)
+- 10-byte `virtio_net_hdr` prepended to every packet
+- RX uses drain-then-ACK-then-recheck pattern for level-triggered IRQs
+- TX is polling-based; deliberately does NOT ACK shared ISR to avoid clearing RX IRQs
+
+#### 10.10.3 VirtIO Input Device
+
+**Source**: `kernel/drivers/virtio/virtio_input.c` (959 lines)
+
+The VirtIO input device emulates Linux `evdev` events. Kiseki probes for **two** input
+devices: a **keyboard** and a **tablet** (absolute pointing device), distinguished by
+querying the config space `EV_BITS`:
+
+```
+virtio_input_init()
+  |
+  +-- For each MMIO slot with device_id == 18 (INPUT):
+  |     Write VIRTIO_INPUT_CFG_EV_BITS with subsel=EV_KEY to config space
+  |     Read back: if bitmap has any KEY_* bits -> keyboard
+  |     Write VIRTIO_INPUT_CFG_EV_BITS with subsel=EV_ABS to config space
+  |     Read back: if bitmap has ABS_X bit -> tablet
+  |
+  +-- Keyboard: standard VirtIO init, eventq (queue 0), pre-post 32 buffers
+  +-- Tablet: same setup on separate device
+```
+
+**Event processing** (IRQ handler):
+
+```
+virtio_input_irq_handler()
+  |
+  +-- Drain used ring (completed event buffers)
+  |
+  +-- For each event:
+  |     struct virtio_input_event { type, code, value }
+  |
+  +-- type == EV_KEY?
+  |     +-- Modifier tracking: track shift/ctrl/alt/capslock state
+  |     +-- keycode_to_ascii[code] lookup (US QWERTY keymap)
+  |     +-- Apply shift/capslock transformations
+  |     +-- Push HID_EVENT_KEY_DOWN or KEY_UP to hid_event_ring
+  |     +-- Feed character to fbconsole TTY: tty_input_char_tp()
+  |
+  +-- type == EV_SYN? (tablet batches ABS_X + ABS_Y + SYN)
+  |     +-- Push HID_EVENT_MOUSE_MOVE with abs_x, abs_y
+  |
+  +-- Re-post buffer to eventq for next event
+```
+
+The keyboard driver includes a **full US QWERTY keymap** with shifted variants (e.g.,
+`KEY_A` -> 'a' / 'A', `KEY_1` -> '1' / '!') and recognises escape sequences for
+function keys, arrows, home/end/etc.
+
+### 10.11 GICv2 -- The Interrupt Controller
+
+**Source**: `kernel/drivers/gic/gicv2.c` (150 lines),
+`kernel/include/drivers/gic.h` (71 lines)
+
+#### 10.11.1 What Is the GIC?
+
+The **Generic Interrupt Controller** (GIC) is ARM's standard interrupt controller. It
+routes hardware interrupts from peripherals to CPU cores. GICv2 has two components:
+
+```
+  +-----------------+          +------------------+
+  | Distributor     |          | CPU Interface    |
+  | (GICD)          |          | (GICC)           |
+  | 0x08000000      |          | 0x08010000       |
+  |                 |          |                  |
+  | - Enable/disable|          | - Acknowledge    |
+  |   individual    |  ------> |   interrupt      |
+  |   IRQs          |          | - Signal EOI     |
+  | - Set priority  |          | - Priority mask  |
+  | - Route to CPU  |          |                  |
+  +-----------------+          +------------------+
+```
+
+#### 10.11.2 Interrupt Types
+
+| Type | Range | Scope | Examples |
+|------|-------|-------|---------|
+| SGI (Software Generated) | 0-15 | Per-CPU, triggered by software | IPI_RESCHEDULE(0), IPI_TLB_FLUSH(1), IPI_HALT(2) |
+| PPI (Private Peripheral) | 16-31 | Per-CPU, hardware | Timer(27) |
+| SPI (Shared Peripheral) | 32+ | Shared, routed to any CPU | UART(33), VirtIO(48+) |
+
+#### 10.11.3 GIC Initialisation
+
+```
+gic_init()                   -- Called once on boot CPU
+  |
+  +-- Disable distributor (GICD_CTLR = 0)
+  +-- Set all SPIs to:
+  |     - Priority 0xA0 (medium)
+  |     - Target CPU 0 (route all to core 0)
+  |     - Level-triggered
+  |     - Disabled by default
+  +-- Enable distributor (GICD_CTLR = 1)
+  +-- Enable CPU interface (GICC_CTLR = 1)
+  +-- Set priority mask = 0xFF (accept all priorities)
+
+gic_init_percpu()            -- Called on each secondary CPU
+  |
+  +-- Enable CPU interface
+  +-- Set priority mask = 0xFF
+```
+
+#### 10.11.4 Interrupt Handling Flow
+
+When a hardware interrupt fires:
+
+```
+1. CPU takes IRQ exception -> vectors.S -> el1_irq_handler
+2. gic_acknowledge() -- read GICC_IAR, returns interrupt ID
+3. Dispatch by ID:
+     ID < 16:        SGI (IPI) -> handle_ipi()
+     ID == 27:       Timer     -> timer_handler()
+     ID == 33:       UART      -> uart_irq_handler()
+     ID == 48+:      VirtIO    -> virtio_*_irq_handler()
+4. gic_end_of_interrupt(id) -- write GICC_EOIR
+```
+
+#### 10.11.5 Inter-Processor Interrupts (IPI)
+
+IPIs are sent via SGIs (Software Generated Interrupts):
+
+```c
+void gic_send_sgi(uint32_t sgi_id, uint32_t target_cpu);
+```
+
+This writes to `GICD_SGIR` with the target CPU in the target list field. Used for:
+
+| IPI | ID | Purpose | Sender |
+|-----|----|---------|--------|
+| `IPI_RESCHEDULE` | 0 | Wake idle CPU for work stealing | `sched_wakeup()` |
+| `IPI_TLB_FLUSH` | 1 | Cross-CPU TLB invalidation | `vmm_switch_address_space()` |
+| `IPI_HALT` | 2 | Stop CPU for panic/shutdown | `panic()` |
+
+### 10.12 PL011 UART
+
+**Source**: `kernel/drivers/uart/pl011.c` (174 lines)
+
+The PL011 is ARM's standard UART (serial port). On QEMU virt, it is at `0x09000000`
+(SPI IRQ 33). It provides the lowest-level I/O channel -- the first thing that works
+during boot, before the framebuffer or any other device.
+
+Key functions:
+
+| Function | Purpose |
+|----------|---------|
+| `uart_init()` | Configure baud rate, enable FIFOs, enable RX interrupt |
+| `uart_putc(c)` | Spin-wait for TX FIFO not full, write character |
+| `uart_getc()` | Spin-wait for RX FIFO not empty, read character |
+| `uart_irq_handler()` | Drain RX FIFO, feed each character to `tty_input_char()` |
+
+The UART is the **primary debug output** (`kprintf()` writes here) and also serves as
+the console TTY's backing device. When the fbconsole is active, output goes to both
+UART and framebuffer.
+
+### 10.13 TTY Subsystem
+
+**Source**: `kernel/kern/tty.c` (801 lines), `kernel/include/kern/tty.h` (315 lines)
+
+#### 10.13.1 What Is a TTY?
+
+A TTY (teletypewriter) is the kernel's abstraction for a text I/O channel. It sits
+between a **device** (UART, framebuffer, PTY) and **user processes**, providing:
+
+- **Line discipline**: buffered editing (backspace, kill line) in canonical mode
+- **Raw mode**: unbuffered character-at-a-time I/O for programs like `vi`
+- **Signal generation**: Ctrl-C -> SIGINT, Ctrl-\ -> SIGQUIT, Ctrl-Z -> SIGTSTP
+- **Echo**: optionally reflect typed characters back to the display
+- **Output processing**: convert `\n` to `\r\n` for the terminal
+
+#### 10.13.2 The termios Structure
+
+```c
+struct termios {                   /* tty.h:34, matches macOS arm64 layout */
+    tcflag_t c_iflag;              /* Input flags (ICRNL, IGNCR, etc.) */
+    tcflag_t c_oflag;              /* Output flags (OPOST, ONLCR) */
+    tcflag_t c_cflag;              /* Control flags (baud, parity, etc.) */
+    tcflag_t c_lflag;              /* Local flags (ICANON, ECHO, ISIG, etc.) */
+    cc_t     c_cc[20];            /* Control characters (VEOF, VINTR, etc.) */
+    speed_t  c_ispeed;            /* Input baud rate */
+    speed_t  c_ospeed;            /* Output baud rate */
+};
+```
+
+Note: `tcflag_t` is `uint64_t` on macOS arm64 (not `uint32_t` as on Linux). Kiseki
+matches the macOS layout exactly so that userland headers are compatible.
+
+Key `c_lflag` bits:
+
+| Flag | Value | Meaning |
+|------|-------|---------|
+| `ECHO` | 0x00000008 | Echo input characters |
+| `ECHOE` | 0x00000002 | Echo backspace as `\b \b` |
+| `ECHOK` | 0x00000004 | Echo kill as newline |
+| `ICANON` | 0x00000100 | Canonical (line-buffered) mode |
+| `ISIG` | 0x00000080 | Generate signals (SIGINT etc.) |
+| `IEXTEN` | 0x00000400 | Extended processing |
+| `NOFLSH` | 0x80000000 | Don't flush after signal |
+
+Key control characters (`c_cc` indices):
+
+| Index | Name | Default | Meaning |
+|-------|------|---------|---------|
+| 0 | `VEOF` | Ctrl-D | End of file |
+| 8 | `VINTR` | Ctrl-C | Generate SIGINT |
+| 9 | `VQUIT` | Ctrl-\ | Generate SIGQUIT |
+| 10 | `VSUSP` | Ctrl-Z | Generate SIGTSTP |
+| 3 | `VERASE` | DEL(0x7F) | Erase one character |
+| 5 | `VKILL` | Ctrl-U | Kill entire line |
+| 14 | `VWERASE` | Ctrl-W | Erase one word |
+
+#### 10.13.3 The TTY Structure
+
+```c
+struct tty {                       /* tty.h:194 */
+    struct termios t_termios;      /* Current terminal settings */
+    struct winsize t_winsize;      /* Window size (rows x cols) */
+    pid_t t_pgrp;                  /* Foreground process group */
+    pid_t t_session;               /* Session leader PID */
+    uint32_t t_flags;              /* TTY_OPENED, TTY_CTTY */
+    void (*t_putc)(char c);        /* Output function (device-specific) */
+    void *t_devprivate;            /* Device-specific private data */
+    char t_linebuf[1024];          /* Canonical mode line buffer */
+    int t_linepos;                 /* Current position in line buffer */
+    int t_lineout;                 /* Read position for user reads */
+    char t_rawbuf[256];            /* Raw mode ring buffer */
+    int t_rawhead, t_rawtail, t_rawcount;
+};
+```
+
+#### 10.13.4 Canonical vs Raw Mode
+
+**Canonical mode** (`ICANON` set -- default):
+- Characters are buffered in `t_linebuf` until newline or EOF
+- Backspace (`VERASE`) deletes the last character (with `\b \b` echo if `ECHOE`)
+- Kill (`VKILL`) discards the entire line
+- Word-erase (`VWERASE`) deletes back to the last space
+- `tty_read()` blocks (via `thread_sleep_on()`) until a complete line is available
+
+**Raw mode** (`ICANON` clear):
+- Characters are delivered immediately to `t_rawbuf` ring
+- No editing (backspace is just another character)
+- `tty_read()` returns as soon as `VMIN` characters are available or `VTIME` expires
+
+#### 10.13.5 Signal Generation
+
+When `ISIG` is set and a control character is typed:
+
+| Character | Signal | Default Action |
+|-----------|--------|----------------|
+| `VINTR` (Ctrl-C) | `SIGINT` | Terminate process |
+| `VQUIT` (Ctrl-\) | `SIGQUIT` | Terminate + core dump |
+| `VSUSP` (Ctrl-Z) | `SIGTSTP` | Stop (suspend) process |
+
+The signal is sent to the **foreground process group** (`t_pgrp`) via `kill_pg()`.
+
+### 10.14 Pseudo-Terminals (PTY)
+
+**Source**: `kernel/kern/pty.c` (604 lines), `kernel/include/kern/pty.h` (158 lines)
+
+#### 10.14.1 What Is a PTY?
+
+A **pseudo-terminal** is a pair of virtual devices that emulate a serial connection:
+
+```
+  +-----------+                    +-----------+
+  | Terminal  |  <-- user I/O -->  | Shell/App |
+  | Emulator  |                    |           |
+  | (master)  |                    | (slave)   |
+  +-----+-----+                    +-----+-----+
+        |                                |
+  master fd                         slave fd
+        |                                |
+        v                                v
+  +-----+-------------------------------+-----+
+  |           PTY Pair (kernel)               |
+  |                                           |
+  |  m2s ring buf (4096B)  --->  slave TTY    |
+  |  (master write -> slave read)             |
+  |                                           |
+  |  s2m ring buf (4096B)  <---  slave TTY    |
+  |  (slave write -> master read)             |
+  +-------------------------------------------+
+```
+
+The **Terminal.app** opens the master side, the **shell** runs on the slave side.
+Characters typed by the user flow: Terminal -> master write -> m2s buffer -> slave
+read. Characters output by the shell flow: slave write -> s2m buffer -> master read ->
+Terminal displays them.
+
+#### 10.14.2 PTY Data Structure
+
+```c
+struct pty {                       /* pty.h:39 */
+    bool pt_active;                /* Pair is allocated */
+    int pt_index;                  /* PTY number (0-15) */
+    struct tty pt_slave_tty;       /* Full TTY with line discipline */
+
+    /* Master -> Slave ring buffer */
+    uint8_t pt_m2s[4096];
+    uint32_t pt_m2s_head, pt_m2s_tail, pt_m2s_count;
+    spinlock_t pt_m2s_lock;
+
+    /* Slave -> Master ring buffer */
+    uint8_t pt_s2m[4096];
+    uint32_t pt_s2m_head, pt_s2m_tail, pt_s2m_count;
+    spinlock_t pt_s2m_lock;
+
+    int pt_master_open;            /* Master open count */
+    int pt_slave_open;             /* Slave open count */
+};
+```
+
+Kiseki has a pool of **16 PTY pairs** (`PTY_MAX = 16`). The slave side has a full
+`struct tty` with line discipline, so canonical mode editing (backspace, kill, etc.)
+works through the PTY just as it does through the console.
+
+#### 10.14.3 PTY Operations
+
+| Function | Direction | Description |
+|----------|-----------|-------------|
+| `pty_master_write()` | Terminal -> Shell | Write to m2s ring, feed to slave TTY's `tty_input_char_tp()` |
+| `pty_slave_read()` | Shell reads | Sleep on `&pp->pt_m2s_count` until data available in m2s |
+| `pty_slave_write()` | Shell -> Terminal | Process through slave TTY's OPOST (e.g., `\n` -> `\r\n`), write to s2m |
+| `pty_master_read()` | Terminal reads | Sleep on `&pp->pt_s2m_count` until data available in s2m |
+
+### 10.15 Framebuffer Console
+
+**Source**: `kernel/kern/fbconsole.c` (1,116 lines)
+
+The framebuffer console renders text onto the GPU framebuffer using an embedded 8x16
+bitmap font. It is the kernel's primary visual output before the WindowServer starts.
+
+#### 10.15.1 Architecture
+
+```
+  kprintf("Hello")
+       |
+       v
+  fbconsole_putc('H')
+       |
+       +-- VT100/ANSI escape sequence parser
+       |     Handles: cursor movement (\e[A/B/C/D), erase (\e[J/K),
+       |     SGR colours (\e[31m), DEC private modes (\e[?25h cursor show)
+       |
+       +-- Render glyph from font8x16[] bitmap
+       |     Each character: 16 bytes (16 rows of 8 pixels)
+       |     Write 32-bit ARGB pixels directly to VRAM
+       |
+       +-- Dirty region tracking
+       |     Track bounding box of modified cells
+       |     virtio_gpu_flush() only the dirty region
+       |
+       +-- Scroll: memmove entire framebuffer up by font_height pixels
+```
+
+#### 10.15.2 VT100/ANSI Support
+
+The fbconsole parses VT100/ANSI escape sequences for full terminal emulation:
+
+| Sequence | Action |
+|----------|--------|
+| `\e[nA` | Cursor up n lines |
+| `\e[nB` | Cursor down n lines |
+| `\e[nC` | Cursor forward n columns |
+| `\e[nD` | Cursor backward n columns |
+| `\e[H` | Cursor to home (0,0) |
+| `\e[n;mH` | Cursor to row n, column m |
+| `\e[J` | Erase from cursor to end of screen |
+| `\e[2J` | Erase entire screen |
+| `\e[K` | Erase from cursor to end of line |
+| `\e[nm` | SGR: set text attributes (30-37 = fg colour, 40-47 = bg colour, 0 = reset) |
+| `\e[?25h` | Show cursor |
+| `\e[?25l` | Hide cursor |
+| `\e[s` | Save cursor position |
+| `\e[u` | Restore cursor position |
+
+ANSI colour palette (8 colours):
+
+```
+  30/40: Black     31/41: Red       32/42: Green    33/43: Yellow
+  34/44: Blue      35/45: Magenta   36/46: Cyan     37/47: White
+```
+
+#### 10.15.3 Disable/Enable for WindowServer
+
+When the WindowServer opens the IOFramebuffer user client:
+- `fbconsole_disable()` -- stops rendering to framebuffer (but continues to serial)
+- The WindowServer now owns the framebuffer and draws its own content
+
+When the WindowServer exits (or crashes):
+- `fbconsole_enable()` -- resumes framebuffer rendering, redraws screen
+
+### 10.16 Comparison with XNU/macOS IOKit
+
+| Feature | Kiseki | macOS/XNU |
+|---------|--------|-----------|
+| Language | C (struct embedding + vtables) | C++ (libkern classes) |
+| Object allocation | Static pools | Zone-based `OSObject::operator new` |
+| Properties | Flat 64-entry array | `OSDictionary` with hash table |
+| Matching | Linear catalogue scan | `IOCatalogue` with personality dictionaries |
+| Work loops | Kernel thread + event chain | `IOWorkLoop` (same pattern, C++ API) |
+| User client | External method dispatch table | Same (`IOExternalMethodDispatch`) |
+| Memory mapping | `vmm_map_page()` direct | `IOMemoryDescriptor::createMappingInTask()` |
+| Mach integration | MIG-style message IDs (2800-2873) | Same message ID range |
+| Master port | `"uk.co.avltree9798.iokit"` | `kIOMasterPortDefault` |
+| Kobject types | `IKOT_IOKIT_OBJECT/CONNECT/MASTER_DEVICE` | Same (identical values) |
+| Error codes | `kIOReturn*` values match XNU | `<IOKit/IOReturn.h>` |
 
 ---
 
-## Chapter 11: Userland — dyld, libSystem, crt0
+## Chapter 11: Userland -- dyld, libSystem, crt0
 
-Everything we have discussed so far runs inside the kernel (EL1). This chapter crosses the boundary into user space (EL0) and examines the three components that make it possible for programs to run: the dynamic linker that loads shared libraries, the C library that wraps syscalls into usable functions, and the startup code that bridges the gap between the kernel's `execve()` and your `main()`.
+Every user process in Kiseki starts the same way: the kernel maps the Mach-O executable
+into memory, maps the dynamic linker (`/usr/lib/dyld`), and jumps to dyld's entry point.
+dyld resolves all dynamic library dependencies, patches relocations, runs initialisers,
+and finally calls `main()`. This chapter covers that entire pipeline, plus the C library
+(`libSystem.B.dylib`) that provides POSIX and Mach APIs to every program.
 
 ### 11.1 The Mach-O Binary Format
 
-Kiseki uses the Mach-O binary format — the same format used by macOS, iOS, tvOS, watchOS, and visionOS. Every executable, dynamic library, and the dynamic linker itself is a Mach-O file.
+Mach-O (Mach Object) is the binary format used by macOS, iOS, and Kiseki. Every
+executable, dylib, and the dynamic linker itself are Mach-O files.
 
-A Mach-O file has three regions:
+#### 11.1.1 File Structure
 
 ```
-┌──────────────────────────────────────────────┐
-│ Mach-O Header (mach_header_64)               │
-│   magic: 0xFEEDFACF (64-bit)                │
-│   filetype: MH_EXECUTE / MH_DYLIB / ...     │
-│   ncmds: number of load commands             │
-├──────────────────────────────────────────────┤
-│ Load Commands                                 │
-│   LC_SEGMENT_64: __TEXT (code)               │
-│   LC_SEGMENT_64: __DATA (globals)            │
-│   LC_SEGMENT_64: __LINKEDIT (symbols, etc.)  │
-│   LC_DYLD_INFO_ONLY: rebase/bind opcodes     │
-│   LC_LOAD_DYLIB: "libSystem.B.dylib"         │
-│   LC_MAIN: entry point offset                 │
-│   ...                                         │
-├──────────────────────────────────────────────┤
-│ Segment Data                                  │
-│   __TEXT: executable code + const strings     │
-│   __DATA: writable globals, GOT, la_symbol_ptr│
-│   __LINKEDIT: symbol table, string table,     │
-│               rebase/bind opcode streams      │
-└──────────────────────────────────────────────┘
+  +---------------------------+
+  | Mach-O Header (32 bytes)  |   magic, cputype, filetype, ncmds
+  +---------------------------+
+  | Load Command 1            |   LC_SEGMENT_64 "__TEXT"
+  | Load Command 2            |   LC_SEGMENT_64 "__DATA"
+  | Load Command 3            |   LC_SEGMENT_64 "__LINKEDIT"
+  | Load Command 4            |   LC_LOAD_DYLIB "/usr/lib/libSystem.B.dylib"
+  | Load Command 5            |   LC_DYLD_INFO_ONLY (or LC_DYLD_CHAINED_FIXUPS)
+  | Load Command 6            |   LC_SYMTAB
+  | Load Command 7            |   LC_MAIN
+  | ...                       |
+  +---------------------------+
+  | __TEXT Segment             |   Code, string constants, export trie
+  +---------------------------+
+  | __DATA Segment             |   Global variables, GOT, lazy pointers
+  +---------------------------+
+  | __LINKEDIT Segment         |   Symbol table, string table, fixup opcodes
+  +---------------------------+
 ```
 
-Key load commands that dyld cares about:
-
-| Load Command | Purpose |
-|-------------|---------|
-| `LC_SEGMENT_64` | Defines a memory region (address, size, permissions) |
-| `LC_DYLD_INFO_ONLY` | Offsets to rebase, bind, lazy bind, and export opcode streams |
-| `LC_DYLD_CHAINED_FIXUPS` | Modern alternative to DYLD_INFO (chained pointer format) |
-| `LC_DYLD_EXPORTS_TRIE` | Export symbol trie (for symbol resolution) |
-| `LC_LOAD_DYLIB` | Names a required dynamic library |
-| `LC_MAIN` | Entry point (offset into __TEXT) |
-| `LC_UNIXTHREAD` | Legacy entry point (used by dyld itself) |
-| `LC_ID_DYLIB` | Self-identification for dylibs |
-
-### 11.2 dyld — The Dynamic Linker
-
-dyld (`userland/dyld/dyld.c`, 2418 lines) is the first user-space code that runs after `execve()`. The kernel maps the main binary and dyld into memory, then jumps to dyld's `_start`. dyld's job is to prepare the process for execution:
-
-```mermaid
-flowchart TD
-    KERNEL["Kernel: execve()<br/>Map main binary + dyld into memory<br/>Set up user stack (argc, argv, envp)<br/>Jump to dyld's _start"]
-    KERNEL --> START["dyld: _start (start.S:31)<br/>Extract mach_header, argc, argv, envp<br/>from stack"]
-    START --> MAIN["dyld_main()"]
-    MAIN --> PARSE["1. Parse main binary's load commands<br/>Find LC_LOAD_DYLIB entries"]
-    PARSE --> LOAD["2. Load each required dylib<br/>Open file, read Mach-O header<br/>mmap() segments at correct addresses"]
-    LOAD --> REBASE["3. Process rebase opcodes<br/>Fix up pointers that moved<br/>due to ASLR slide"]
-    REBASE --> BIND["4. Process bind opcodes<br/>Resolve external symbols<br/>Write GOT entries"]
-    BIND --> LAZY["5. Eagerly resolve lazy bindings<br/>(skip dyld_stub_binder complexity)"]
-    LAZY --> ENTRY["6. Find LC_MAIN → entry point<br/>Jump to main binary's _start / main()"]
-```
-
-#### Freestanding Design
-
-dyld is **completely freestanding** — it cannot use libSystem because libSystem has not been loaded yet (dyld is the one who loads it). Every operation uses raw syscalls:
+The **Mach-O header** (`dyld.c:262`):
 
 ```c
-/* userland/dyld/dyld.c:84-115 — Raw syscall interface */
+struct mach_header_64 {
+    uint32_t magic;         /* 0xFEEDFACF (MH_MAGIC_64) */
+    uint32_t cputype;       /* CPU_TYPE_ARM64 (0x0100000C) */
+    uint32_t cpusubtype;
+    uint32_t filetype;      /* MH_EXECUTE=2, MH_DYLIB=6, MH_DYLINKER=7 */
+    uint32_t ncmds;         /* Number of load commands */
+    uint32_t sizeofcmds;    /* Total size of load commands */
+    uint32_t flags;         /* MH_PIE = 0x00200000 */
+    uint32_t reserved;
+};
+```
 
+#### 11.1.2 Key Load Commands
+
+| Command | ID | Purpose |
+|---------|------|---------|
+| `LC_SEGMENT_64` | 0x19 | Maps a segment (text, data, etc.) into memory |
+| `LC_LOAD_DYLIB` | 0x0C | Names a required dynamic library |
+| `LC_MAIN` | 0x80000028 | Specifies offset of `main()` from `__TEXT` base |
+| `LC_SYMTAB` | 0x02 | Location of symbol + string tables |
+| `LC_DYLD_INFO_ONLY` | 0x80000022 | Rebase/bind/lazy-bind/export opcode streams |
+| `LC_DYLD_CHAINED_FIXUPS` | 0x80000034 | Modern chained fixup format |
+| `LC_DYLD_EXPORTS_TRIE` | 0x80000033 | Compressed export symbol trie |
+
+### 11.2 dyld -- The Dynamic Linker
+
+**Source**: `userland/dyld/dyld.c` (2,438 lines), `userland/dyld/start.S` (110 lines)
+
+dyld is a fully **freestanding** program -- it defines its own types, its own syscall
+wrappers, its own string functions, and its own Mach-O parser. It has zero library
+dependencies. It is compiled as an `MH_DYLINKER` binary.
+
+#### 11.2.1 The Boot-to-main() Pipeline
+
+```
+  Kernel (proc.c: execve)
+       |
+       | Maps main binary's segments into user address space
+       | Maps /usr/lib/dyld into user address space
+       | Pushes stack: [mach_header_ptr, argc, argv[], 0, envp[], 0, apple[], 0]
+       | Sets ELR_EL1 = dyld's _start (from LC_UNIXTHREAD)
+       |
+       v
+  dyld/start.S :: _start
+       |
+       | Extract: x0=mach_header, x1=argc, x2=argv, x3=envp, x4=apple
+       |
+       v
+  dyld/dyld.c :: dyld_main()          [line 1947]
+       |
+       | Phase 1: Parse main binary
+       |   - Validate MH_MAGIC_64 and MH_EXECUTE
+       |   - Compute ASLR slide = (runtime addr) - (linked vmaddr of __TEXT)
+       |   - Walk all load commands, extract segment/symbol/fixup info
+       |
+       | Phase 2: Load required dylibs
+       |   - For each LC_LOAD_DYLIB: load_dylib(path)
+       |   - read_file() reads entire Mach-O from disk
+       |   - mmap anonymous region, copy segments, compute slide
+       |   - Recursively load transitive dependencies
+       |
+       | Phase 3: Process fixups (for main binary AND all dylibs)
+       |   - If LC_DYLD_CHAINED_FIXUPS: process_chained_fixups()
+       |   - Else if LC_DYLD_INFO_ONLY:
+       |       process_rebases()      -- slide internal pointers
+       |       process_all_binds()    -- resolve external symbols
+       |
+       | Phase 4: Patch GOT
+       |   - Fill any remaining zero slots with dyld_stub_binder trap
+       |
+       | Phase 5: Set environ
+       |   - Find "_environ" symbol in loaded images, write envp pointer
+       |
+       | Phase 5.5: Run initialisers (__mod_init_func)
+       |   - Bottom-up: dependencies first, then main binary
+       |   - Calls ObjC +load, __attribute__((constructor)), CF type registration
+       |
+       | Phase 6: Jump to main()
+       |   - entry = text_base + LC_MAIN.entryoff
+       |   - Call entry(argc, argv, envp, apple)
+       |   - On return: look up _exit, call it (flushes stdio)
+       |
+       v
+  Application :: main(argc, argv, envp)
+```
+
+#### 11.2.2 ASLR Slide Computation
+
+The kernel can load a PIE (Position-Independent Executable) at any address. dyld
+computes the **slide** -- the difference between where the binary was linked and where
+it actually landed:
+
+```
+slide = (uint64_t)main_mh - __TEXT_segment.vmaddr
+```
+
+Every internal pointer in the binary was computed at link time assuming `__TEXT` starts
+at its linked `vmaddr`. The slide is added to each pointer during rebase processing.
+
+#### 11.2.3 Symbol Resolution
+
+`resolve_symbol()` (`dyld.c:1010`) resolves an external symbol name using a priority
+order:
+
+1. **Special case**: `dyld_stub_binder` -> return the assembly trap address
+2. **Ordinal-based targeted lookup** (ordinal > 0): search the specific dylib indicated
+   by the ordinal. Try the **export trie** first (fast, O(symbol-length)), then fall back
+   to **nlist linear scan** (slow, O(n))
+3. **Flat namespace fallback**: search all loaded images in order
+
+**Ordinal semantics**: in Mach-O, each `LC_LOAD_DYLIB` is numbered 1, 2, 3, ... in order.
+When a bind opcode says "ordinal 2", it means "look in the 2nd LC_LOAD_DYLIB".
+
+#### 11.2.4 The Export Trie
+
+The export trie is a **compressed prefix trie** stored in `__LINKEDIT`. It encodes all
+exported symbols with their addresses. Walking the trie for symbol `_printf`:
+
+```
+  Root node
+    |
+    +-- "_" --> child node
+                  |
+                  +-- "p" --> child node
+                                |
+                                +-- "rintf" --> TERMINAL: flags=0, addr=0x1234
+                                |
+                                +-- "uts" --> TERMINAL: flags=0, addr=0x5678
+```
+
+Each node: `[term_size: ULEB128] [if terminal: flags, addr] [child_count] [for each:
+edge_label\0, child_offset: ULEB128]`. The algorithm (`dyld.c:906`) matches the symbol
+character by character, descending through children until it reaches a terminal node or
+fails.
+
+#### 11.2.5 Chained Fixups
+
+Modern Mach-O binaries use **chained fixups** (`LC_DYLD_CHAINED_FIXUPS`) instead of
+separate rebase/bind opcode streams. In this format, each pointer in `__DATA` is
+**overwritten at link time** with a packed value that encodes:
+
+- Bit 63: 0 = rebase, 1 = bind
+- For **rebase**: bits[0:35] = target address (or offset), bits[36:43] = high8,
+  bits[44:51] = next pointer delta (in 4-byte units)
+- For **bind**: bits[0:23] = import ordinal, bits[24:31] = addend,
+  bits[52:62] = next pointer delta
+
+dyld walks each page's chain (linked list via the `next` field), fixing up each pointer
+in place. Chain terminates when `next == 0`.
+
+#### 11.2.6 Eager Lazy Binding
+
+Kiseki dyld **eagerly resolves ALL symbols at load time**, including lazy bindings. There
+is no runtime lazy resolution -- the `dyld_stub_binder` function is defined in `start.S`
+as a trap that calls `dyld_fatal()`. This simplifies the design at the cost of slightly
+longer startup times.
+
+### 11.3 libSystem.B.dylib -- The C Library
+
+**Source**: `userland/libsystem/libSystem.c` (7,948 lines)
+
+Kiseki's C library is a **single monolithic file** that provides the complete POSIX C
+standard library, Mach IPC wrappers, POSIX threads, the Objective-C ABI support layer,
+and more -- roughly 280 exported functions.
+
+#### 11.3.1 Syscall Interface
+
+All system calls go through a single inline assembly function (`libSystem.c:189`):
+
+```c
 static long __syscall(long number, long a0, long a1, long a2,
-                      long a3, long a4, long a5)
-{
+                      long a3, long a4, long a5) {
     register long x16 __asm__("x16") = number;
-    register long x0  __asm__("x0")  = a0;
-    /* ... */
-    __asm__ volatile(
-        "svc    #0x80\n\t"
-        "mrs    %[nzcv], nzcv"
-        : [nzcv] "=r" (nzcv), "+r" (x0)
-        : "r" (x16), "r" (x1), "r" (x2), "r" (x3), "r" (x4), "r" (x5)
-        : "memory"
-    );
-    if (nzcv & (1L << 29))  /* Carry set = error */
-        return -x0;
+    register long x0 __asm__("x0") = a0;
+    /* ... x1-x5 ... */
+    __asm__ volatile("svc #0x80"
+        : "+r"(x0) : "r"(x16), "r"(x1), "r"(x2),
+          "r"(x3), "r"(x4), "r"(x5) : "memory", "cc");
+    /* Check carry flag for error */
+    unsigned long flags;
+    __asm__ volatile("mrs %0, nzcv" : "=r"(flags));
+    if (flags & (1UL << 29))  /* Carry set = error */
+        return -x0;           /* Return negative errno */
     return x0;
 }
 ```
 
-This is the same pattern as Apple's real dyld (which is also freestanding). dyld provides its own `open()`, `read()`, `mmap()`, `close()`, `write()` (for debug output), and `exit()` — all thin wrappers around `__syscall()`.
+This matches the macOS ARM64 syscall convention exactly: `x16` = syscall number,
+`x0`-`x5` = arguments, `svc #0x80` traps to kernel. On error, the kernel sets PSTATE
+carry flag and `x0` = positive errno.
 
-#### Rebase and Bind
+#### 11.3.2 Per-Thread errno
 
-When a Mach-O binary is loaded at a different address than it was linked at (due to ASLR or simply because the kernel chose a different base), all absolute pointers embedded in the binary are wrong. **Rebase opcodes** fix these by adding a slide value to each pointer.
+errno is **per-thread** using the ARM64 `TPIDR_EL0` register. Each `struct __pthread`
+has `errno_val` at offset 60. The `__error()` function (`libSystem.c:262`) reads
+`TPIDR_EL0` to find the current thread's pthread struct and returns `&pt->errno_val`.
+Falls back to a global `_errno_fallback` during early boot before threads are set up.
 
-**Bind opcodes** resolve *external* symbols — references to functions in other dylibs. For example, when your program calls `printf()`, the compiler generates a stub that loads the address from the GOT (Global Offset Table). dyld fills in the GOT entry by looking up `_printf` in libSystem's export trie.
+#### 11.3.3 malloc -- Free-List Allocator
 
-The export trie is a compact radix tree encoding all exported symbols and their addresses. dyld walks this trie to resolve each symbol.
-
-#### Stack Layout on Entry
-
-The kernel sets up the user stack before jumping to dyld:
-
-```
-sp → [ mach_header_addr ]    ← pointer to main binary's Mach-O header
-      [ argc             ]
-      [ argv[0]          ]    ← program name
-      [ argv[1]          ]
-      [ ...              ]
-      [ NULL             ]    ← argv terminator
-      [ envp[0]          ]
-      [ ...              ]
-      [ NULL             ]    ← envp terminator
-      [ apple[0]         ]    ← Apple-specific strings
-      [ ...              ]
-      [ NULL             ]    ← apple terminator
+```c
+typedef struct block_header {       /* libSystem.c:754 */
+    size_t              size;       /* Usable payload size */
+    struct block_header *next;      /* Next in free-list */
+    uint32_t            magic;      /* 0xA110CA7E ("ALLOCATE") */
+    uint32_t            free;       /* 1 = free, 0 = allocated */
+    uint64_t            _pad;       /* Pad to 32 bytes */
+} block_header_t;
 ```
 
-dyld's `_start` (`userland/dyld/start.S:31`) extracts these values and passes them to `dyld_main()`.
+**Algorithm**:
+- **Backend**: `mmap(MAP_PRIVATE | MAP_ANON)` in 64 KB minimum chunks
+- **Allocation**: first-fit search of the free-list. If no fit, mmap a new chunk.
+  Split the block if the remainder >= 48 bytes (header + 16 min)
+- **Free**: validate the magic cookie (`0xA110CA7E`), mark as free, coalesce adjacent
+  free blocks (only if physically contiguous -- prevents cross-mmap corruption)
+- **Realloc**: in-place if the block is large enough, or try merging with the next free
+  block, else malloc+copy+free
+- All allocations are 16-byte aligned (ARM64 requirement)
 
-### 11.3 libSystem.B.dylib
+#### 11.3.4 stdio -- FILE-Based I/O
 
-libSystem (`userland/libsystem/libSystem.c`, 7893 lines) is Kiseki's C library — the equivalent of Apple's `libSystem.B.dylib` (which bundles libc, libm, libpthread, libdispatch, and more). It is completely freestanding: no `#include <stdio.h>`, no dependency on any external library.
+```c
+typedef struct _kiseki_FILE {       /* libSystem.c:1105 */
+    int     fd;                     /* Underlying file descriptor */
+    int     flags;                  /* _F_READ, _F_WRITE, _F_UNBUF, etc. */
+    char    *buf;                   /* I/O buffer (1024 bytes) */
+    size_t  bufsiz;                 /* Buffer capacity */
+    size_t  buf_pos;                /* Write position */
+    size_t  buf_len;                /* Valid read bytes */
+    int     ungetc_buf;             /* Single ungetc character (or EOF) */
+} FILE;
+```
 
-It provides:
+Standard streams: `stdin` (fd 0, line-buffered), `stdout` (fd 1, line-buffered),
+`stderr` (fd 2, unbuffered). Up to 64 FILE objects in a static table.
 
-- **String functions**: `strlen`, `strcmp`, `strcpy`, `strncmp`, `strstr`, `memcpy`, `memset`, `memmove`, etc.
-- **I/O functions**: `printf` (with full format string support), `putchar`, `puts`, `fputs`, `fwrite`, `fread`, `fopen`/`fclose`
-- **Memory allocation**: `malloc`, `free`, `calloc`, `realloc` (bump allocator backed by `mmap`)
-- **Process functions**: `fork`, `execve`, `exit`, `wait`, `getpid`, `kill`
-- **File functions**: `open`, `close`, `read`, `write`, `lseek`, `stat`, `unlink`, `mkdir`
-- **Mach IPC wrappers**: `mach_msg`, `mach_task_self`, `bootstrap_look_up`, `bootstrap_check_in`
-- **String conversion**: `atoi`, `atol`, `strtol`, `strtoul`, `snprintf`
-- **Environment**: `getenv`, `setenv`, `environ`
-- **Time**: `sleep`, `usleep`, `nanosleep`, `gettimeofday`
-- **Math**: Basic integer math operations
-- **Errno**: Thread-local errno (using `__thread` or a global for simplicity)
+The **printf engine** (`libSystem.c:1573`) uses a callback-based design: `_fmt_core()`
+parses the format string and calls a `putch` callback for each output character. This
+lets the same parser drive `fprintf` (to FILE), `sprintf` (to string), and `dprintf`
+(to fd) with different callbacks.
 
-The syscall wrappers use both the C inline-assembly interface and the assembly stubs in `userland/libsystem/syscall.S` (114 lines). The `SYSCALL_STUB` macro generates a function that loads `x16`, executes `svc #0x80`, checks the carry flag, and returns either the result or `-errno`.
+Supported format specifiers: `%d`, `%i`, `%u`, `%x`, `%X`, `%o`, `%p`, `%s`, `%c`,
+`%%`, `%n`, with all standard flags (`-`, `0`, `+`, ` `, `#`), width, precision, and
+length modifiers (`h`, `hh`, `l`, `ll`, `z`, `j`, `t`).
+
+#### 11.3.5 POSIX Threads (pthreads)
+
+```c
+struct __pthread {                  /* libSystem.c:5974 */
+    unsigned long tid;              /* Kernel thread ID */
+    void *stack_base;               /* mmap'd 2 MB stack */
+    size_t stack_size;
+    void *(*start_routine)(void *);
+    void *arg;
+    void *retval;
+    int   detached, joined, exited;
+    int   errno_val;                /* Per-thread errno (offset 60) */
+    void *tls[128];                 /* Thread-local storage keys */
+    struct __pthread *joiner;       /* Thread waiting to join */
+};
+```
+
+- `pthread_create()` (`libSystem.c:6100`): mmaps a 2 MB stack, calls
+  `SYS_bsdthread_create` (360) which creates a kernel thread
+- Mutexes: spinlock-based with support for NORMAL, RECURSIVE, and ERRORCHECK types
+- Condition variables: busy-wait on `signal_count` with mutex unlock/relock
+- Read-write locks: reader/writer counting with spinlock protection
+- Thread-local storage: 128 keys with destructor support
+
+#### 11.3.6 Mach IPC Wrappers
+
+libSystem provides the userland Mach API used by all framework code:
+
+```c
+/* Mach traps use negative x16 values */
+kern_return_t mach_msg(msg, option, send_size, rcv_size,
+                       rcv_name, timeout, notify);    /* trap -31 */
+mach_port_t mach_task_self(void);                     /* trap -28, cached */
+mach_port_t mach_reply_port(void);                    /* trap -26 */
+kern_return_t mach_port_allocate(task, right, name);  /* trap -36 */
+kern_return_t mach_port_deallocate(task, name);       /* trap -37 */
+```
+
+The `mach_msg()` wrapper (`libSystem.c:7226`) retries on `MACH_SEND_INTERRUPTED` and
+`MACH_RCV_INTERRUPTED`, making it robust against signal delivery during IPC.
+
+**Bootstrap services**:
+
+```c
+kern_return_t bootstrap_register(bp, service_name, sp);  /* trap -40 */
+kern_return_t bootstrap_look_up(bp, service_name, sp);   /* trap -41 */
+kern_return_t bootstrap_check_in(bp, service_name, sp);  /* trap -42 */
+```
+
+#### 11.3.7 DNS Resolution via Mach IPC
+
+`getaddrinfo()` (`libSystem.c:7612`) resolves hostnames by:
+1. Trying numeric parse first (`inet_pton`)
+2. Sending a Mach message to the mDNSResponder service
+   (`"uk.co.avltree9798.mDNSResponder"`, message ID 1000)
+3. The reply contains up to 8 IPv4 addresses
+4. Each address is wrapped in a `struct addrinfo` chain
+
+#### 11.3.8 C++ ABI Support
+
+libSystem provides the C++ ABI symbols that clang expects, even though Kiseki apps
+are primarily C and Objective-C:
+
+- `operator new`/`delete` (mangled `_Znwm`/`_ZdlPv`) -- delegate to malloc/free
+- `__cxa_atexit` / `__cxa_guard_acquire/release` -- static local initialisation
+- `__cxa_throw` -- aborts (no exception unwinding support)
+- `__gxx_personality_v0`, `_Unwind_*` -- stubs that abort
+
+#### 11.3.9 Summary of Major Subsystems
+
+| Subsystem | Functions | Lines | Notes |
+|-----------|-----------|-------|-------|
+| String/memory | 22+ (strlen, strcmp, memcpy, ...) | 314-560 | Word-aligned fast paths |
+| malloc | malloc, free, realloc, calloc | 743-969 | Free-list, 0xA110CA7E magic |
+| stdio | 35+ (fopen, fprintf, fgets, ...) | 1091-1600 | Callback-based printf engine |
+| Process control | fork, exec*, wait*, kill | 654-741 | Full exec family (execvp, execl, ...) |
+| Filesystem | 30+ (open, stat, mkdir, ...) | 562-651, 3367-3483 | All via BSD syscalls |
+| Network | 18+ (socket, connect, send, ...) | 4026-4232 | Plus getaddrinfo via Mach IPC |
+| Signals | signal, sigaction, raise | 2463-2509 | Per-process handlers |
+| Time | 20+ (time, gmtime, strftime, ...) | 4234-5398 | Full UTC conversion |
+| pthreads | 45+ (create, mutex, cond, rwlock) | 5962-7022 | 2 MB stack per thread |
+| Mach IPC | 10 traps + bootstrap | 7079-7355 | mach_msg with retry |
+| ctype | 12 + RuneLocale | 2093-2281 | macOS ABI compatible |
+| C++ ABI | 20+ symbols | 2617-2873 | new/delete, guards, unwind stubs |
+| Math | 25 (sin, cos, sqrt, log, ...) | 7733-7943 | Taylor series / Newton-Raphson |
+| termcap | tgetent, tgoto, tputs | 4540-4725 | Hardcoded VT100 |
 
 ### 11.4 crt0 and Program Startup
 
-Every executable (except dyld and libSystem) starts at `_start` defined in `userland/libsystem/crt0.S` (61 lines). This is the bridge between the kernel/dyld and the program's `main()`:
+**Source**: `userland/libsystem/crt0.S` (61 lines)
+
+`crt0.S` is the C runtime startup file linked into every executable. It provides
+`_start`, the very first function called in a new process.
+
+#### 11.4.1 Stack Layout on Entry
+
+When the kernel creates a process, it pushes the following onto the user stack:
+
+```
+  High address
+  +------------------+
+  | apple[N]         |   (Apple-specific strings)
+  | ...              |
+  | apple[0]         |
+  | NULL             |   (apple terminator)
+  | envp[N]          |   (environment strings)
+  | ...              |
+  | envp[0]          |
+  | NULL             |   (envp terminator)
+  | argv[argc-1]     |
+  | ...              |
+  | argv[0]          |   (program name)
+  | argc             |   <-- SP points here
+  +------------------+
+  Low address
+```
+
+#### 11.4.2 The _start Sequence
 
 ```asm
-/* userland/libsystem/crt0.S:23-59 */
-
 _start:
-    mov     x29, #0             /* Clear frame pointer (clean backtraces) */
-    mov     x30, #0             /* Clear link register */
+    mov  x29, #0            ; Clear frame pointer (clean backtrace end)
+    mov  x30, #0            ; Clear link register
 
-    ldr     x0, [sp]            /* x0 = argc */
-    add     x1, sp, #8          /* x1 = argv */
+    ldr  x0, [sp]           ; x0 = argc
+    add  x1, sp, #8         ; x1 = argv
 
-    /* envp = argv + (argc + 1) * 8 */
-    add     x2, x0, #1
-    lsl     x2, x2, #3
-    add     x2, x1, x2          /* x2 = envp */
+    add  x2, x0, #1         ; x2 = argc + 1
+    lsl  x2, x2, #3         ;    * 8 (pointer size)
+    add  x2, x1, x2         ; x2 = envp = argv + (argc+1)*8
 
-    /* Store envp in global 'environ' */
-    adrp    x3, environ
-    add     x3, x3, :lo12:environ
-    str     x2, [x3]
+    adrp x3, environ         ; Store envp in global 'environ'
+    str  x2, [x3, :lo12:environ]
 
-    /* Align stack to 16 bytes */
-    mov     x3, sp
-    and     x3, x3, #~0xF
-    mov     sp, x3
+    and  sp, sp, #~0xF       ; Align stack to 16 bytes (ARM64 ABI)
 
-    bl      main                /* Call main(argc, argv, envp) */
-    bl      exit                /* exit(main_return_value) */
+    bl   main                ; Call main(argc, argv, envp)
+    bl   exit                ; Call exit(return_value)
+
+    mov  x16, #1             ; SYS_exit fallback
+    svc  #0x80
 ```
 
-The complete startup sequence from power-on to `main()`:
+The key steps before `main()`:
+1. **FP/LR cleared** -- ensures stack unwinders terminate cleanly
+2. **envp computed** by walking past argv's NULL terminator
+3. **`environ` global set** -- used by `getenv()`/`setenv()`
+4. **Stack 16-byte aligned** -- ARM64 ABI requirement
+5. After main returns, `exit()` runs atexit handlers and flushes stdio
 
-```mermaid
-flowchart TD
-    BOOT["Power on → boot.S → main.c<br/>(17-phase kernel bootstrap)"]
-    BOOT --> INIT["Kernel spawns init (PID 1)<br/>execve('/sbin/init')"]
-    INIT --> EXECVE["sys_execve():<br/>1. Parse Mach-O header<br/>2. Map segments into new address space<br/>3. Find LC_LOAD_DYLINKER → '/usr/lib/dyld'<br/>4. Map dyld into address space<br/>5. Set up user stack<br/>6. Set ELR_EL1 = dyld's _start<br/>7. eret → EL0"]
-    EXECVE --> DYLD["dyld _start → dyld_main():<br/>1. Parse main binary's load commands<br/>2. Load libSystem.B.dylib<br/>3. Rebase all pointers<br/>4. Bind all symbols<br/>5. Find LC_MAIN entry point<br/>6. Jump to it"]
-    DYLD --> CRT0["crt0.S _start:<br/>1. Extract argc, argv, envp from stack<br/>2. Store envp in global 'environ'<br/>3. Align stack<br/>4. Call main(argc, argv, envp)"]
-    CRT0 --> MAIN["main() — your program runs!"]
-    MAIN --> EXIT["main() returns → exit(retval)<br/>→ sys_exit() → process terminates"]
-```
+### 11.5 The Objective-C Runtime (libobjc)
 
-> **macOS reference:** The real macOS startup chain is identical in structure: kernel `execve()` → dyld `_dyld_start` → dyld loads all dylibs → libSystem initialiser runs → `__crt0_main` → `main()`. Apple's dyld3 adds a closure-based caching mechanism for faster subsequent launches, and dyld4 (macOS Ventura+) further optimises with page-in linking. Kiseki implements the dyld2-equivalent eager linking model, which is simpler and sufficient for understanding the fundamentals.
+Kiseki's Objective-C runtime is covered in Chapter 13 (Framework Stack), as it is
+tightly integrated with Foundation and AppKit. The key point for this chapter: the
+runtime is minimal -- it supports `objc_msgSend`, class registration, method addition,
+and selector lookup, but does **not** support categories, protocols, associated objects,
+or the full Apple runtime ABI.
 
 ---
 
 ## Chapter 12: WindowServer & GUI Architecture
 
-The WindowServer is the process that owns the screen. Every pixel you see on a macOS desktop — every window, every menu bar, every cursor movement — is composited and drawn by WindowServer. In Kiseki, this is `userland/sbin/WindowServer.c` (3634 lines), a single-file implementation that handles window management, compositing, input dispatch, a built-in VT100 terminal emulator, and a full Mach IPC protocol.
+Kiseki's graphical desktop is orchestrated by a single user-space process called
+**WindowServer** -- the direct equivalent of macOS's `WindowServer` (historically
+known as the Quartz Compositor, now SkyLight). Every pixel on screen passes through
+this process: it owns the framebuffer, receives raw HID events from the kernel,
+composites windows in z-order, and dispatches input events to the correct client
+application via Mach IPC.
+
+```
++------------------------------------------------------------------+
+|                       User's Screen                              |
+|  +------------------------------------------------------------+  |
+|  | Menu Bar  [ KisekiOS   File  Edit  View ]       [ 10:42 ]  |  |
+|  +------------------------------------------------------------+  |
+|  |                                                            |  |
+|  |  +--Window A (Finder)------+  +--Window B (Terminal)----+  |  |
+|  |  | Title Bar          [X]  |  | Title Bar         [X]  |  |  |
+|  |  |--------------------------+  |------------------------+  |  |
+|  |  |  content (backing store) |  | content (backing store)|  |  |
+|  |  |                          |  |                        |  |  |
+|  |  +--------------------------+  +------------------------+  |  |
+|  |                                                            |  |
+|  |                    Desktop Background                      |  |
+|  +------------------------------------------------------------+  |
+|                            cursor ^                              |
++------------------------------------------------------------------+
+           |                |                |
+           v                v                v
+    +------------+   +------------+   +------------+
+    | IOFrame-   |   | IOHIDSystem|   | Mach IPC   |
+    | buffer     |   | event ring |   | to clients |
+    | (VRAM map) |   | (shared)   |   | (ports)    |
+    +------------+   +------------+   +------------+
+           |                |
+           v                v
+    +------------------------------+
+    |     Kernel (IOKit drivers)   |
+    | VirtIO GPU    VirtIO Input   |
+    +------------------------------+
+```
 
 ### 12.1 WindowServer Overview
 
-WindowServer runs as a daemon, launched by `init` (PID 1). It communicates with applications entirely through Mach IPC — there are no shared memory shortcuts for window creation or event delivery. Applications never write directly to the framebuffer; they send pixel data to WindowServer via IPC messages, and WindowServer composites everything together.
+**Source**: `userland/sbin/WindowServer.c` (1,854 lines)
 
-```mermaid
-flowchart TB
-    subgraph "Applications"
-        DOCK["Dock.app"]
-        FINDER["Finder.app"]
-        TERM["Terminal.app"]
-        SYSUI["SystemUIServer.app"]
-    end
+WindowServer is a standard Mach-O user-space binary launched by `init` (PID 1) via a
+LaunchDaemon plist. It runs as root and is the first GUI process to start. Its
+responsibilities:
 
-    subgraph "WindowServer"
-        IPC["Mach IPC Receiver"]
-        COMP["Compositor<br/>(back-to-front painter)"]
-        HID["HID Input Handler<br/>(keyboard + mouse)"]
-        VT["Built-in VT100<br/>Terminal Emulator"]
-    end
+| Responsibility | How |
+|---|---|
+| Framebuffer access | IOKit: `IOServiceOpen("IOFramebuffer")` then `IOConnectMapMemory64` maps VRAM |
+| HID input | IOKit: `IOServiceOpen("IOHIDSystem")` then `IOConnectMapMemory64` maps the event ring |
+| Client connections | Mach service port `"uk.co.avltree9798.WindowServer"` registered at bootstrap |
+| Window management | Up to 64 windows (`struct ws_window`), 16 clients (`struct ws_client`) |
+| Compositing | Painter's algorithm: desktop fill, then windows back-to-front, then menu bar, then cursor |
+| Event routing | HID ring events translated and forwarded to the key window's client via Mach IPC |
 
-    subgraph "Kernel"
-        FB["IOFramebuffer<br/>(VirtIO GPU)"]
-        HIDK["IOHIDSystem<br/>(VirtIO Input)"]
-    end
+**Boot sequence**:
 
-    DOCK & FINDER & TERM & SYSUI --> |"Mach messages<br/>(WS_MSG_*)"| IPC
-    IPC --> COMP
-    HID --> |"WS_EVENT_* messages"| DOCK & FINDER & TERM & SYSUI
-    COMP --> |"VRAM write + flush"| FB
-    HIDK --> |"Shared memory<br/>HID event ring"| HID
 ```
+main()
+  |
+  +-> signal(SIGPIPE, SIG_IGN)        -- ignore broken pipe (client disconnect)
+  +-> bootstrap_check_in(WS_SERVICE_NAME)  -- claim pre-created Mach port
+  |     or allocate + bootstrap_register() as fallback
+  +-> open_framebuffer()               -- IOKit: find + open + getinfo + map VRAM
+  +-> open_hid()                       -- IOKit: find + open + map HID event ring
+  +-> cur_x = fb_w/2; cur_y = fb_h/2  -- initial cursor at screen centre
+  +-> composite() + cursor_draw() + flush_fb()  -- paint initial desktop
+  +-> event loop (forever)
+        |
+        +-> drain IPC messages (non-blocking poll, timeout=0)
+        +-> cursor_restore() + process_hid()
+        +-> composite() if dirty
+        +-> cursor_save() + cursor_draw()
+        +-> flush_fb() if any work done
+        +-> if idle: blocking receive with 50ms timeout (yield CPU)
+```
+
+**Comparison with macOS**: On macOS, WindowServer is `/System/Library/PrivateFrameworks/SkyLight.framework`
+linked into a thin host binary. It uses IOKit for framebuffer access (IOFramebuffer)
+and HID access (IOHIDSystem) -- exactly what Kiseki does. The major difference: macOS
+WindowServer uses hardware-accelerated compositing (Metal/OpenGL) and Core Animation
+layers, while Kiseki composites entirely in software with direct pixel blitting.
 
 ### 12.2 The IPC Protocol
 
-The WindowServer IPC protocol uses three ranges of message IDs:
+WindowServer uses a custom Mach IPC protocol with three message families:
 
-| Range | Direction | Purpose |
-|-------|-----------|---------|
-| 1000–1099 | Client → WS | Requests (create window, draw, etc.) |
-| 2000–2099 | WS → Client | Synchronous replies |
-| 3000–3099 | WS → Client | Asynchronous events (input, window events) |
+| Family | Direction | ID Range | Purpose |
+|---|---|---|---|
+| Requests | Client --> Server | 1000-1099 | Create/destroy windows, draw pixels, set menus |
+| Replies | Server --> Client | 2000-2099 | Synchronous responses to requests |
+| Events | Server --> Client | 3000-3099 | Asynchronous input events (keys, mouse, window state) |
 
-Key message types:
+#### Client-to-Server Messages
 
-| ID | Name | Purpose |
-|----|------|---------|
-| 1000 | `WS_MSG_CONNECT` | Register a client connection |
-| 1010 | `WS_MSG_CREATE_WINDOW` | Create a window (x, y, width, height, style, title) |
-| 1020 | `WS_MSG_DRAW_RECT` | Blit pixel data into a window's surface (OOL) |
-| 1012 | `WS_MSG_ORDER_WINDOW` | Show/hide/bring-to-front |
-| 1030 | `WS_MSG_SET_MENU` | Set the application's menu bar items |
-| 1040 | `WS_MSG_CREATE_PTY_WINDOW` | Create a terminal window with a PTY |
-| 3000 | `WS_EVENT_KEY_DOWN` | Keyboard event to the active window's owner |
-| 3010 | `WS_EVENT_MOUSE_DOWN` | Mouse click event |
-| 3012 | `WS_EVENT_MOUSE_MOVED` | Mouse movement event |
+```
+ID      Name                Struct                      Description
+----    ----                ------                      -----------
+1000    CONNECT             ws_msg_connect_t            Register as client
+1001    DISCONNECT          ws_msg_destroy_window_t     Disconnect, destroy all windows
+1010    CREATE_WINDOW        ws_msg_create_window_t      Create window with position/size/style
+1011    DESTROY_WINDOW       ws_msg_destroy_window_t     Destroy one window
+1012    ORDER_WINDOW         ws_msg_order_window_t       Change visibility/z-order
+1013    SET_TITLE            ws_msg_set_title_t          Change window title
+1014    SET_FRAME            ws_msg_set_frame_t          Move/resize window
+1020    DRAW_RECT            ws_msg_draw_rect_t          Blit pixels (OOL Mach msg)
+1030    SET_MENU             ws_msg_set_menu_t           Set menu bar items
+```
 
-The `WS_MSG_DRAW_RECT` message uses Mach OOL (out-of-line) descriptors to transfer pixel data. This allows transferring large buffers (e.g., an entire window's content) without copying — the kernel maps the sender's pages into the receiver's address space.
+#### Server-to-Client Events
+
+```
+ID      Name                    Struct              Description
+----    ----                    ------              -----------
+3000    KEY_DOWN                ws_event_key_t      Key press (keycode + ASCII + modifiers)
+3001    KEY_UP                  ws_event_key_t      Key release
+3010    MOUSE_DOWN              ws_event_mouse_t    Mouse button press
+3011    MOUSE_UP                ws_event_mouse_t    Mouse button release
+3012    MOUSE_MOVED             ws_event_mouse_t    Cursor moved (no button)
+3013    MOUSE_DRAGGED           ws_event_mouse_t    Cursor moved while button down
+3020    WINDOW_ACTIVATE         ws_event_window_t   Window became key (focused)
+3021    WINDOW_DEACTIVATE       ws_event_window_t   Window lost key status
+3022    WINDOW_CLOSE            ws_event_window_t   Close button clicked
+3023    WINDOW_RESIZE           ws_event_window_t   Window resized
+3030    SCROLL                  ws_event_scroll_t   Scroll wheel event
+```
+
+#### Connection Handshake
+
+The CONNECT message establishes a client-server relationship. The client sends its
+application name and PID. Crucially, the client's **event port** is passed as the
+Mach message's `msgh_local_port` with `MACH_MSG_TYPE_MAKE_SEND` -- this gives
+WindowServer a send right to push events back to the client:
+
+```
+Client (e.g., Finder.app)                    WindowServer
+  |                                              |
+  |  [1] bootstrap_look_up("...WindowServer")    |
+  |--------------------------------------------->|
+  |  [2] mach_port_allocate(RECEIVE) -> event_port
+  |                                              |
+  |  [3] WS_MSG_CONNECT (SEND|RCV)              |
+  |  msgh_remote_port = service_port             |
+  |  msgh_local_port  = event_port               |
+  |  msgh_id = 1000                              |
+  |  body: { app_name="Finder", pid=42 }         |
+  |--------------------------------------------->|
+  |                                              | [4] alloc ws_client slot
+  |                                              |     save event_port
+  |                                              |     assign conn_id
+  |                                              |
+  |  [5] WS_REPLY_CONNECT                       |
+  |  { conn_id=3, result=KERN_SUCCESS }          |
+  |<---------------------------------------------|
+  |                                              |
+  | (Client now uses conn_id=3 for all requests) |
+  | (Server sends events to event_port)          |
+```
+
+Key implementation detail (`WindowServer.c:886`): After kernel `copyout`, Mach ports
+are swapped per XNU convention -- `msgh_remote_port` on receive becomes the sender's
+reply port (the client's event port). WindowServer saves this as `c->event_port` for
+all future event delivery.
+
+#### DRAW_RECT -- The Pixel Blit Path
+
+The most complex message is DRAW_RECT, which transfers pixel data using Mach OOL
+(out-of-line) memory. This avoids copying pixel data inline in the message body:
+
+```c
+/* WindowServer.c:144-153 -- OOL draw message */
+typedef struct {
+    mach_msg_header_t           header;
+    mach_msg_body_t             body;           /* complex message marker */
+    mach_msg_ool_descriptor_t   surface_desc;   /* pixel data descriptor */
+    int32_t                     conn_id;
+    int32_t                     window_id;
+    uint32_t                    dst_x, dst_y;   /* dest offset in window */
+    uint32_t                    width, height;  /* blit dimensions */
+    uint32_t                    src_rowbytes;   /* source pitch in bytes */
+} ws_msg_draw_rect_t;
+```
+
+When the kernel delivers this message, it maps the OOL pages into WindowServer's
+address space. WindowServer then copies pixels from the mapped region into the
+window's backing store (`WindowServer.c:1210-1214`):
+
+```c
+for (uint32_t row = 0; row < bh; row++) {
+    const uint32_t *srow = src_pixels + row * src_stride;
+    uint32_t *drow = w->backing + (dy + row) * w->backing_stride + dx;
+    memcpy(drow, srow, bw * sizeof(uint32_t));
+}
+```
+
+After the copy, the OOL memory is freed via `munmap()` (`WindowServer.c:1156-1166`)
+to prevent leaking mapped pages on every draw.
+
+**Pixel format**: All pixels are BGRA 32bpp (VirtIO GPU `B8G8R8X8_UNORM`), matching
+the framebuffer format. The `rgb()` helper packs bytes as
+`B | (G << 8) | (R << 16) | (0xFF << 24)`.
 
 ### 12.3 Window Compositing
 
-WindowServer uses a **back-to-front painter's algorithm**: it draws the desktop background first, then each visible window from back to front. Each window has its own pixel buffer (`surface`), and compositing copies these buffers into the memory-mapped VRAM.
+#### Data Structures
+
+Each window has a **backing store** -- a heap-allocated pixel buffer that clients
+draw into via DRAW_RECT:
 
 ```c
-/* WindowServer.c:1745-1774 — Window structure */
-
+/* WindowServer.c:387-402 */
 struct ws_window {
-    int32_t         x, y;                   /* Screen position */
-    uint32_t        width, height;          /* Including chrome (title bar) */
+    bool            active;
+    int32_t         window_id;
+    int32_t         conn_id;        /* owning client */
+    int32_t         x, y;           /* screen position of content area */
+    uint32_t        width, height;  /* content dimensions */
+    uint32_t        style_mask;     /* WS_STYLE_TITLED | WS_STYLE_CLOSABLE */
     char            title[64];
-    uint32_t        style_mask;             /* NSWindowStyleMask flags */
-    int             client_managed;         /* 0=internal terminal, 1=app */
-    int32_t         conn_id;                /* Owning connection */
-    uint32_t       *surface;                /* Pixel buffer (BGRA) */
-    uint32_t        surface_width, surface_height;
-    int             pty_master_fd;          /* PTY pair (-1 if none) */
-    struct ws_term_state term;              /* VT100 state */
-    int             visible, needs_redraw;
+    bool            visible;
+    bool            is_key;         /* frontmost focused window */
+    int32_t         level;          /* <0=desktop, 0=normal, >0=floating */
+    uint32_t       *backing;        /* BGRA pixel buffer */
+    uint32_t        backing_stride; /* pixels per row */
 };
 ```
 
-The compositing loop (in `main()` at line 3526) runs at approximately 60 Hz:
+Z-ordering is tracked by a global array (`z_order[MAX_WINDOWS]`), where index 0 is
+the frontmost window. Three operations manipulate it:
 
-1. **Receive IPC messages** (batch up to 32 per frame, `mach_msg` with 16ms timeout)
-2. **Process HID events** from the shared-memory ring buffer
-3. **Read PTY output** for terminal windows, feed through VT100 emulator
-4. **Redraw dirty windows** back-to-front into VRAM
-5. **Cursor compositing** using save-under: save pixels beneath cursor, draw cursor
-6. **Flush VRAM** to GPU (`IOConnectCallScalarMethod(selector=2)` → VirtIO `RESOURCE_FLUSH`)
+- `z_bring_to_front(id)` -- removes from current position, inserts at index 0
+- `z_send_to_back(id)` -- removes from current position, appends at end
+- `z_remove(id)` -- removes from the array entirely
 
-The pixel format is **BGRA 32bpp** (blue in the low byte, alpha in the high byte), matching `VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM`.
+Window ordering also has the concept of **levels**: `level < 0` means desktop-level
+(e.g., Dock's desktop gradient window), which is never raised on click.
+`level >= 0` is a normal window that can become the key window.
+
+#### The Compositor
+
+The `composite()` function (`WindowServer.c:1282-1416`) repaints the entire screen.
+It is called whenever `compositor_dirty` is set (by any window operation, mouse
+movement that causes dragging, or key window changes):
+
+```
+composite()
+  |
+  +-- [1] Fill entire screen with COL_DESKTOP (steel blue, #3A6EA5)
+  |
+  +-- [2] For each window in z_order, BACK to FRONT:
+  |     |
+  |     +-- Skip if !visible or !backing
+  |     +-- Draw 1px shadow (right + bottom edges)
+  |     +-- If TITLED:
+  |     |     Draw title bar background (grey, lighter if is_key)
+  |     |     Draw separator line at bottom of title bar
+  |     |     Draw close button (red circle, radius 5)
+  |     |     Draw centred title text
+  |     +-- Blit backing store pixels into framebuffer
+  |
+  +-- [3] Draw menu bar on top of everything:
+  |     Fill 22px bar at top with COL_MENUBAR
+  |     Draw "KisekiOS" at left
+  |     Draw active client's menu items
+  |
+  +-- [4] Clear compositor_dirty flag
+```
+
+The compositor uses a classic **painter's algorithm**: later draws overwrite earlier
+ones. Windows are drawn from `z_order[z_count-1]` (backmost) to `z_order[0]`
+(frontmost), so the frontmost window is always fully visible.
+
+Title bars are 22 pixels tall (`TITLEBAR_H`), matching the macOS title bar height.
+The close button is drawn as a filled circle approximation (radius 5, colour #FF5F57
+-- matching macOS's red traffic light button):
+
+```c
+/* WindowServer.c:1354-1366 -- close button circle */
+for (int dy = 0; dy < 12; dy++) {
+    for (int dx = 0; dx < 12; dx++) {
+        int cx = dx - 5, cy = dy - 5;
+        if (cx*cx + cy*cy <= 25)  /* r^2 = 25 */
+            put_pixel(bx + dx, by + dy, COL_CLOSE_BTN);
+    }
+}
+```
+
+#### The Cursor
+
+The cursor is a 12x18 pixel bitmap defined as a literal array
+(`WindowServer.c:459-478`), with values: 0=transparent, 1=black (outline),
+2=white (fill). It forms the classic arrow pointer shape.
+
+The cursor is drawn **outside** the compositor -- it uses a save/restore pattern
+to avoid recompositing the entire screen on every mouse move:
+
+1. `cursor_restore()` -- writes back the saved pixel rectangle under the old cursor
+2. Process HID events (update `cur_x`, `cur_y`)
+3. If compositor dirty, run `composite()` (full repaint)
+4. `cursor_save(cur_x, cur_y)` -- saves the rectangle of pixels that will be covered
+5. `cursor_draw(cur_x, cur_y)` -- draws the cursor bitmap on top
+
+This means cursor movement never triggers a full recomposite unless something else
+changed. On macOS, the cursor is composited by the GPU as a hardware overlay -- same
+principle (don't redraw everything just because the cursor moved), different mechanism.
+
+#### GPU Flush
+
+After compositing + cursor draw, WindowServer calls `flush_fb()`, which invokes
+`IOConnectCallScalarMethod(fb_conn, kIOFBMethodFlushAll, ...)`. This triggers the
+kernel's IOFramebuffer driver to issue a VirtIO GPU `TRANSFER_TO_HOST_2D` +
+`RESOURCE_FLUSH` sequence, pushing the framebuffer pixels to the QEMU display.
 
 ### 12.4 Input Event Dispatch
 
-Input events come from the IOHIDSystem shared-memory ring buffer, which the VirtIO input driver fills from IRQ handlers:
+WindowServer reads raw HID events from the kernel's shared-memory event ring
+(mapped via IOKit). The ring is a single-producer (kernel) single-consumer
+(WindowServer) lock-free queue:
 
 ```c
-/* WindowServer.c:472-488 — HID event ring (shared with kernel) */
-
-struct hid_event {
-    uint32_t type, keycode, abs_x, abs_y, buttons, flags;
-    uint64_t timestamp;
-};
-
+/* WindowServer.c:255-261 -- must match kernel hid_event.h */
 struct hid_event_ring {
-    volatile uint32_t write_idx, read_idx;
-    uint32_t size;
+    volatile uint32_t write_idx;    /* kernel increments */
+    volatile uint32_t read_idx;     /* WindowServer increments */
+    uint32_t size;                  /* HID_EVENT_RING_SIZE = 256 */
+    uint32_t _pad;
     struct hid_event events[256];
 };
 ```
 
-WindowServer maps this ring at startup via IOKit (`kIOConnectMapMemoryMsg`), then polls it each frame. Events are dispatched to the application that owns the focused window via Mach IPC (`WS_EVENT_KEY_DOWN`, etc.).
+The `process_hid()` function (`WindowServer.c:1535-1717`) drains all available events:
 
-Mouse events are converted from the VirtIO tablet's absolute coordinates (0–32767) to screen coordinates (0–1279, 0–799) using simple scaling.
+```
+while (read_idx != write_idx):
+    dmb ish                    -- memory barrier (ARM acquire semantics)
+    event = ring->events[read_idx % 256]
+    dmb ish                    -- ensure event fields are fully read
+    read_idx++
 
-### 12.5 The Built-In VT100 Terminal
+    switch (event.type):
+        MOUSE_MOVE:
+            - Scale tablet absolute coords (0-32767) to screen pixels
+            - If dragging a title bar: update window position
+            - Send MOUSE_MOVED or MOUSE_DRAGGED to key window's client
 
-WindowServer contains a complete VT100 terminal emulator (`kernel/sbin/WindowServer.c:1700-2160`). Each terminal window has its own `ws_term_state` with an 80×24 cell grid:
+        MOUSE_DOWN:
+            - Double-click detection (30 ticks window, 10px radius)
+            - Hit-test: find topmost window under cursor
+            - If close button hit: send WINDOW_CLOSE event
+            - If title bar hit: start drag (save offset)
+            - If content hit: bring to front + send MOUSE_DOWN to client
+
+        MOUSE_UP:
+            - Clear drag state
+            - Send MOUSE_UP to key window's client
+
+        KEY_DOWN / KEY_UP:
+            - Translate keycode to ASCII via US QWERTY keymap
+              (handles shift, capslock, ctrl modifiers)
+            - Send to key window's client
+
+        SCROLL:
+            - Hit-test: find window under cursor (NOT key window)
+            - Send SCROLL event to that window's client
+```
+
+**Key window** (`key_window_id`) is the frontmost visible window with `level >= 0`.
+Keyboard events always go to the key window. Mouse events go to the window under the
+cursor (for clicks) or the key window (for moves/drags). Scroll events go to the
+window under the cursor (matching macOS behaviour where scrolling targets the window
+under the cursor, not the focused window).
+
+**Title bar dragging** (`WindowServer.c:1558-1565`): When a MOUSE_DOWN lands in a
+title bar, WindowServer records the drag offset (`cur_x - w->x`, `cur_y - w->y`).
+On subsequent MOUSE_MOVE events while `mouse_is_down`, the window position is
+updated to `cur_x - offset_x`, `cur_y - offset_y`, and `compositor_dirty` is set.
+
+**Double-click detection** (`WindowServer.c:1589-1605`): A counter `loop_counter`
+increments every main-loop iteration. If a MOUSE_DOWN occurs within 30 ticks and
+10 pixels of the previous click, `click_count` increments (otherwise resets to 1).
+The count is passed to the client in the mouse event, enabling double-click file
+opening in Finder.
+
+### 12.5 loginwindow -- Session Management
+
+**Source**: `userland/sbin/loginwindow.c` (980 lines)
+
+On macOS, `/System/Library/CoreServices/loginwindow.app` is the process that presents
+the login screen and manages the user session. Kiseki faithfully reproduces this
+architecture. loginwindow is launched by init as a LaunchDaemon and performs:
+
+1. **Connect to WindowServer** via Mach IPC (`bootstrap_look_up` + `WS_MSG_CONNECT`)
+2. **Create a borderless window** centred on screen (360x260 pixels)
+3. **Render the login UI** with username/password fields and a "Log In" button
+4. **Authenticate** against `/etc/passwd` + `/etc/shadow`
+5. **Launch the GUI session** (Dock, Finder, SystemUIServer, Terminal)
+6. **Monitor children** and relaunch critical apps on crash
+
+#### The Login UI
+
+loginwindow renders its own pixels using software rendering into a pixel buffer
+(`g_pixels`, 360x260x4 bytes), then blits it to WindowServer via `ws_draw_rect()`.
+The UI layout:
+
+```
++--------------------------------------+
+|          Kiseki OS                    |    <- Title at y=20
+|    Enter your credentials            |    <- Subtitle at y=42
+|                                      |
+|  Username:                           |    <- Label at y=72
+|  +------------------------------+    |    <- Field at y=90, 240x24
+|  | root_                        |    |
+|  +------------------------------+    |
+|  Password:                           |    <- Label at y=126
+|  +------------------------------+    |    <- Field at y=144, 240x24
+|  | *****                        |    |
+|  +------------------------------+    |
+|  [ Incorrect password ]              |    <- Error at y=178 (if any)
+|                                      |
+|         +----------+                 |    <- Button at y=200, 100x28
+|         |  Log In  |                 |
+|         +----------+                 |
++--------------------------------------+
+```
+
+The active field gets a blue highlight line at its bottom edge. Passwords display
+as 5x5 filled squares (bullets). Tab switches between fields.
+
+#### Authentication
+
+loginwindow parses `/etc/passwd` (colon-delimited, 7 fields) to look up the user:
 
 ```c
-struct ws_term_state {
-    unsigned char   cells[24][80];          /* Character data */
-    uint8_t         cell_fg[24][80];        /* Foreground colour index */
-    uint8_t         cell_bg[24][80];        /* Background colour index */
-    uint32_t        cur_col, cur_row;       /* Cursor position */
-    int             vt_state;               /* Parser state machine */
-    /* ... saved cursor, attributes, etc. */
-};
-```
-
-The VT100 parser (`term_putc()`) is a state machine that handles:
-- Normal printable characters
-- ESC sequences (`\x1b[...`)
-- CSI (Control Sequence Introducer) sequences for cursor movement, colours, scrolling, clearing
-- DEC private modes (DECAWM, DECSC/DECRC)
-- ANSI colour codes (SGR sequences)
-
-Terminal windows are backed by **pseudo-terminals** (PTY pairs). WindowServer holds the master fd, and the shell process reads/writes the slave fd. This is the standard Unix terminal model — the same architecture used by Terminal.app, iTerm2, and every other terminal emulator.
-
-### 12.6 loginwindow
-
-loginwindow (`userland/sbin/loginwindow.c`, 958 lines) provides the graphical login screen. It is the first GUI application launched, and it creates the user's desktop session after successful authentication.
-
-```mermaid
-sequenceDiagram
-    participant LW as loginwindow
-    participant WS as WindowServer
-    participant User as User
-
-    LW->>WS: bootstrap_look_up("uk.co.avltree9798.WindowServer")
-    LW->>WS: WS_MSG_CONNECT(app_name="loginwindow")
-    LW->>WS: WS_MSG_CREATE_WINDOW(360×260, centered)
-    LW->>WS: WS_MSG_DRAW_RECT (render login UI)
-    LW->>WS: WS_MSG_ORDER_WINDOW(FRONT)
-
-    User->>WS: Types username + password
-    WS->>LW: WS_EVENT_KEY_DOWN (forwarded)
-    LW->>LW: Collect input in fields
-
-    User->>WS: Clicks "Log In" / presses Enter
-    WS->>LW: WS_EVENT_KEY_DOWN / WS_EVENT_MOUSE_DOWN
-    LW->>LW: attempt_login()
-    LW->>LW: Read /etc/passwd + /etc/shadow
-    LW->>LW: verify_password()
-
-    alt Authentication succeeds
-        LW->>LW: launch_gui_session()
-        LW->>LW: fork+exec Dock.app
-        LW->>LW: fork+exec Finder.app
-        LW->>LW: fork+exec SystemUIServer.app
-        LW->>LW: fork+exec Terminal.app
-        Note over LW: Each child calls setuid()/setgid()<br/>to drop to authenticated user
-        LW->>LW: Monitor children, relaunch on crash
-    else Authentication fails
-        LW->>LW: Display error message
-        LW->>WS: WS_MSG_DRAW_RECT (redraw with error)
-    end
-```
-
-Authentication reads `/etc/passwd` for user metadata and `/etc/shadow` for the password hash. Passwords can be plaintext (`plain:xxx`) or locked (`!`/`*`). After successful login, loginwindow `fork()`s and `exec()`s each GUI application, calling `setgid()` and `setuid()` in the child to drop privileges to the authenticated user.
-
-### 12.7 init — The launchd-Style PID 1
-
-init (`userland/sbin/init.c`, 975 lines) is PID 1 — the first user process. It implements a simplified launchd: it reads `.plist` job descriptions from `/System/Library/LaunchDaemons/` and `/Library/LaunchDaemons/`, pre-creates Mach service ports, and launches daemons.
-
-The boot sequence has three phases:
-
-1. **Load plists**: Scan directories for `.plist` files, parse the XML (yes, init contains its own XML parser) into `struct launchd_job` entries
-2. **Pre-create Mach services**: For each job's `MachServices`, allocate a receive right and call `bootstrap_register()` to make it discoverable *before* the daemon starts
-3. **Launch daemons**: `fork()` + `execve()` each daemon. The daemon discovers its port via `bootstrap_check_in()`
-
-```c
-/* userland/sbin/init.c:67-83 — Job descriptor */
-
-struct launchd_job {
-    char    label[128];             /* e.g., "uk.co.avltree9798.WindowServer" */
-    char    program[256];           /* e.g., "/sbin/WindowServer" */
-    char    service_names[8][128];  /* Mach service names */
-    unsigned int service_ports[8];  /* Pre-allocated ports */
-    int     keep_alive;             /* Restart on crash? */
-    int     pid;                    /* Running PID (-1 if not) */
-};
-```
-
-After launching daemons, init enters a loop calling `wait4(-1)` to reap zombie children. If a daemon with `KeepAlive = true` exits, init relaunches it (with throttling to prevent crash loops).
-
-> **macOS reference:** Real macOS `launchd` is vastly more complex — it supports on-demand daemon activation, socket-based launch, XPC services, resource limits, and sandbox profiles. Kiseki's init captures the essential pattern: plist-based job descriptions with pre-created Mach ports and automatic restart on crash.
-
----
-
-## Chapter 13: Framework Stack — CF through AppKit
-
-macOS applications are built on a layered framework stack. Each layer builds on the one below, adding higher-level abstractions. Kiseki implements this entire stack — nearly 15,000 lines of freestanding code — using the same class hierarchies, API signatures, and architectural patterns as Apple's frameworks.
-
-### 13.1 The Freestanding Pattern
-
-Every framework file is **completely freestanding**: no `#include` of any header. All types — `uint8_t`, `size_t`, `bool`, even `NULL` — are redefined from scratch at the top of each file. Dependencies on other frameworks or libSystem are declared as `extern` functions:
-
-```c
-/* Typical framework file header pattern */
-
-#define EXPORT __attribute__((visibility("default")))
-typedef unsigned char       uint8_t;
-typedef unsigned long long  uint64_t;
-/* ... more type definitions ... */
-
-/* Dependencies: declared extern, resolved by dyld at load time */
-extern void *malloc(unsigned long);
-extern void  free(void *);
-extern unsigned long strlen(const char *);
-extern int   strcmp(const char *, const char *);
-```
-
-This design means each framework can be compiled independently with no header search paths. The only contract is that the `extern` function signatures match what libSystem (or another framework) exports. dyld resolves everything at load time.
-
-### 13.2 CoreFoundation
-
-CoreFoundation (`userland/CoreFoundation/CoreFoundation.c`, 4822 lines) is the foundational C framework. It provides reference-counted objects, collections, strings, run loops, and the type system that all other frameworks build on.
-
-#### The CFRuntime Type System
-
-Every CF object starts with a `CFRuntimeBase`:
-
-```c
-/* CoreFoundation.c:423 */
-
-typedef struct __CFRuntimeBase {
-    uintptr_t _cfisa;       /* ObjC isa pointer (offset 0) */
-    uint64_t  _cfinfoa;     /* TypeID in bits 8-23, marker in bit 7 */
-} CFRuntimeBase;
-```
-
-The reference count is stored at a **negative offset** — the `intptr_t` word immediately *before* the object pointer (`obj[-1]`). This unusual layout is critical for toll-free bridging (section 13.7): it allows CF objects and ObjC objects to share the same memory layout, with the `isa` pointer at offset 0 and the reference count at offset −8.
-
-CF types are registered at runtime via `_CFRuntimeRegisterClass()`, which returns a `CFTypeID`. The class table supports up to 256 types. Key CF types include `CFString`, `CFArray`, `CFDictionary`, `CFNumber`, `CFData`, `CFBoolean`, `CFDate`, `CFRunLoop`, and `CFAttributedString`.
-
-#### CFRunLoop
-
-The run loop (`CFRunLoopRun()`) is the event processing mechanism. On macOS, every thread has a run loop; the main thread's run loop drives the entire GUI event loop. Kiseki implements the core run loop with sources, timers, and observers, matching the real CFRunLoop API.
-
-### 13.3 CoreGraphics
-
-CoreGraphics (`userland/CoreGraphics/CoreGraphics.c`, 3082 lines) provides 2D drawing. It implements the Quartz drawing model: a stateful graphics context with a current path, transformation matrix, clipping region, and fill/stroke colours.
-
-```c
-/* CoreGraphics.c:1456-1475 — CGContext */
-
-struct CGContext {
-    __CGRefCounted   _rc;
-    __CGContextType  _type;         /* Bitmap or PDF (stub) */
-    __CGGState      *_gstate;       /* Graphics state stack */
-    CGMutablePathRef _path;         /* Current path */
-    void            *_data;         /* Pixel buffer */
-    size_t           _width, _height;
-    size_t           _bytesPerRow;
-    CGColorSpaceRef  _colorSpace;
-    CGBitmapInfo     _bitmapInfo;
-};
-```
-
-The graphics state (`__CGGState`) is a linked list supporting `CGContextSaveGState()`/`CGContextRestoreGState()`:
-
-```
-   _gstate → [fillColor, strokeColor, CTM, clipRect, lineWidth, ...]
-                ↓ _prev
-              [fillColor, strokeColor, CTM, clipRect, lineWidth, ...]
-                ↓ _prev
-              NULL
-```
-
-All rendering is **pure software** — there is no GPU acceleration. `CGBitmapContextCreate()` allocates a pixel buffer and rasterises paths, fills, strokes, and text into it. This is sufficient for the desktop resolution (1280×800) and matches how macOS works in software-rendering fallback mode.
-
-### 13.4 CoreText
-
-CoreText (`userland/CoreText/CoreText.c`, 1961 lines) provides text layout and rendering. It uses an embedded **8×16 bitmap font** (CP437/IBM PC VGA style) rather than TrueType/OpenType fonts. This avoids the enormous complexity of a real font rasteriser while providing functional text rendering.
-
-The API follows Apple's CoreText model:
-
-1. Create a `CTFont` with a size (the bitmap scales by integer factors)
-2. Create a `CFAttributedString` with font and colour attributes
-3. Create a `CTFramesetter` from the attributed string
-4. Create a `CTFrame` within a bounding rectangle
-5. Draw the frame into a `CGContext`
-
-Each `CTFrame` contains `CTLine` objects (one per line of text), and each `CTLine` contains `CTRun` objects (contiguous glyphs with uniform attributes).
-
-### 13.5 Foundation
-
-Foundation (`userland/Foundation/Foundation.m`, 1504 lines) bridges CoreFoundation into the Objective-C world. It defines the familiar NS* classes:
-
-`NSObject`, `NSString`, `NSMutableString`, `NSNumber`, `NSArray`, `NSMutableArray`, `NSDictionary`, `NSMutableDictionary`, `NSData`, `NSRunLoop`, `NSAutoreleasePool`, `NSNotificationCenter`, `NSProcessInfo`, `NSThread`, `NSDate`, `NSBundle`, `NSTimer`
-
-Foundation is compiled as Objective-C (`.m`) using the GNUstep ABI v1 (`-fobjc-runtime=gnustep-1.9`). This ABI is compatible with the GNUstep libobjc2 runtime that Kiseki bundles.
-
-### 13.6 AppKit
-
-AppKit (`userland/AppKit/AppKit.m`, 3267 lines) is the GUI toolkit. It provides the classes that applications use to create windows, handle events, and draw content:
-
-| Class | Purpose | WindowServer IPC |
-|-------|---------|------------------|
-| `NSApplication` | Main event loop, WS connection | `WS_MSG_CONNECT` |
-| `NSWindow` | Window creation and management | `WS_MSG_CREATE_WINDOW` / `DESTROY` |
-| `NSView` | Drawing hierarchy (`drawRect:`) | `WS_MSG_DRAW_RECT` (surface blit) |
-| `NSEvent` | Input event wrapper | `WS_EVENT_KEY_DOWN` / `MOUSE_*` |
-| `NSMenu` / `NSMenuItem` | Menu bar | `WS_MSG_SET_MENU` |
-| `NSResponder` | Responder chain for event routing | — |
-| `NSGraphicsContext` | Wraps `CGBitmapContext` | — |
-| `NSColor` | Colour management | — |
-| `NSFont` | Wraps `CTFont` | — |
-| `NSTextField` | Text input/display | — |
-| `NSButton` | Push button control | — |
-
-The event loop in `NSApplication`'s `run` method receives Mach IPC messages from WindowServer, wraps them in `NSEvent` objects, and dispatches them through the responder chain (`NSApplication` → `NSWindow` → `NSView`).
-
-When a view needs to redraw, `drawRect:` is called with a `NSGraphicsContext` (backed by a `CGBitmapContext`). After drawing, the pixel data is sent to WindowServer via `WS_MSG_DRAW_RECT` with an OOL Mach descriptor.
-
-### 13.7 Toll-Free Bridging
-
-Toll-free bridging allows CF objects and their NS counterparts to be used interchangeably — you can pass a `CFStringRef` where an `NSString *` is expected, and vice versa, with **zero overhead** (no conversion, no copying).
-
-This works because both types share the same memory layout:
-
-```
-                                  offset
-                                    ↓
-  ┌──────────────┐  obj[-1]   -8   Hidden refcount (intptr_t)
-  │  _cfisa      │  obj[0]     0   ObjC isa pointer / CF type marker
-  │  _cfinfoa    │  obj[1]     8   CF type info (TypeID, flags)
-  │  ... data ...│  obj[2]+   16   Type-specific data
-  └──────────────┘
-```
-
-- **CF side**: `_cfisa` at offset 0 holds the ObjC class pointer (set by Foundation's ISA lookup callback). `CFRetain`/`CFRelease` operate on `obj[-1]`.
-- **ObjC side**: GNUstep libobjc2 stores the reference count at `obj[-1]` (same location). The `isa` at offset 0 enables `objc_msgSend` to dispatch methods.
-
-Foundation registers the ISA lookup via `_CFRuntimeBridgeSetISALookup()`: when CoreFoundation creates a `CFString`, it calls the callback to get the `NSString` class pointer and stores it in `_cfisa`. The result is a single allocation that is simultaneously a valid `CFStringRef` and a valid `NSString *`.
-
-Bridged pairs:
-
-| CoreFoundation | Foundation |
-|---------------|------------|
-| `CFStringRef` | `NSString *` |
-| `CFArrayRef` | `NSArray *` |
-| `CFDictionaryRef` | `NSDictionary *` |
-| `CFNumberRef` | `NSNumber *` |
-| `CFDataRef` | `NSData *` |
-| `CFDateRef` | `NSDate *` |
-
-### 13.8 The ObjC Runtime & objc_msgSend
-
-Kiseki uses the GNUstep libobjc2 runtime. The heart of the runtime is `objc_msgSend` (`userland/libobjc/objc_msgSend.aarch64.S`, 324 lines) — the function called for *every* Objective-C method invocation.
-
-The dispatch algorithm:
-
-```mermaid
-flowchart TD
-    START["objc_msgSend(receiver=x0, selector=x1, ...)"]
-    START --> NIL{"receiver == nil?"}
-    NIL -- "Yes" --> ZERO["Return 0 / nil"]
-    NIL -- "No" --> SMALL{"Tagged pointer?<br/>(low bits set)"}
-    SMALL -- "Yes" --> SMALLCLASS["Load class from<br/>SmallObjectClasses table"]
-    SMALL -- "No" --> ISA["Load isa from receiver[0]"]
-    ISA --> DTABLE["Three-level sparse<br/>dispatch table lookup"]
-    SMALLCLASS --> DTABLE
-    DTABLE --> FOUND{"Slot found?"}
-    FOUND -- "Yes" --> TAILCALL["Load IMP from slot<br/>br x9 (tail call)"]
-    FOUND -- "No" --> SLOW["Spill all argument regs<br/>Call slowMsgLookup<br/>Restore regs<br/>Tail call resolved IMP"]
-```
-
-The three-level sparse dispatch table (`dtable`) encodes the method lookup as three successive byte-indexed array lookups, using the selector's unique index. This achieves O(1) dispatch in the common case — critical because `objc_msgSend` is called billions of times during normal application execution.
-
-> **macOS reference:** Apple's `objc_msgSend` (`libobjc.A.dylib`) uses a similar structure but with a per-class method cache for even faster lookups. The GNUstep implementation trades cache simplicity for a more structured sparse array, which has different performance characteristics but equivalent correctness.
-
----
-
-## Chapter 14: Applications — Finder, Terminal, Dock
-
-The previous chapters built the entire software stack from boot to framework: the kernel, virtual memory, IPC, syscalls, filesystem, networking, IOKit, the dynamic linker, WindowServer, CoreFoundation, CoreGraphics, CoreText, Foundation, and AppKit. This chapter walks through the **applications** that sit on top of that stack — the programs the user actually sees and interacts with.
-
-On macOS, the core GUI session consists of four processes launched by `loginwindow` after authentication:
-
-| Process | macOS location | Role |
-|---------|---------------|------|
-| `Dock.app` | `/System/Library/CoreServices/Dock.app` | Desktop wallpaper + dock bar |
-| `Finder.app` | `/System/Library/CoreServices/Finder.app` | File manager + desktop icons |
-| `SystemUIServer.app` | `/System/Library/CoreServices/SystemUIServer.app` | Menu bar extras (clock, Wi-Fi, battery) |
-| `Terminal.app` | `/Applications/Utilities/Terminal.app` | Terminal emulator (Login Item, not auto-launched) |
-
-Kiseki launches all four from `loginwindow` (`userland/sbin/loginwindow.c:706–720`), including Terminal as a development convenience.
-
-### 14.1 Application Architecture
-
-Every Kiseki application follows an identical architectural pattern — a consequence of building GUI apps on a minimal ObjC runtime without a full class hierarchy in each compilation unit.
-
-#### The Shared Application Pattern
-
-All four apps use the same `main()` skeleton:
-
-```c
-int main(int argc, const char *argv[]) {
-    void *pool = objc_autoreleasePoolPush();
-
-    /* 1. Create the shared NSApplication instance */
-    [NSApplication sharedApplication];
-
-    /* 2. Dynamically create an app delegate class */
-    Class MyAppDelegate = objc_allocateClassPair(
-        [NSObject class], "MyAppDelegate", 0);
-    class_addMethod(MyAppDelegate,
-                    @selector(applicationDidFinishLaunching:),
-                    (IMP)_myAppDidFinishLaunching, "v@:@");
-    objc_registerClassPair(MyAppDelegate);
-
-    /* 3. Instantiate delegate and set it */
-    id delegate = [MyAppDelegate new];
-    [NSApp setDelegate:delegate];
-
-    /* 4. Enter the event loop */
-    [NSApp run];
-
-    objc_autoreleasePoolPop(pool);
-    return 0;
-}
-```
-
-This is *exactly* the pattern macOS Cocoa applications use, but with one Kiseki-specific twist: **all classes are created dynamically** using the ObjC runtime C API (`objc_allocateClassPair`, `class_addMethod`, `objc_registerClassPair`) rather than the `@interface`/`@implementation` syntax. The reason is pragmatic — each `.m` file is compiled as a standalone unit with the COMDAT-stripping pipeline (Chapter 15), and the `@implementation` blocks generate COMDAT sections that cause linking failures with static GNUstep ABI v1 binaries.
-
-```mermaid
-flowchart TD
-    MAIN["main()"]
-    MAIN --> POOL["objc_autoreleasePoolPush()"]
-    POOL --> NSAPP["[NSApplication sharedApplication]<br/>→ connects to WindowServer"]
-    NSAPP --> ALLOC["objc_allocateClassPair(NSObject, name, 0)<br/>→ create delegate class at runtime"]
-    ALLOC --> ADDMETH["class_addMethod(cls, @selector(applicationDidFinishLaunching:), IMP, types)<br/>→ register the launch callback"]
-    ADDMETH --> REG["objc_registerClassPair(cls)<br/>→ finalise class in runtime tables"]
-    REG --> INST["[MyAppDelegate new]<br/>[NSApp setDelegate:delegate]"]
-    INST --> RUN["[NSApp run]<br/>→ calls finishLaunching → delegate callback<br/>→ enters event loop"]
-    RUN --> LOOP{"Event loop"}
-    LOOP --> |"nextEventMatchingMask"| DISPATCH["[NSApp sendEvent:event]<br/>→ routes to NSWindow → NSView"]
-    DISPATCH --> LOOP
-```
-
-#### Dynamic Class Creation
-
-Because applications cannot use `@interface`/`@implementation` (due to the COMDAT issue), every custom view and delegate is created using three runtime calls:
-
-1. **`objc_allocateClassPair(superclass, name, extraBytes)`** — Allocates a new class/metaclass pair inheriting from `superclass`. The class exists in memory but is not yet registered.
-
-2. **`class_addMethod(cls, selector, imp, types)`** — Attaches a method implementation (a C function pointer) to the class. The `types` string encodes the return type and parameter types using ObjC type encoding (e.g., `"v@:{CGRect=dddd}"` means void return, id self, SEL _cmd, CGRect argument).
-
-3. **`objc_registerClassPair(cls)`** — Finalises the class and installs it in the runtime's class table, making it visible to `objc_getClass()` and enabling `objc_msgSend` dispatch.
-
-This three-step dance is performed for every custom class in every application:
-
-| Application | Dynamic classes created |
-|-------------|----------------------|
-| `Dock.app` | `DockAppDelegate`, `DockView`, `DesktopView` |
-| `Finder.app` | `FinderAppDelegate`, `FinderView` |
-| `Terminal.app` | `TerminalAppDelegate`, `TerminalView` |
-| `SystemUIServer.app` | `SystemUIServerDelegate`, `ClockView` |
-
-#### Two Run Loop Strategies
-
-Applications use one of two event-loop strategies:
-
-**Strategy 1 — `[NSApp run]`** (Dock, Finder): The standard AppKit run loop. `NSApplication.run` calls `finishLaunching` (which fires `applicationDidFinishLaunching:`), then enters a tight loop calling `nextEventMatchingMask:` / `sendEvent:` / `updateWindows`. The application has no custom loop logic.
-
-**Strategy 2 — Custom run loop** (Terminal, SystemUIServer): These apps need to perform periodic work *between* event dispatches — Terminal must poll its PTY file descriptor, and SystemUIServer must check whether the clock minute has changed. They call `[NSApp finishLaunching]` manually, then run their own `for(;;)` loop:
-
-```c
-[NSApp finishLaunching];
-for (;;) {
-    NSEvent *event = [NSApp nextEventMatchingMask:0xFFFFFFFF
-                                        untilDate:nil
-                                           inMode:CFSTR("kCFRunLoopDefaultMode")
-                                          dequeue:YES];
-    if (event) [NSApp sendEvent:event];
-
-    /* App-specific polling work here */
-    term_poll_and_redraw();          /* Terminal: read PTY master */
-
-    [g_window displayIfNeeded];      /* Flush dirty windows */
-}
-```
-
-```mermaid
-flowchart LR
-    subgraph "Strategy 1: [NSApp run]"
-        A1["finishLaunching"] --> A2["nextEvent"] --> A3["sendEvent"] --> A4["updateWindows"] --> A2
-    end
-    subgraph "Strategy 2: Custom loop"
-        B1["finishLaunching"] --> B2["nextEvent"] --> B3["sendEvent"] --> B4["App-specific work<br/>(PTY poll / clock check)"] --> B5["displayIfNeeded"] --> B2
-    end
-```
-
-> **macOS reference:** On macOS, the equivalent of Strategy 2 uses `CFRunLoopSource` or `NSTimer` to inject periodic callbacks into the `CFRunLoop`. Since Kiseki's AppKit does not yet implement `NSTimer`, the manual polling approach achieves the same effect at the cost of CPU spinning during idle periods.
-
-#### How loginwindow Launches Applications
-
-After the user authenticates, `loginwindow` (`userland/sbin/loginwindow.c:706–720`) launches the GUI session by `fork()`+`execve()`-ing each application in a specific order:
-
-```mermaid
-sequenceDiagram
-    participant LW as loginwindow
-    participant Dock as Dock.app
-    participant Finder as Finder.app
-    participant SUI as SystemUIServer.app
-    participant Term as Terminal.app
-
-    Note over LW: User authenticated
-    LW->>Dock: fork() + execve("/Applications/Dock.app/Dock")
-    LW->>Finder: fork() + execve("/Applications/Finder.app/Finder")
-    LW->>SUI: fork() + execve("/Applications/SystemUIServer.app/SystemUIServer")
-    LW->>Term: fork() + execve("/Applications/Terminal.app/Terminal")
-
-    Note over LW: Monitor child PIDs via waitpid(WNOHANG)
-
-    Dock--xLW: Dock crashes (exit)
-    LW->>Dock: Relaunch Dock.app
-
-    Term--xLW: Terminal exits (user closed)
-    Note over LW: Do NOT relaunch Terminal
-```
-
-The launch order matters: Dock creates the desktop wallpaper window (sent to back) and the dock bar, so it must be running before Finder opens its browser window on top. LoginWindow also **monitors child processes** and relaunches critical ones (Dock, Finder, SystemUIServer) if they crash (`loginwindow.c:734–768`), but intentionally does *not* relaunch Terminal — the user may have closed it deliberately.
-
-Each child process inherits a sanitised environment (`HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, `TERM`) and, if the authenticated user is not root, has its privileges dropped via `setgid()`/`setuid()` before `execve()` (`loginwindow.c:694–695`).
-
-### 14.2 Dock.app
-
-**Source:** `userland/apps/Dock.app/Dock.m` (249 lines)
-
-On macOS, `Dock.app` has two jobs that might surprise you: it renders the **desktop wallpaper** (not Finder!) and the **dock bar**. The wallpaper is drawn into a fullscreen window sent to the back of the window stack via `CGSSetDesktopBackground`. Kiseki's Dock faithfully reproduces this architecture.
-
-#### Two-Window Design
-
-Dock creates exactly two windows:
-
-```mermaid
-graph TD
-    subgraph "Window Stack (front to back)"
-        DOCK["Dock bar window<br/>NSWindowStyleMaskBorderless<br/>x=0 y=746, 1280×54<br/>makeKeyAndOrderFront:"]
-        OTHER["Other app windows<br/>(Finder, Terminal, etc.)"]
-        DESKTOP["Desktop window<br/>NSWindowStyleMaskBorderless<br/>x=0 y=0, 1280×800<br/>orderBack:"]
-    end
-    DOCK ~~~ OTHER ~~~ DESKTOP
-```
-
-| Window | Position | Size | Z-ordering |
-|--------|---------|------|------------|
-| Desktop | `(0, 0)` | `1280 × 800` (fullscreen) | `orderBack:` — behind everything |
-| Dock bar | `(0, 746)` | `1280 × 54` | `makeKeyAndOrderFront:` — above everything |
-
-Both windows are borderless (`NSWindowStyleMaskBorderless`) — they have no title bar, close button, or resize handles. The desktop window covers the entire screen and is pushed behind all other windows. The dock bar window sits at `y = SCREEN_HEIGHT - DOCK_HEIGHT = 800 - 54 = 746`, covering the bottom strip.
-
-#### DesktopView — The Wallpaper
-
-The `DesktopView` class (created dynamically at `Dock.m:175–178`) draws a gradient wallpaper that simulates the macOS default desktop background:
-
-```c
-/* Dock.m:146–153 — Gradient wallpaper using horizontal bands */
-for (int y = 0; y < SCREEN_HEIGHT; y += 4) {
-    CGFloat t = (CGFloat)y / (CGFloat)SCREEN_HEIGHT;
-    CGFloat r = 0.05 + t * 0.10;   /* Red: 0.05 → 0.15 */
-    CGFloat g = 0.20 + t * 0.15;   /* Green: 0.20 → 0.35 */
-    CGFloat b = 0.40 + t * 0.15;   /* Blue: 0.40 → 0.55 */
-    CGContextSetRGBFillColor(ctx, r, g, b, 1.0);
-    CGContextFillRect(ctx, CGRectMake(0, y, SCREEN_WIDTH, 4));
-}
-```
-
-This draws 200 horizontal bands (800 pixels ÷ 4 pixels per band), each with slightly different RGB values computed from a linear interpolation parameter `t` (0.0 at the top of the screen, 1.0 at the bottom). The result is a smooth teal-to-navy gradient — a reasonable approximation of macOS's "Dynamic Desktop" wallpaper without requiring image file loading.
-
-#### DockView — The Dock Bar
-
-The `DockView` class (`Dock.m:202–205`) draws the dock bar itself — a translucent dark strip with centred application icons:
-
-```mermaid
-graph LR
-    subgraph "Dock bar (1280×54 pixels)"
-        SEP["Top separator<br/>1px line, rgb(0.3,0.3,0.3)"]
-        BG["Background<br/>rgb(0.15,0.15,0.15) alpha=0.85"]
-        subgraph "Icons (centred)"
-            I1["🟦 Finder<br/>40×40, blue"]
-            I2["⬛ Terminal<br/>40×40, dark"]
-            I3["🔲 System<br/>40×40, grey"]
-        end
-    end
-```
-
-Icon rendering (`Dock.m:99–123`):
-
-1. **Layout calculation** — Total icon width is computed as `count × (icon_size + padding) - padding`. The starting X position is `(SCREEN_WIDTH - totalWidth) / 2` to centre the icons horizontally.
-
-2. **Icon squares** — Each icon is a `40 × 40` filled rectangle in a distinctive colour (blue for Finder, dark grey for Terminal, light grey for System). A white semi-transparent border stroke provides definition.
-
-3. **Labels** — Text is drawn inside each icon square using `CGContextShowTextAtPoint`, truncated to 5 characters. The text is positioned vertically centred within the icon.
-
-The icon data is stored in a static array of `DockIcon` structs:
-
-```c
-/* Dock.m:58–68 */
+/* loginwindow.c:522-564 -- /etc/passwd parsing */
+/* Format: name:x:uid:gid:gecos:home:shell */
 typedef struct {
-    const char *label;
-    CGFloat r, g, b;    /* Icon colour */
-} DockIcon;
-
-static DockIcon dock_icons[] = {
-    { "Finder",   0.25, 0.55, 0.95 },  /* Blue */
-    { "Terminal",  0.15, 0.15, 0.15 },  /* Dark grey */
-    { "System",   0.70, 0.70, 0.70 },  /* Light grey */
-};
+    char name[32];
+    int  uid, gid;
+    char home[64];
+    char shell[32];
+} passwd_entry_t;
 ```
 
-#### The Delegate Launch Sequence
+Then checks `/etc/shadow` for the password hash (`loginwindow.c:566-599`). Three
+hash formats are supported:
 
-When Dock starts, the `applicationDidFinishLaunching:` callback (`Dock.m:162–218`) performs a precise sequence:
+| Format | Meaning |
+|---|---|
+| (empty) | No password required |
+| `!` or `*` | Account locked |
+| `plain:password` | Plaintext comparison |
+| (anything else) | Direct `strcmp()` |
 
-```mermaid
-sequenceDiagram
-    participant NSApp as NSApplication
-    participant Del as DockAppDelegate
-    participant WS as WindowServer
+No real cryptographic hashing is implemented -- this is a development/educational OS.
 
-    NSApp->>Del: applicationDidFinishLaunching:
-    Del->>Del: Create DesktopView class (runtime)
-    Del->>WS: [[NSWindow alloc] initWithContentRect:(0,0,1280,800)]
-    Del->>WS: [desktopWindow setContentView:desktopView]
-    Del->>WS: [desktopWindow orderBack:nil]
-    Note over WS: Desktop goes behind all windows
+#### Session Launch
 
-    Del->>Del: Create DockView class (runtime)
-    Del->>WS: [[NSWindow alloc] initWithContentRect:(0,746,1280,54)]
-    Del->>WS: [dockWindow setContentView:dockView]
-    Del->>WS: [dockWindow makeKeyAndOrderFront:nil]
-    Note over WS: Dock bar goes in front of all windows
-
-    Del->>NSApp: [NSApp setMainMenu:menu]
-```
-
-The ordering of `orderBack:` and `makeKeyAndOrderFront:` is critical. The desktop window must be sent to the back of the WindowServer's window list so that every subsequently-created window (Finder, Terminal) appears on top of the wallpaper. The dock bar window must be ordered to the front so it overlays everything.
-
-> **macOS reference:** On macOS, `Dock.app` uses `CGSSetDesktopBackground` (a private CoreGraphics SPI) to set the wallpaper, and the dock bar uses a `CGSWindowLevel` of `kCGDockWindowLevel` to stay above normal windows but below alerts. Kiseki approximates this with `orderBack:`/`makeKeyAndOrderFront:` since the WindowServer does not yet implement window levels.
-
-### 14.3 Finder.app
-
-**Source:** `userland/apps/Finder.app/Finder.m` (869 lines)
-
-Finder is the most complex Kiseki application. It is a **real filesystem browser** — not a mock-up. It calls `opendir()`/`readdir()`/`stat()` to enumerate the actual ext4 filesystem, displays files with type-appropriate icons, supports keyboard and mouse navigation, and can launch applications via `fork()`+`execve()`.
-
-#### Layout Anatomy
-
-The Finder window is a standard titled window (500×380 pixels) with three visual regions:
+On successful authentication, `launch_gui_session()` (`loginwindow.c:710-738`) forks
+and execs four applications in order:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  < Back              /Applications                  │ ← Header bar (28px)
-├──────────┬──────────────────────────────────────────┤
-│ Favourites│  Name                            Size   │
-│  /        │  ────────────────────────────────────── │
-│  Applicat │  █ Dock.app                       --    │ ← .app bundle (dark icon)
-│  System   │  █ Finder.app                     --    │
-│  Users    │  █ Terminal.app                   --    │
-│  bin      │  █ SystemUIServer.app             --    │
-│  sbin     │  ■ some_binary                   4 KB   │ ← executable (green icon)
-│  etc      │  □ config.txt                    128 B  │ ← regular file (white icon)
-│  tmp      │                                         │
-│           │                                         │
-├──────────┴──────────────────────────────────────────┤
-│                                                     │
-└─────────────────────────────────────────────────────┘
-     120px                  380px
-   (sidebar)             (file listing)
+1. /System/Library/CoreServices/Dock.app/Dock
+2. /System/Library/CoreServices/Finder.app/Finder
+3. /System/Library/CoreServices/SystemUIServer.app/SystemUIServer
+4. /Applications/Terminal.app/Terminal
 ```
 
-The layout is defined by constants (`Finder.m:132–153`):
+Each child:
+- Gets environment variables set from the authenticated user's passwd entry
+  (`HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, `TERM`)
+- Drops privileges via `setgid()` then `setuid()` (GID before UID -- standard Unix
+  practice since you can't change GID after dropping root UID)
+- Calls `execve()` with the application path
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `SIDEBAR_W` | 120 px | Sidebar width |
-| `HEADER_H` | 28 px | Header bar height |
-| `ITEM_HEIGHT` | 24 px | Row height per file entry |
-| `ICON_SIZE` | 16 px | File type icon size |
-| `MAX_ENTRIES` | 128 | Maximum directory entries displayed |
+After launching, loginwindow hides its window (`ws_order_window(WS_ORDER_OUT)`) and
+enters a child-monitoring loop. It calls `waitpid(-1, WNOHANG)` to reap exited
+children. If Dock, Finder, or SystemUIServer crash, they are automatically relaunched.
+Terminal is NOT relaunched (the user may have intentionally closed it).
 
-#### Directory Scanning with POSIX Syscalls
+This matches macOS loginwindow's behaviour: it monitors and relaunches the "core
+services" (Dock, Finder, SystemUIServer) but not user-launched applications.
 
-The `finder_read_directory()` function (`Finder.m:207–300`) demonstrates Kiseki's POSIX syscall layer in action. It performs a complete directory enumeration using the same APIs any Unix program would use:
+### 12.6 init -- The launchd-Style PID 1
 
-```mermaid
-sequenceDiagram
-    participant Finder
-    participant libc as libSystem (libc)
-    participant Kernel as BSD Syscall Layer
+**Source**: `userland/sbin/init.c` (978 lines)
 
-    Finder->>libc: opendir(g_current_path)
-    libc->>Kernel: SYS_open(path, O_RDONLY|O_DIRECTORY)
-    Kernel-->>libc: fd
-    libc-->>Finder: DIR *
+Kiseki's init is a faithful reimplementation of macOS's `launchd` -- the first
+user-space process (PID 1). It manages system daemons using Apple-format XML plist
+configuration files.
 
-    loop For each entry
-        Finder->>libc: readdir(dir)
-        libc->>Kernel: SYS_getdirentries(fd, buf, size)
-        Kernel-->>libc: struct dirent
-        libc-->>Finder: dirent (name, d_type)
-
-        Note over Finder: Skip "." and ".."
-
-        Finder->>libc: stat(fullpath, &sb)
-        libc->>Kernel: SYS_stat(path)
-        Kernel-->>libc: struct stat (mode, size, ...)
-        libc-->>Finder: mode, size, timestamps
-    end
-
-    Finder->>libc: closedir(dir)
-    Note over Finder: Sort: directories first, then alphabetical
-```
-
-Each entry is stored in a `FinderEntry` struct (`Finder.m:159–169`):
-
-```c
-typedef struct {
-    char        name[256];
-    uint8_t     d_type;         /* DT_DIR, DT_REG, etc. */
-    mode_t      mode;           /* From stat() */
-    off_t       size;           /* File size */
-    BOOL        is_dir;
-    BOOL        is_symlink;
-    BOOL        is_executable;
-    BOOL        is_device;
-    BOOL        is_app_bundle;  /* Directory ending in ".app" */
-} FinderEntry;
-```
-
-The `is_app_bundle` flag deserves attention: Finder detects `.app` bundles by checking whether a directory name ends with `".app"` (`Finder.m:259–264`). This is the same heuristic macOS Finder uses — on macOS, directories ending in `.app` are displayed as opaque application icons rather than navigable folders.
-
-After reading all entries, Finder sorts them with a simple bubble sort (`Finder.m:276–296`) — directories before files, then alphabetical within each group. This is adequate for the 128-entry limit.
-
-#### File Type Icons
-
-Finder renders six different icon styles based on file type (`Finder.m:618–648`):
-
-```mermaid
-flowchart TD
-    ENT["FinderEntry"]
-    ENT --> APP{"is_app_bundle?"}
-    APP -- "Yes" --> AICON["Dark grey square + 'A' label<br/>rgb(0.40, 0.40, 0.45)"]
-    APP -- "No" --> DIR{"is_dir?"}
-    DIR -- "Yes" --> DICON["Blue square + folder tab<br/>rgb(0.30, 0.60, 0.95)"]
-    DIR -- "No" --> SYM{"is_symlink?"}
-    SYM -- "Yes" --> SICON["Teal square + '@' label<br/>rgb(0.30, 0.80, 0.80)"]
-    SYM -- "No" --> DEV{"is_device?"}
-    DEV -- "Yes" --> DEVICON["Orange square<br/>rgb(0.90, 0.60, 0.20)"]
-    DEV -- "No" --> EXE{"is_executable?"}
-    EXE -- "Yes" --> EICON["Green square<br/>rgb(0.30, 0.75, 0.30)"]
-    EXE -- "No" --> FICON["White square + grey border<br/>(regular file)"]
-```
-
-The folder icon is distinguished by a small "tab" drawn at the top-left of the square (`Finder.m:629–630`), mimicking the classic macOS folder silhouette. The `.app` bundle icon gets a white "A" character overlay. Symlinks get a "@" character — the traditional Unix notation for symbolic links.
-
-#### Mouse and Keyboard Interaction
-
-Finder implements full mouse and keyboard navigation through two event handlers registered on the `FinderView` class:
-
-**`mouseDown:` (`Finder.m:684–737`)** — Hit-tests the click location against three regions:
-
-1. **Header area** (`y >= headerTop`): If the back button text area is clicked and the current path is not `/`, navigates to the parent directory.
-2. **Sidebar** (`x < SIDEBAR_W`): Tests each favourite entry's bounding box; clicking one navigates to that path.
-3. **File listing** (`x > SIDEBAR_W`): Computes the clicked row index from the Y coordinate. Single-click selects; double-click (`[event clickCount] >= 2`) opens the item.
-
-**`keyDown:` (`Finder.m:742–791`)** — Handles keyboard navigation:
-
-| Key | Action |
-|-----|--------|
-| ↑ (keyCode 103) | Move selection up one entry |
-| ↓ (keyCode 108) | Move selection down one entry |
-| Enter (0x0D/0x0A) | Open selected item |
-| Backspace (0x7F/0x08) | Navigate to parent directory |
-
-The scroll offset (`g_scroll_offset`) is adjusted to keep the selected entry visible when using arrow keys (`Finder.m:763–773`).
-
-#### Application Launching
-
-Double-clicking an entry triggers `finder_open_item()` (`Finder.m:460–490`), which takes one of three actions:
-
-```mermaid
-flowchart TD
-    OPEN["finder_open_item(idx)"]
-    OPEN --> BUNDLE{"is_app_bundle?"}
-    BUNDLE -- "Yes" --> RESOLVE["finder_resolve_app_executable()<br/>Strip '.app' → find binary<br/>e.g. Terminal.app/Terminal"]
-    RESOLVE --> LAUNCH["finder_launch_executable(exe_path)"]
-    BUNDLE -- "No" --> ISDIR{"is_dir?"}
-    ISDIR -- "Yes" --> NAV["finder_navigate_into(name)<br/>→ enter directory"]
-    ISDIR -- "No" --> ISEXE{"is_executable?"}
-    ISEXE -- "Yes" --> LAUNCH
-    ISEXE -- "No" --> NOOP["No handler — log message"]
-    LAUNCH --> FORK["fork()"]
-    FORK --> CHILD["Child: setsid(), build env, execve(path)"]
-    FORK --> PARENT["Parent: log PID, continue"]
-```
-
-The `.app` bundle convention (`Finder.m:376–397`) mirrors macOS: given a bundle path like `/Applications/Terminal.app`, the executable is found by stripping `.app` from the base name to get `Terminal`, then looking for `/Applications/Terminal.app/Terminal`. On macOS, this mapping is specified in `Info.plist` via `CFBundleExecutable`; Kiseki uses the simplified convention that the executable name equals the bundle name minus `.app`.
-
-The `finder_launch_executable()` function (`Finder.m:399–458`) performs the actual launch:
-
-1. `stat()` the path to verify it exists, is not a directory, and has execute permission.
-2. `fork()` to create a child process.
-3. In the child: `setsid()` to create a new session, build an environment array from inherited env vars (`HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, `TERM`), then `execve()`.
-4. In the parent: log the launched PID and continue.
-
-This is essentially the same logic `loginwindow` uses — the Finder acts as a second "launcher" that the user controls interactively.
-
-> **macOS reference:** On macOS, Finder delegates application launching to **LaunchServices** (`/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework`), which reads `Info.plist`, checks code signatures, manages the "Recent Items" list, and handles document-app bindings. Kiseki's direct `fork()`+`execve()` approach bypasses all of that, providing the same end result with minimal complexity.
-
-### 14.4 Terminal.app
-
-**Source:** `userland/apps/Terminal.app/Terminal.m` (1039 lines)
-
-Terminal is the most technically dense Kiseki application. It combines three major subsystems in a single file: a **PTY (pseudo-terminal) manager**, a full **VT100/ANSI terminal emulator**, and a **character cell renderer**. Understanding how it works requires understanding how terminal I/O works on Unix systems.
-
-#### Concept Primer: How Terminals Work
-
-If you have used a terminal application but never wondered what happens underneath, here is the mental model:
-
-```mermaid
-sequenceDiagram
-    participant User as User (keyboard)
-    participant TApp as Terminal.app
-    participant PTYm as PTY Master fd
-    participant PTYs as PTY Slave fd
-    participant Shell as /bin/bash
-
-    User->>TApp: Keypress 'l'
-    TApp->>PTYm: write(master_fd, "l", 1)
-    PTYm->>PTYs: kernel copies data
-    Shell->>PTYs: read(stdin=slave_fd) → "l"
-    Shell->>Shell: Shell processes input
-
-    Shell->>PTYs: write(stdout=slave_fd, "ls\n\033[1mfoo\033[0m\n")
-    PTYs->>PTYm: kernel copies data
-    TApp->>PTYm: read(master_fd) → VT100 escape sequences
-    TApp->>TApp: VT100 parser processes bytes → update cell grid
-    TApp->>TApp: Render cell grid to CGContext
-```
-
-A **pseudo-terminal (PTY)** is a kernel-provided pair of file descriptors that act like a virtual serial line:
-
-- **Master side** — held by the terminal emulator (Terminal.app). Writing to the master sends data *to* the shell (as if the user typed it). Reading from the master receives data *from* the shell (everything the shell prints).
-- **Slave side** — looks like a real terminal device to the shell. The shell's `stdin`, `stdout`, and `stderr` are all connected to the slave. When `bash` calls `printf("hello\n")`, those bytes travel from the slave through the kernel to the master.
-
-The shell's output contains **VT100/ANSI escape sequences** — special byte patterns like `\033[1m` (bold on) or `\033[31m` (red foreground) that control text attributes, cursor position, and screen clearing. The terminal emulator must **parse** these sequences and translate them into visual changes in a character cell grid.
-
-#### PTY Setup
-
-The `term_setup_pty()` function (`Terminal.m:607–695`) establishes the PTY and forks the shell:
-
-```mermaid
-sequenceDiagram
-    participant Term as Terminal.app
-    participant Kernel
-
-    Term->>Kernel: openpty(&master, &slave, NULL, NULL, NULL)
-    Kernel-->>Term: master_fd, slave_fd
-
-    Term->>Kernel: fcntl(master_fd, F_SETFL, O_NONBLOCK)
-    Note over Term: Master must be non-blocking<br/>so event loop doesn't stall
-
-    Term->>Kernel: fork()
-    Kernel-->>Term: pid (parent gets child PID)
-
-    rect rgb(240, 240, 255)
-        Note over Term,Kernel: Child process
-        Term->>Kernel: close(master_fd)
-        Term->>Kernel: setsid()
-        Note over Term: Create new session (become session leader)
-        Term->>Kernel: ioctl(slave_fd, TIOCSCTTY, 0)
-        Note over Term: Make slave the controlling terminal
-        Term->>Kernel: ioctl(slave_fd, TIOCSWINSZ, {24, 80})
-        Note over Term: Tell kernel the terminal is 80×24
-        Term->>Kernel: dup2(slave_fd, 0)  /* stdin */
-        Term->>Kernel: dup2(slave_fd, 1)  /* stdout */
-        Term->>Kernel: dup2(slave_fd, 2)  /* stderr */
-        Term->>Kernel: execve("/bin/bash", ["bash","--login"], envp)
-    end
-
-    rect rgb(255, 240, 240)
-        Note over Term,Kernel: Parent process
-        Term->>Kernel: close(slave_fd)
-        Note over Term: g_master_fd = master_fd<br/>g_shell_pid = pid
-    end
-```
-
-Key details:
-
-1. **`openpty()`** — Allocates a PTY pair from the kernel. This is a BSD extension that Kiseki's libSystem implements as a wrapper around the kernel's PTY subsystem (Chapter 7).
-
-2. **`O_NONBLOCK` on master** — The master fd is set to non-blocking mode (`Terminal.m:616–617`) so that `read()` returns immediately with `EAGAIN` when no data is available, rather than blocking the entire event loop.
-
-3. **`setsid()` + `TIOCSCTTY`** — The child creates a new session and makes the slave its controlling terminal. This is critical: without a controlling terminal, signals like `Ctrl-C` (SIGINT) would not reach the shell.
-
-4. **`TIOCSWINSZ`** — Sets the terminal window size to 80 columns × 24 rows (`Terminal.m:633–638`). The shell reads this to know how wide to format output.
-
-5. **Shell fallback chain** — The child tries `execve()` with the user's `$SHELL`, then falls back to `/bin/bash`, then `/bin/sh` (`Terminal.m:674–681`). This ensures a shell starts even if the user's preferred shell is not available.
-
-#### The VT100 Terminal Emulator
-
-The VT100 emulator (`Terminal.m:233–601`) is a faithful reimplementation of the same state machine used in WindowServer's built-in terminal (which itself is modelled on XNU's `osfmk/console/video_console.c`).
-
-**State machine:**
-
-```mermaid
-stateDiagram-v2
-    [*] --> VT_NORMAL
-
-    VT_NORMAL --> VT_ESC: ESC (0x1B)
-    VT_NORMAL --> VT_NORMAL: Printable char → write to cell grid
-    VT_NORMAL --> VT_NORMAL: CR, LF, BS, TAB → cursor movement
-
-    VT_ESC --> VT_CSI_INIT: '['
-    VT_ESC --> VT_NORMAL: 'c' (reset), 'D' (IND), 'M' (RI)
-    VT_ESC --> VT_NORMAL: '7' (save cursor), '8' (restore cursor)
-
-    VT_CSI_INIT --> VT_CSI_PARS: Always (init parameters)
-    VT_CSI_PARS --> VT_CSI_PARS: Digit → accumulate parameter
-    VT_CSI_PARS --> VT_CSI_PARS: ';' → next parameter
-    VT_CSI_PARS --> VT_DEC_PRIV: '?' → DEC private mode
-    VT_CSI_PARS --> VT_NORMAL: Letter → dispatch CSI command
-
-    VT_DEC_PRIV --> VT_DEC_PRIV: Digit → accumulate parameter
-    VT_DEC_PRIV --> VT_NORMAL: 'h'/'l' → set/reset DEC mode
-```
-
-The emulator processes one byte at a time via `term_putc()` (`Terminal.m:467–601`). In `VT_NORMAL` state, printable characters are written directly to the cell grid. Control characters trigger cursor movement:
-
-| Byte | Name | Action |
-|------|------|--------|
-| `0x08` / `0x7F` | BS / DEL | Move cursor left one column |
-| `0x09` | TAB | Advance to next 8-column tab stop |
-| `0x0A` | LF | Move cursor down; scroll if at bottom |
-| `0x0D` | CR | Move cursor to column 0 |
-| `0x1B` | ESC | Enter escape sequence parsing |
-
-**CSI (Control Sequence Introducer) commands** are the workhorse of terminal formatting. The emulator supports:
-
-| Sequence | Command | Description |
-|----------|---------|-------------|
-| `ESC[nA` | CUU | Cursor up *n* rows |
-| `ESC[nB` | CUD | Cursor down *n* rows |
-| `ESC[nC` | CUF | Cursor forward *n* columns |
-| `ESC[nD` | CUB | Cursor back *n* columns |
-| `ESC[r;cH` | CUP | Cursor position (row *r*, column *c*) |
-| `ESC[nJ` | ED | Erase display (0=below, 1=above, 2=all) |
-| `ESC[nK` | EL | Erase line (0=right, 1=left, 2=all) |
-| `ESC[nP` | DCH | Delete *n* characters (shift left) |
-| `ESC[nL` | IL | Insert *n* lines (shift down) |
-| `ESC[nM` | DL | Delete *n* lines (shift up) |
-| `ESC[n;...m` | SGR | Set graphic rendition (colours, bold, underline) |
-
-**SGR (Select Graphic Rendition)** handles text styling (`Terminal.m:429–447`):
-
-| Code | Effect |
-|------|--------|
-| 0 | Reset all attributes |
-| 1 | Bold on |
-| 4 | Underline on |
-| 7 | Reverse video on |
-| 22 | Bold off |
-| 24 | Underline off |
-| 27 | Reverse video off |
-| 30–37 | Set foreground colour (ANSI 8-colour) |
-| 39 | Default foreground |
-| 40–47 | Set background colour (ANSI 8-colour) |
-| 49 | Default background |
-
-#### Cell Grid and Rendering
-
-Terminal state is stored in a struct-of-arrays layout (`Terminal.m:183–216`):
+#### Boot Sequence
 
 ```
-cells[24][80]       — ASCII character at each position
-cell_fg[24][80]     — Foreground colour index (0–7)
-cell_bg[24][80]     — Background colour index (0–7)
-cell_attr[24][80]   — Attribute flags (bold|underline|reverse)
+init main()
+  |
+  +-> [Phase 1] Load plist configs
+  |     scan /System/Library/LaunchDaemons/*.plist
+  |     scan /Library/LaunchDaemons/*.plist
+  |     parse XML plists into job descriptors
+  |
+  +-> [Phase 2] Pre-create Mach service ports
+  |     For each job's MachServices:
+  |       mach_port_allocate(RECEIVE) -> port
+  |       bootstrap_register(name, port)
+  |
+  +-> [Phase 3] Launch all daemons
+  |     For each job:
+  |       fork() + execve(job->program)
+  |
+  +-> [Phase 4] Spawn getty on /dev/console
+  |     (or skip fbcon0 if WindowServer is configured)
+  |
+  +-> [Phase 5] Main loop
+        for (;;):
+          spawn_getty("/dev/console")
+          wait4(-1) in a loop:
+            if getty exited: break (respawn in outer loop)
+            if fbcon0 getty exited: respawn it
+            if daemon exited: handle_daemon_exit()
 ```
 
-This mirrors the WindowServer's built-in terminal state exactly. Rendering (`_TerminalDrawRect`, `Terminal.m:728–826`) iterates every cell:
+#### Plist Parsing
 
-```mermaid
-flowchart TD
-    DRAW["_TerminalDrawRect"]
-    DRAW --> LOOP["For each row 0..23, col 0..79"]
-    LOOP --> ATTR{"ATTR_REVERSE set?"}
-    ATTR -- "Yes" --> SWAP["Swap fg ↔ bg colours"]
-    ATTR -- "No" --> BOLD{"ATTR_BOLD set?"}
-    BOLD -- "Yes" --> BRIGHT["Use bright colour table"]
-    BOLD -- "No" --> NORMAL["Use normal colour table"]
-    SWAP --> BGFILL["Fill cell background<br/>CGContextFillRect(x, y, 8, 16)"]
-    BRIGHT --> BGFILL
-    NORMAL --> BGFILL
-    BGFILL --> CHAR{"ch > ' ' && ch < 0x7F?"}
-    CHAR -- "Yes" --> TEXT["CGContextShowTextAtPoint<br/>draw character glyph"]
-    CHAR -- "No" --> UL
-    TEXT --> UL{"ATTR_UNDERLINE?"}
-    UL -- "Yes" --> ULLINE["Draw 1px line at cell bottom"]
-    UL -- "No" --> NEXT["Next cell"]
-    ULLINE --> NEXT
-    NEXT --> CURSOR["Draw block cursor at (cur_col, cur_row)<br/>Inverted colours"]
-```
-
-Each cell is an `8 × 16` pixel rectangle. The ANSI colour palette (`Terminal.m:169–175`) provides 8 normal and 8 bright colours:
-
-| Index | Normal | Bright (bold) |
-|-------|--------|---------------|
-| 0 | Black `(0.00, 0.00, 0.00)` | Dark grey `(0.33, 0.33, 0.33)` |
-| 1 | Red `(0.67, 0.00, 0.00)` | Bright red `(1.00, 0.33, 0.33)` |
-| 2 | Green `(0.00, 0.67, 0.00)` | Bright green `(0.33, 1.00, 0.33)` |
-| 3 | Yellow `(0.67, 0.67, 0.00)` | Bright yellow `(1.00, 1.00, 0.33)` |
-| 4 | Blue `(0.00, 0.00, 0.67)` | Bright blue `(0.33, 0.33, 1.00)` |
-| 5 | Magenta `(0.67, 0.00, 0.67)` | Bright magenta `(1.00, 0.33, 1.00)` |
-| 6 | Cyan `(0.00, 0.67, 0.67)` | Bright cyan `(0.33, 1.00, 1.00)` |
-| 7 | White `(0.80, 0.80, 0.80)` | Bright white `(1.00, 1.00, 1.00)` |
-
-#### Keyboard Input and Special Keys
-
-The `_TerminalKeyDown` handler (`Terminal.m:833–897`) translates keyboard events into bytes written to the PTY master:
-
-**Arrow and special keys** are converted to VT100 escape sequences:
-
-```c
-/* Terminal.m:845–873 */
-case KEY_UP:    write(g_master_fd, "\033[A", 3);  break;
-case KEY_DOWN:  write(g_master_fd, "\033[B", 3);  break;
-case KEY_RIGHT: write(g_master_fd, "\033[C", 3);  break;
-case KEY_LEFT:  write(g_master_fd, "\033[D", 3);  break;
-case KEY_HOME:  write(g_master_fd, "\033[H", 3);  break;
-case KEY_END:   write(g_master_fd, "\033[F", 3);  break;
-case KEY_DELETE: write(g_master_fd, "\033[3~", 4); break;
-```
-
-**Control key combinations** are translated to the corresponding control character (Ctrl-A = 0x01, Ctrl-C = 0x03, etc.) by the formula `ch - 'a' + 1` (`Terminal.m:882–887`).
-
-**Regular characters** below ASCII 0x80 are written as single bytes (`Terminal.m:888–891`).
-
-#### The Custom Event Loop
-
-Terminal cannot use `[NSApp run]` because it needs to poll the PTY master between event dispatches. Its custom loop (`Terminal.m:1017–1035`) does three things per iteration:
-
-```mermaid
-flowchart LR
-    A["1. nextEvent<br/>(10ms timeout)"] --> B["2. sendEvent<br/>(if event exists)"]
-    B --> C["3. term_poll_and_redraw()<br/>→ read(master_fd)<br/>→ feed VT100 parser<br/>→ setNeedsDisplay if dirty"]
-    C --> D["4. displayIfNeeded<br/>→ draw if dirty flag set"]
-    D --> A
-```
-
-The `term_poll_and_redraw()` function (`Terminal.m:903–924`) reads up to 4096 bytes from the non-blocking master fd, feeds each byte through `term_putc()`, and marks the view as needing display if the `dirty` flag was set. It also checks whether the shell has exited via `waitpid(WNOHANG)`.
-
-> **macOS reference:** Apple's Terminal.app uses `CFFileDescriptor` callbacks and `CFRunLoopSource` to integrate PTY reading into the `CFRunLoop`, avoiding the busy-polling approach. It also supports multiple tabs (each with its own PTY), Unicode/UTF-8, 256 colours, true colour (24-bit SGR), and GPU-accelerated rendering via `CAMetalLayer`. Kiseki's Terminal provides the essential architecture — PTY + VT100 + cell grid — from which all those features could be built.
-
-### 14.5 SystemUIServer.app
-
-**Source:** `userland/apps/SystemUIServer.app/SystemUIServer.m` (268 lines)
-
-SystemUIServer is the simplest Kiseki application — it draws a **clock in the menu bar**. On macOS, `SystemUIServer.app` manages the *right side* of the menu bar: the clock, Wi-Fi indicator, battery percentage, volume control, Spotlight icon, Siri button, and Control Centre. Kiseki's SystemUIServer implements only the clock, but the architecture is identical.
-
-#### Menu Bar Integration
-
-SystemUIServer creates a single borderless window positioned to overlap the right side of WindowServer's menu bar:
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│  ■ Finder  File  Edit  View  Go                         12:34     │
-│  ↑                                                      ↑         │
-│  Menu bar rendered by WindowServer          Clock window by       │
-│  (titles from focused app's NSMenu)         SystemUIServer        │
-└────────────────────────────────────────────────────────────────────┘
-```
-
-The clock window is positioned at `(1120, 0)` with size `160 × 22` (`SystemUIServer.m:44–48`):
-
-| Constant | Value | Rationale |
-|----------|-------|-----------|
-| `CLOCK_X` | 1120 | `SCREEN_WIDTH (1280) - CLOCK_WIDTH (160)` = right-aligned |
-| `CLOCK_Y` | 0 | Top of screen (menu bar area) |
-| `CLOCK_WIDTH` | 160 | Wide enough for "HH:MM" plus padding |
-| `CLOCK_HEIGHT` | 22 | Matches `MENUBAR_HEIGHT` exactly |
-
-The background colour is set to `rgb(0.96, 0.96, 0.96)` (`SystemUIServer.m:112`) — exactly matching WindowServer's menu bar colour — so the clock window blends seamlessly into the menu bar. From the user's perspective, the clock appears to be *part of* the menu bar, but it is actually a separate window owned by a separate process.
-
-#### Time Derivation
-
-Since Kiseki does not have a real-time clock driver with timezone support, SystemUIServer derives the current time from `CFAbsoluteTimeGetCurrent()` (`SystemUIServer.m:61–90`):
-
-```c
-/* SystemUIServer.m:76–89 */
-CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-
-/* Convert to seconds-of-day (UTC) */
-double day_seconds = now - (double)((long)(now / 86400.0)) * 86400.0;
-if (day_seconds < 0.0) day_seconds += 86400.0;
-
-int total_minutes = (int)(day_seconds / 60.0);
-int hours   = (total_minutes / 60) % 24;
-int minutes = total_minutes % 60;
-```
-
-`CFAbsoluteTimeGetCurrent()` returns seconds since 1 January 2001 00:00:00 UTC (the Core Foundation epoch). The code extracts seconds-of-day by computing `now mod 86400`, then divides into hours and minutes. The result is always UTC — there is no timezone conversion. If the kernel's time source returns zero or negative values, the clock falls back to displaying `"12:00"`.
-
-The time string is formatted manually into a 6-byte buffer (`"HH:MM\0"`) without using `snprintf` — each digit is computed individually via integer division and modulo (`SystemUIServer.m:84–89`).
-
-#### Minute-Granularity Updates
-
-The clock only needs to redraw when the displayed minute changes. The `_clockNeedsUpdate()` function (`SystemUIServer.m:189–204`) tracks the last drawn minute:
-
-```c
-static int g_lastMinuteDrawn = -1;
-
-static BOOL _clockNeedsUpdate(void) {
-    /* ... compute current_minute from CFAbsoluteTime ... */
-    if (current_minute != g_lastMinuteDrawn) {
-        g_lastMinuteDrawn = current_minute;
-        return YES;
-    }
-    return NO;
-}
-```
-
-This avoids redrawing the clock 60 times per second when only 1 redraw per minute is needed. The custom event loop (`SystemUIServer.m:244–264`) checks this function each iteration:
-
-```mermaid
-flowchart LR
-    A["1. nextEvent<br/>(poll WindowServer)"] --> B["2. sendEvent<br/>(if event exists)"]
-    B --> C{"3. _clockNeedsUpdate()?"}
-    C -- "Yes" --> D["[g_clockView setNeedsDisplay:YES]"]
-    C -- "No" --> E["4. displayIfNeeded"]
-    D --> E
-    E --> A
-```
-
-Like Terminal, SystemUIServer uses a custom run loop rather than `[NSApp run]` because it needs to perform periodic work (checking the clock) between event dispatches.
-
-> **macOS reference:** On macOS, `SystemUIServer.app` (`/System/Library/CoreServices/SystemUIServer.app`) manages menu bar extras ("status items") through the `NSStatusBar` / `NSStatusItem` API. Third-party apps can add their own status items (e.g., Dropbox, 1Password). Each status item is drawn into the shared menu bar area using `NSStatusBarButton`. The clock is handled by a private `_NSClockStatusItemView`. SystemUIServer also hosts Control Centre (macOS 11+), which renders the Wi-Fi, Bluetooth, Focus, and other system panels. Kiseki's single-clock approach captures the architectural essence — a separate process overlaying the menu bar — without the full status item framework.
-
----
-
-## Chapter 15: Build System & Toolchain
-
-Building Kiseki involves two fundamentally different compilation pipelines, a disk image creation step, and a QEMU invocation that ties everything together. This chapter explains each stage.
-
-#### Concept Primer: Cross-Compilation
-
-Kiseki runs on ARM64, but is built on a macOS host (also ARM64, but a different OS with different ABIs). This requires **cross-compilation** — using a compiler on the host that produces code for a different target.
-
-Kiseki uses *two* different cross-compilation strategies:
-
-| Component | Compiler | Target triple | Output format | Why |
-|-----------|----------|--------------|---------------|-----|
-| **Kernel** | `aarch64-none-elf-gcc` | `aarch64-none-elf` | ELF | Bare-metal code with no OS dependencies |
-| **Userland** | macOS `clang` | `arm64-apple-macos11` | Mach-O | Must produce Mach-O binaries that dyld can load |
-
-The kernel is compiled with a bare-metal cross-GCC because it runs in EL1 with no operating system beneath it. The userland is compiled with macOS `clang` because the binaries must be valid Mach-O files — the same format macOS uses — so that Kiseki's dyld can load them. This is an unusual arrangement: most hobby operating systems use ELF for userland too. Kiseki uses Mach-O to faithfully replicate macOS's binary format.
-
-### 15.1 The COMDAT-Stripping Pipeline
-
-The most novel part of Kiseki's build system is the **COMDAT-stripping pipeline** used to compile Objective-C `.m` files (Foundation, AppKit, and all GUI applications). This pipeline exists to work around a fundamental incompatibility between GNUstep's libobjc2 ABI v1 and static linking.
-
-#### The Problem
-
-When `clang` compiles Objective-C code with `-fobjc-runtime=gnustep-1.9`, it generates **COMDAT sections** for certain ObjC metadata:
-
-```llvm
-; Example: selector name in COMDAT group
-$.objc_sel_name.alloc = comdat any
-@.objc_sel_name.alloc = linkonce_odr constant [6 x i8] c"alloc\00", comdat
-```
-
-`COMDAT` (Common Data) is a linker mechanism for deduplication: when multiple object files define the same COMDAT symbol, the linker keeps only one copy. This works perfectly with **dynamic linking** (the standard GNUstep configuration), where each `.dylib` resolves COMDATs internally.
-
-But Kiseki's GUI applications are **statically linked** against Foundation, AppKit, CoreFoundation, etc. (the actual dynamic libraries are loaded at runtime by dyld from the disk image, but at *build time* the apps link against TBD stubs — see 15.2). The problem arises because:
-
-1. The `.m` file generates COMDAT sections for ObjC selectors.
-2. The `clang` Mach-O linker (`ld64`) does not handle `linkonce_odr` COMDATs the same way as the ELF linker — it can produce duplicate symbol errors or silently drop metadata.
-3. The result: crashes at runtime due to missing or corrupted ObjC class/selector tables.
-
-#### The Solution: Three-Stage Compilation
-
-The COMDAT-stripping pipeline compiles each `.m` file through three stages instead of the usual one:
-
-```mermaid
-flowchart LR
-    SRC["Dock.m<br/>(Objective-C)"] --> STAGE1["Stage 1: clang -S -emit-llvm<br/>→ Dock.ll (LLVM IR text)"]
-    STAGE1 --> STAGE2["Stage 2: sed<br/>strip COMDATs<br/>→ Dock.clean.ll"]
-    STAGE2 --> STAGE3["Stage 3: llc<br/>→ Dock.o (Mach-O object)"]
-    STAGE3 --> LINK["Link with TBD stubs<br/>→ Dock (executable)"]
-```
-
-**Stage 1 — Emit LLVM IR:**
-
-```bash
-clang -fobjc-runtime=gnustep-1.9 -S -emit-llvm Dock.m -o Dock.ll
-```
-
-Instead of compiling directly to an object file, `clang` emits **LLVM IR** — a human-readable intermediate representation. This text file contains the COMDAT annotations that we need to remove.
-
-**Stage 2 — Strip COMDATs with sed:**
-
-```bash
-sed 's/linkonce_odr constant/private constant/g;
-     /^\$.objc_sel_name.* = comdat any$/d;
-     s/, comdat//g' \
-    Dock.ll > Dock.clean.ll
-```
-
-Three transformations:
-
-| sed pattern | Effect |
-|------------|--------|
-| `s/linkonce_odr constant/private constant/g` | Changes selector names from deduplicatable to private (module-local) |
-| `/^\$.objc_sel_name.* = comdat any$/d` | Deletes the COMDAT group declarations entirely |
-| `s/, comdat//g` | Removes any remaining `, comdat` suffixes from symbol definitions |
-
-After this step, the LLVM IR contains no COMDAT references. Every ObjC selector/class name is a private constant within the module.
-
-**Stage 3 — Compile cleaned IR to object file:**
-
-```bash
-/opt/homebrew/opt/llvm/bin/llc -mtriple=arm64-apple-macos11 \
-    -filetype=obj Dock.clean.ll -o Dock.o
-```
-
-The LLVM static compiler (`llc`) converts the cleaned IR into a Mach-O object file. Note that `llc` is invoked from the Homebrew LLVM installation, not from Xcode — this ensures we get a version that supports the `arm64-apple-macos11` triple with the correct Mach-O object file format.
-
-**Stage 4 — Link:**
-
-```bash
-clang -target arm64-apple-macos11 -nostdlib -Wl,-e,_main \
-    Dock.o libSystem.tbd dyld.tbd libobjc.tbd \
-    CoreFoundation.tbd CoreGraphics.tbd Foundation.tbd AppKit.tbd \
-    -o Dock
-```
-
-The final link uses TBD stubs (see 15.2) instead of real libraries, producing a small Mach-O executable.
-
-The complete pipeline is defined in each app's `Makefile` (e.g., `userland/apps/Dock.app/Makefile:48–56`).
-
-> **macOS reference:** Apple's toolchain does not have this problem because Apple's ObjC runtime uses a different metadata format (relative method lists, pointer-based selector references) that does not require COMDATs. The GNUstep ABI v1 generates COMDATs for selector deduplication across compilation units — a design choice optimised for ELF shared libraries, not Mach-O static linking.
-
-### 15.2 TBD Stubs & GNUstep ABI v1
-
-#### What Is a TBD File?
-
-**TBD** (Text-Based Definition) files are Apple's mechanism for providing link-time symbol information without shipping a full binary. A `.tbd` file is a YAML document that declares a library's install name, target architecture, and exported symbols:
-
-```yaml
---- !tapi-tbd
-tbd-version:     4
-targets:         [ arm64-macos ]
-install-name:    '/usr/lib/libSystem.B.dylib'
-current-version: 1.0.0
-exports:
-  - targets:     [ arm64-macos ]
-    symbols:     [ _malloc, _calloc, _free, _memcpy, _strlen,
-                   _snprintf, _fprintf, ___stderrp, ___stdoutp,
-                   ___stack_chk_fail, ___stack_chk_guard ]
-```
-
-When `clang`'s linker (`ld64`) sees a `.tbd` file in the link command, it:
-
-1. Records the library's `install-name` as a `LC_LOAD_DYLIB` load command in the output Mach-O.
-2. Resolves references to the listed symbols as "will be provided by this dylib at runtime."
-3. Does **not** embed any code from the library into the output binary.
-
-The result is a Mach-O executable that references `libSystem.B.dylib`, `libobjc.A.dylib`, `CoreFoundation`, etc. by name — but contains none of their code. At runtime, dyld loads the real libraries from the disk image and binds the symbols.
-
-#### Why Not Just Link Against the Real Libraries?
-
-There are three reasons:
-
-1. **Circular dependencies** — AppKit depends on Foundation, which depends on CoreFoundation, which depends on libSystem. Building them all and linking against the real binaries would require a multi-pass build. TBD stubs break the cycle.
-
-2. **Build speed** — TBD stubs are tiny text files (10–15 lines). Linking against them is nearly instantaneous.
-
-3. **Architecture isolation** — The real libraries are Mach-O dylibs built for Kiseki's runtime. The app Makefiles run on the macOS host and don't need to host-execute any Kiseki binary.
-
-#### TBD Stubs in Kiseki
-
-Each component that needs to reference external symbols has its own set of `.tbd` files. For example, `Dock.app` (`userland/apps/Dock.app/Makefile:40–41`) links against seven stubs:
-
-```
-libSystem.tbd   dyld.tbd   libobjc.tbd
-CoreFoundation.tbd   CoreGraphics.tbd   Foundation.tbd   AppKit.tbd
-```
-
-The complete dependency graph resolved through TBD stubs:
-
-```mermaid
-graph TD
-    DOCK["Dock.app"] --> |libSystem.tbd| LIBSYS["libSystem.B.dylib"]
-    DOCK --> |dyld.tbd| DYLD["dyld"]
-    DOCK --> |libobjc.tbd| OBJC["libobjc.A.dylib"]
-    DOCK --> |CoreFoundation.tbd| CF["CoreFoundation"]
-    DOCK --> |CoreGraphics.tbd| CG["CoreGraphics"]
-    DOCK --> |Foundation.tbd| FN["Foundation"]
-    DOCK --> |AppKit.tbd| AK["AppKit"]
-
-    AK --> |Foundation.tbd| FN
-    AK --> |CoreText.tbd| CT["CoreText"]
-    AK --> |CoreGraphics.tbd| CG
-    AK --> |CoreFoundation.tbd| CF
-    AK --> |libobjc.tbd| OBJC
-    AK --> |libSystem.tbd| LIBSYS
-    AK --> |dyld.tbd| DYLD
-
-    FN --> |CoreFoundation.tbd| CF
-    FN --> |libobjc.tbd| OBJC
-    FN --> |libSystem.tbd| LIBSYS
-    FN --> |dyld.tbd| DYLD
-
-    CT --> |CoreGraphics.tbd| CG
-    CT --> |CoreFoundation.tbd| CF
-    CT --> |libSystem.tbd| LIBSYS
-    CT --> |dyld.tbd| DYLD
-
-    CG --> |CoreFoundation.tbd| CF
-    CG --> |libSystem.tbd| LIBSYS
-    CG --> |dyld.tbd| DYLD
-
-    CF --> |libSystem.tbd| LIBSYS
-    CF --> |dyld.tbd| DYLD
-
-    OBJC --> |libSystem.tbd| LIBSYS
-    OBJC --> |dyld.tbd| DYLD
-```
-
-Every TBD stub declares `dyld.tbd` as a dependency because every Mach-O binary needs the `dyld_stub_binder` symbol for lazy binding (Chapter 11).
-
-> **macOS reference:** Apple ships TBD stubs in the macOS SDK (under `MacOSX.sdk/usr/lib/`) for all system libraries. Since macOS 11, Apple no longer ships the actual `.dylib` files in the SDK — only `.tbd` stubs. The real dylibs live in the shared dylib cache (`/System/Library/dyld/dyld_shared_cache_arm64e`). Kiseki follows the same pattern: TBD stubs for build-time linking, real dylibs on the disk image for runtime loading.
-
-### 15.3 The Disk Image
-
-The kernel boots from an ELF binary loaded directly by QEMU, but the entire userland — dyld, libSystem, frameworks, applications, shell, coreutils, configuration files — lives on an **ext4 disk image** (`build/disk.img`). The `scripts/mkdisk.sh` script (810 lines) creates and populates this image.
-
-#### Build Orchestration
-
-The top-level `Makefile` (`Makefile:178`) provides the `world` target that builds everything:
-
-```bash
-make world    # equivalent to: make all userland disk
-```
-
-```mermaid
-flowchart TD
-    WORLD["make world"]
-    WORLD --> KERNEL["make all<br/>(kernel build)"]
-    WORLD --> USERLAND["make userland<br/>(all Mach-O binaries)"]
-    USERLAND --> DISK["make disk<br/>(create ext4 image)"]
-
-    KERNEL --> ELF["build/kiseki.elf<br/>(ELF kernel binary)"]
-    KERNEL --> BIN["build/kiseki.bin<br/>(raw binary for raspi)"]
-
-    USERLAND --> DYLD["dyld"]
-    USERLAND --> LIBSYS["libSystem.B.dylib"]
-    USERLAND --> OBJC["libobjc.A.dylib"]
-    USERLAND --> FW["Frameworks<br/>(CF, CG, CT, Foundation, AppKit, IOKit)"]
-    USERLAND --> SBIN["sbin<br/>(init, WindowServer, loginwindow)"]
-    USERLAND --> APPS["Apps<br/>(Dock, Finder, Terminal, SystemUIServer)"]
-    USERLAND --> SHELL["bash + coreutils + nettools"]
-
-    DISK --> IMG["build/disk.img<br/>(64MB ext4)"]
-```
-
-The userland Makefile (`userland/Makefile:36`) builds components in dependency order:
-
-```
-dyld → libSystem → IOKit → libobjc → CoreFoundation → CoreGraphics
-     → CoreText → Foundation → AppKit → sbin → apps → bash → coreutils
-     → nettools → tcc → tests
-```
-
-#### Disk Image Creation
-
-The `mkdisk.sh` script performs four steps:
-
-**Step 1 — Create empty image:**
-
-```bash
-dd if=/dev/zero of=build/disk.img bs=1M count=64
-```
-
-A 64MB file filled with zeros. This size is sufficient for all binaries and configuration files.
-
-**Step 2 — Format as ext4:**
-
-```bash
-mkfs.ext4 -q -b 4096 -L "kiseki-root" -O extents,dir_index disk.img
-```
-
-The 4KB block size is important: ext4's direct block pointers can address 12 blocks × 4KB = 48KB without indirection, which is sufficient for most small files. The `extents` and `dir_index` features enable efficient large-file storage and fast directory lookups.
-
-**Step 3 — Populate the filesystem:**
-
-The script uses two different strategies depending on the host platform:
-
-| Host | Method | Privilege |
-|------|--------|-----------|
-| Linux | `mount -o loop` + `cp` | Requires `sudo` |
-| macOS | `debugfs -w` batch commands | No `sudo` needed |
-
-On macOS (the primary development platform), the script generates a batch command file and feeds it to `debugfs` — the ext2/3/4 filesystem debugger from `e2fsprogs`. Each command creates a directory or writes a file:
-
-```
-mkdir bin
-mkdir sbin
-mkdir usr
-mkdir usr/lib
-...
-write build/userland/bin/bash /bin/bash
-write build/userland/dyld/dyld /usr/lib/dyld
-write build/userland/lib/libSystem.B.dylib /usr/lib/libSystem.B.dylib
-...
-```
-
-**Step 4 — Report contents.**
-
-#### Filesystem Layout
-
-The resulting disk image contains a complete Unix filesystem hierarchy:
-
-```
-/
-├── Applications/
-│   ├── Dock.app/Dock
-│   ├── Finder.app/Finder
-│   ├── Terminal.app/Terminal
-│   └── SystemUIServer.app/SystemUIServer
-├── System/
-│   └── Library/
-│       ├── Frameworks/
-│       │   ├── IOKit.framework/Versions/A/IOKit
-│       │   ├── CoreFoundation.framework/Versions/A/CoreFoundation
-│       │   ├── CoreGraphics.framework/Versions/A/CoreGraphics
-│       │   ├── CoreText.framework/Versions/A/CoreText
-│       │   ├── Foundation.framework/Versions/A/Foundation
-│       │   └── AppKit.framework/Versions/A/AppKit
-│       └── LaunchDaemons/
-│           ├── uk.co.avltree9798.WindowServer.plist
-│           ├── uk.co.avltree9798.loginwindow.plist
-│           └── uk.co.avltree9798.mDNSResponder.plist
-├── bin/
-│   ├── bash
-│   ├── sh → bash (symlink)
-│   ├── cat, cp, ls, grep, sed, awk, ...
-│   ├── login, su, passwd
-│   └── ifconfig, ping, nc, curl, ntpdate
-├── sbin/
-│   ├── init
-│   ├── WindowServer
-│   ├── loginwindow
-│   ├── mount, umount, halt, reboot, shutdown
-│   └── mDNSResponder, sshd
-├── usr/
-│   ├── bin/  (find, xargs, id, tcc, ...)
-│   ├── lib/
-│   │   ├── dyld
-│   │   ├── libSystem.B.dylib
-│   │   └── libobjc.A.dylib
-│   └── include/  (C headers for TCC)
-├── etc/
-│   ├── passwd, shadow, group
-│   ├── hostname, fstab, profile
-│   ├── sudoers, resolv.conf, epoch
-│   ├── issue (pre-login banner)
-│   └── skel/ (.bashrc, .profile for new users)
-├── root/ (.bashrc, .profile for root)
-├── home/, Users/
-├── dev/, proc/, sys/ (empty, populated at runtime)
-├── tmp/ (mode 1777)
-└── var/log/, var/run/
-```
-
-This mirrors the macOS filesystem hierarchy closely. Frameworks use the versioned bundle structure (`Versions/A/FrameworkName`), applications use the `.app` bundle convention, and LaunchDaemons plists live under `/System/Library/LaunchDaemons/`.
-
-#### Configuration Files
-
-The script installs several configuration files that are read by userland programs at runtime:
-
-| File | Read by | Purpose |
-|------|---------|---------|
-| `/etc/passwd` | `login`, `su`, `adduser` | User accounts (root, daemon, nobody) |
-| `/etc/shadow` | `login`, `su`, `passwd` | Password hashes (root password: `toor`) |
-| `/etc/group` | `id`, `login` | Group definitions (root, wheel, sudo) |
-| `/etc/hostname` | `hostname`, bash `\h` | System hostname ("kiseki") |
-| `/etc/fstab` | `mount` | Filesystem mount table |
-| `/etc/profile` | `bash` (login shells) | System-wide shell configuration |
-| `/etc/resolv.conf` | DNS resolver | Nameservers (8.8.8.8, 1.1.1.1) |
-| `/etc/epoch` | `date` | Boot time (seconds since Unix epoch) |
-| `/etc/issue` | `getty` | Pre-login ASCII art banner |
-
-The LaunchDaemons plists follow Apple's `launchd` plist format:
+init includes a minimal XML parser (`init.c:115-520`) that handles the subset of
+Apple plist XML used by LaunchDaemon configurations:
 
 ```xml
-<!-- uk.co.avltree9798.WindowServer.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "...">
+<plist version="1.0">
 <dict>
     <key>Label</key>
     <string>uk.co.avltree9798.WindowServer</string>
@@ -5378,108 +7750,2543 @@ The LaunchDaemons plists follow Apple's `launchd` plist format:
     <key>KeepAlive</key>
     <true/>
 </dict>
+</plist>
 ```
 
-Kiseki's `init` reads these plists to determine which daemons to launch at boot (Chapter 7). The `MachServices` key declares a Mach service name that the daemon will register with the bootstrap server, and `KeepAlive` tells init to restart the daemon if it exits.
+The parser recognises: `<dict>`, `<array>`, `<string>`, `<key>`, `<true/>`,
+`<false/>`, `<integer>`, `<?xml?>`, `<!DOCTYPE>`, `<plist>`. Unknown tags are
+skipped with depth tracking for nested containers.
 
-> **macOS reference:** On macOS, `launchd` (PID 1) reads plist files from `/System/Library/LaunchDaemons/`, `/Library/LaunchDaemons/`, and `~/Library/LaunchAgents/` to manage system and user daemons. The plist format supports dozens of keys (see `man launchd.plist`). Kiseki's init supports the essential keys: `Label`, `ProgramArguments`, `MachServices`, and `KeepAlive`.
+Parsed fields per job:
 
-### 15.4 QEMU Configuration
-
-Kiseki runs on QEMU's `virt` machine — a paravirtualised ARM64 platform designed specifically for virtual machines (no real hardware equivalent). The QEMU command line is assembled in the top-level `Makefile` (`Makefile:217–262`).
-
-#### The QEMU Command Line
-
-```bash
-sudo qemu-system-aarch64 \
-    -M virt -accel tcg -cpu cortex-a72 -smp 4 -m 4G \
-    -display cocoa \
-    -kernel build/kiseki.elf \
-    -serial mon:stdio \
-    -drive id=hd0,file=build/disk.img,format=raw,if=none \
-    -device virtio-blk-device,drive=hd0 \
-    -netdev vmnet-shared,id=net0 \
-    -device virtio-net-device,netdev=net0 \
-    -device virtio-gpu-device \
-    -device virtio-keyboard-device \
-    -device virtio-tablet-device
+```c
+/* init.c:67-83 */
+struct launchd_job {
+    int     active;
+    char    label[128];             /* "uk.co.avltree9798.WindowServer" */
+    char    program[256];           /* "/sbin/WindowServer" */
+    int     num_services;           /* Number of MachServices */
+    char    service_names[8][128];  /* Service name strings */
+    unsigned int service_ports[8];  /* Allocated port names */
+    int     keep_alive;             /* KeepAlive flag */
+    int     pid;                    /* Child PID (-1 if not running) */
+    int     crash_count;            /* Consecutive rapid crashes */
+    long    last_exit_time;         /* time() of last exit */
+};
 ```
 
-Each flag configures a specific aspect of the virtual machine:
+#### Mach Service Pre-Creation
 
-```mermaid
-graph TD
-    subgraph "QEMU Virtual Machine"
-        CPU["4× Cortex-A72 cores<br/>-cpu cortex-a72 -smp 4"]
-        RAM["4GB RAM<br/>-m 4G"]
-        ACCEL["TCG software emulation<br/>-accel tcg"]
+The critical innovation borrowed from macOS launchd is **service port pre-creation**
+(`init.c:632-671`). Before any daemon is launched, init:
 
-        subgraph "VirtIO Devices"
-            BLK["virtio-blk-device<br/>→ build/disk.img (64MB ext4)"]
-            NET["virtio-net-device<br/>→ vmnet-shared (macOS networking)"]
-            GPU["virtio-gpu-device<br/>→ 1280×800 framebuffer"]
-            KBD["virtio-keyboard-device<br/>→ HID keyboard input"]
-            MOUSE["virtio-tablet-device<br/>→ Absolute pointer (mouse)"]
-        end
+1. Allocates a receive port: `mach_port_allocate(task_self, RECEIVE, &port)`
+2. Registers it: `bootstrap_register(NULL, service_name, port)`
 
-        SERIAL["PL011 UART<br/>-serial mon:stdio<br/>→ host terminal"]
-        KERNEL["Kernel loaded at 0x40080000<br/>-kernel build/kiseki.elf"]
-        DISPLAY["Cocoa display window<br/>-display cocoa"]
-    end
-```
-
-#### Key Configuration Choices
-
-**TCG vs HVF acceleration (`-accel tcg`):**
-
-QEMU on Apple Silicon supports two acceleration modes: **HVF** (Hardware Virtualisation Framework, using the CPU's EL2 hypervisor) and **TCG** (Tiny Code Generator, pure software emulation). Kiseki uses TCG despite it being slower. The reason (`Makefile:219–222`):
-
-> HVF on Apple Silicon has stricter cache coherency requirements that cause External Aborts during instruction fetch after fork.
-
-When the kernel `fork()`s a process and copies page tables, the new process's instruction cache may contain stale entries. On real ARM64 hardware, the kernel issues cache maintenance instructions (`IC IVAU`, `DSB ISH`) to synchronise. Under HVF, Apple's hypervisor enforces stricter cache coherency than the ARM specification requires, causing spurious External Aborts. TCG does not have this issue because it emulates cache behaviour in software.
-
-**VirtIO device transport:**
-
-All devices use the **MMIO (Memory-Mapped I/O)** transport, indicated by the `-device` suffix `*-device` (as opposed to `*-pci`). The `virt` machine maps VirtIO MMIO devices into the physical address space starting at `0x0a000000`, with each device occupying a 512-byte region. The kernel's VirtIO drivers (Chapter 10) probe these addresses during boot.
-
-**Network: `vmnet-shared`:**
-
-The network uses macOS's native **vmnet framework** (`-netdev vmnet-shared`), which gives the guest a real IP address on the host's local network. This requires `sudo` because vmnet accesses a privileged network interface. The guest is configured with static IP `192.168.64.10`.
-
-**Display: `cocoa`:**
-
-The `-display cocoa` flag creates a native macOS window for the framebuffer output. The virtio-gpu device provides a 1280×800 framebuffer that WindowServer renders into.
-
-**Keyboard and mouse: `virtio-keyboard-device` + `virtio-tablet-device`:**
-
-A virtio keyboard provides HID keycode events. The "tablet" device provides **absolute pointer** coordinates (as opposed to a relative mouse), which means the guest receives screen coordinates directly — no mouse acceleration or cursor capture issues.
-
-#### Kernel Memory Layout
-
-The linker script (`kernel/arch/arm64/linker-qemu.ld`) defines how the kernel is laid out in physical memory:
+This solves a race condition: clients can `bootstrap_look_up()` a service name
+immediately, even before the daemon has started. The kernel's bootstrap registry
+holds the port until the daemon calls `bootstrap_check_in()` to claim it.
 
 ```
-Physical Memory Map (QEMU virt, 4GB RAM)
-─────────────────────────────────────────
-0x40000000              RAM start
-0x40000000 – 0x4007FFFF DTB / firmware (512KB reserved)
-0x40080000              ← _start (kernel entry point)
-                        .text  (code)
-                        .rodata (read-only data, 4KB-aligned)
-                        .data  (read-write data, 4KB-aligned)
-                        .bss   (zero-initialised, 4KB-aligned)
-                        __kernel_end
-                        .stack (4 × 32KB = 128KB, per-CPU stacks)
-                        __stack_top
-                        __heap_start ← page allocator begins here
-                          ...
-0x13FFFFFFF             RAM end (4GB total)
+init                          Kernel Bootstrap          WindowServer
+  |                                |                        |
+  | mach_port_allocate             |                        |
+  |-----> port=5                   |                        |
+  | bootstrap_register("...WS", 5)|                        |
+  |------------------------------->| name="...WS", port=5   |
+  |                                |                        |
+  | fork+exec WindowServer         |                        |
+  |----------------------------------------------->|        |
+  |                                |               |        |
+  | (client does bootstrap_look_up)|               |        |
+  |<-------(finds port 5)----------|               |        |
+  |                                |               |        |
+  |                                | bootstrap_check_in     |
+  |                                |<----------------------|
+  |                                | (transfers receive right to WS)
 ```
 
-Each section is 4KB-aligned to enable page-granularity memory protection once the MMU is enabled. The per-CPU kernel stacks are placed immediately after the BSS, with 32KB per core for 4 cores. Everything after `__heap_start` is managed by the physical memory manager (Chapter 3).
+#### KeepAlive and Crash-Loop Throttling
 
-> **macOS reference:** Apple's XNU kernel on real hardware is loaded by iBoot (the bootloader) at a platform-specific physical address. The kernel's `__TEXT`, `__DATA`, and `__LINKEDIT` segments are laid out by the Mach-O linker, and iBoot parses the Mach-O headers to find the entry point. QEMU's `-kernel` flag performs an analogous function — it loads the ELF binary into RAM at the address specified by the ELF program headers and jumps to the entry point.
+When a daemon with `KeepAlive=true` exits, init relaunches it
+(`init.c:837-876`). However, to prevent crash-looping daemons from burning CPU,
+init implements **throttle detection**:
+
+- If a daemon exits within `KEEPALIVE_THROTTLE_SEC` (10 seconds) of its last
+  exit, `crash_count` increments
+- After `KEEPALIVE_MAX_RAPID_CRASHES` (5) consecutive rapid crashes, init sleeps
+  for `KEEPALIVE_PENALTY_SEC` (10 seconds) before relaunching
+- If a daemon runs for more than 10 seconds before exiting, `crash_count` resets
+
+This mirrors macOS launchd's `ThrottleInterval` mechanism.
+
+#### getty and WindowServer Coexistence
+
+init detects whether WindowServer is configured (`init.c:912-918`) by searching
+the loaded job labels for "WindowServer". If present, it skips spawning a getty
+on `/dev/fbcon0` to prevent two processes writing to the framebuffer simultaneously.
+The serial console getty (`/dev/console`) always runs regardless, providing a
+fallback text interface.
 
 ---
 
-*This concludes the Kiseki Internals book. The fifteen chapters have traced the complete path from power-on to a fully functional graphical desktop — from the first ARM64 instruction executed at EL1, through virtual memory, scheduling, IPC, syscalls, filesystems, networking, device drivers, dynamic linking, window compositing, and the framework stack, to the applications the user sees on screen. The architecture faithfully mirrors macOS/XNU at every layer, providing a practical vehicle for understanding how a modern operating system works from the ground up.*
+## Chapter 13: Framework Stack -- CoreFoundation through AppKit
+
+Kiseki reproduces macOS's layered framework architecture in miniature. Each layer
+builds on the one below, culminating in AppKit -- the Objective-C framework that
+applications actually use to create windows, draw text, and handle events.
+
+```
++-------------------------------------------------------+
+|  Applications (Dock, Finder, Terminal, SystemUIServer) |
++-------------------------------------------------------+
+|  AppKit.m          (3,410 lines)   Objective-C         |
+|  NSWindow, NSView, NSApplication, NSEvent, NSColor,    |
+|  NSFont, NSTextField, NSButton, NSMenu, NSResponder    |
++-------------------------------------------------------+
+|  Foundation.m      (1,616 lines)   Objective-C         |
+|  NSObject, NSString, NSArray, NSDictionary, NSNumber,  |
+|  NSRunLoop, NSNotificationCenter, NSAutoreleasePool    |
++-------------------------------------------------------+
+|  libobjc (GNUstep) (82 files)      C/C++/ASM          |
+|  objc_msgSend, class registration, ARC, dispatch table |
++-------------------------------------------------------+
+|  CoreText.c        (1,961 lines)   C (freestanding)    |
+|  CTFont, CTLine, CTRun, CTFrame, CTFramesetter         |
++-------------------------------------------------------+
+|  CoreGraphics.c    (3,162 lines)   C (freestanding)    |
+|  CGContext, CGImage, CGColor, CGPath, software raster   |
++-------------------------------------------------------+
+|  CoreFoundation.c  (4,841 lines)   C (freestanding)    |
+|  CFString, CFArray, CFDictionary, CFRunLoop, CFRuntime  |
++-------------------------------------------------------+
+|  IOKitLib.c        (977 lines)     C (freestanding)    |
+|  IOServiceOpen, IOConnectCallMethod, IOConnectMapMemory |
++-------------------------------------------------------+
+|  libSystem.c / crt0.S              C/ASM               |
+|  (covered in Chapter 11)                                |
++-------------------------------------------------------+
+```
+
+Every framework except libobjc uses a **freestanding pattern**: the `.c` or `.m`
+file contains zero `#include` directives for system headers. All types (`uint32_t`,
+`size_t`, `bool`, etc.) are typedef'd from scratch. All library functions (`malloc`,
+`strlen`, `memcpy`, etc.) are declared as bare `extern` prototypes. All Mach IPC
+structures are hand-defined to match the kernel's exact layout. This lets each
+framework compile with minimal dependencies -- the only link-time requirement is
+`libSystem.B.dylib`.
+
+### 13.1 The Freestanding Pattern
+
+Why avoid `#include`? On macOS, frameworks include Apple SDK headers that pull in
+hundreds of transitive dependencies. Kiseki has no macOS SDK -- it has its own kernel
+and its own libSystem. Rather than recreate hundreds of headers, each framework
+defines exactly what it needs inline.
+
+Here is the pattern, shown from CoreFoundation.c:
+
+```c
+/* Step 1: Primitive types from scratch (CoreFoundation.c:22-49) */
+typedef _Bool bool;
+typedef unsigned long uint64_t;
+typedef unsigned long size_t;
+typedef __builtin_va_list va_list;
+#define va_start(ap, last) __builtin_va_start(ap, last)
+
+/* Step 2: Library functions as bare externs (CoreFoundation.c:55-101) */
+extern void *malloc(size_t size);
+extern void *memcpy(void *dst, const void *src, size_t n);
+extern size_t strlen(const char *s);
+extern int snprintf(char *buf, size_t size, const char *fmt, ...);
+
+/* Step 3: Mach IPC structures hand-defined (CoreFoundation.c:123-164) */
+typedef unsigned int mach_port_t;
+typedef struct {
+    mach_msg_bits_t   msgh_bits;
+    mach_msg_size_t   msgh_size;
+    mach_port_name_t  msgh_remote_port;
+    mach_port_name_t  msgh_local_port;
+    mach_port_name_t  msgh_voucher_port;
+    mach_msg_id_t     msgh_id;
+} mach_msg_header_t;
+
+/* Step 4: Visibility control */
+#define EXPORT __attribute__((visibility("default")))
+#define HIDDEN __attribute__((visibility("hidden")))
+```
+
+At link time, the `extern` symbols resolve against `libSystem.B.dylib`. The
+`EXPORT`/`HIDDEN` macros control which functions appear in the dylib's symbol table.
+
+Math functions use compiler builtins (`__builtin_sin`, `__builtin_cos`,
+`__builtin_sqrt`, `__builtin_inf`, `__builtin_nan`) rather than linking `libm`.
+The only `#include` anywhere is for embedded font data files
+(`font8x16.inc` / `cg_font8x16.inc`).
+
+### 13.2 CoreFoundation
+
+**Source**: `userland/CoreFoundation/CoreFoundation.c` (4,841 lines, freestanding C)
+
+CoreFoundation (CF) is the lowest framework layer -- a pure C library of
+reference-counted, polymorphic container types. It is the macOS equivalent of a
+"standard library for Apple platforms." Kiseki's implementation matches Apple's
+CF-1153.18 API surface and is built as `CoreFoundation.framework`.
+
+#### CFRuntime -- The Object System
+
+Every CF object begins with a `CFRuntimeBase` header. Additionally, a hidden
+`intptr_t` refcount is stored at offset -8 (before the pointer), matching
+GNUstep libobjc2's object layout for toll-free bridging:
+
+```
+Memory layout of a CF object:
+
+     addr - 8:   intptr_t  refcount     (hidden, matches libobjc obj[-1])
+     addr + 0:   uintptr_t _cfisa       (ObjC isa for toll-free bridging)
+     addr + 8:   uint64_t  _cfinfoa     (packed type ID + marker flags)
+     addr + 16:  ...                    (type-specific fields)
+
+_cfinfoa bit layout:
+     Bits 0-7:   info flags (bit 7 = 0x80 = "is CF object" marker)
+     Bits 8-23:  type ID (up to 65535 registered types)
+     Bits 24-63: reserved
+```
+
+Types are registered via `_CFRuntimeRegisterClass()`, which assigns sequential IDs
+from a 256-slot table. Each type provides a `CFRuntimeClass` descriptor with
+callbacks for `init`, `finalize`, `equal`, `hash`, and `copyDescription`.
+
+Instance creation (`_CFRuntimeCreateInstance()`, line 550):
+
+1. Allocates `sizeof(intptr_t) + sizeof(CFRuntimeBase) + extraBytes` via `calloc`
+2. Sets `raw[0] = 1` (initial refcount in the hidden word)
+3. Object pointer = `raw + 1` (past the hidden refcount)
+4. Sets `_cfinfoa` with type ID and marker flag
+5. If toll-free bridging is active, sets `_cfisa` to the ObjC class pointer
+6. Calls the class `init` callback if provided
+
+`CFRetain`/`CFRelease` use GCC atomic builtins on the hidden refcount word.
+Static singletons (`kCFNull`, `kCFBooleanTrue`, etc.) use an immortal sentinel
+(`0x7FFFFFFFFFFFFFF`) that is never incremented or decremented.
+
+#### Implemented Types
+
+15 types are registered in `__CFInitialize()` (constructor, line 4781):
+
+| Type | Internal Storage | Key Detail |
+|---|---|---|
+| CFAllocator | Function pointer table | 3 singletons: SystemDefault, Malloc, Null |
+| CFNull | Empty struct | Single `kCFNull` singleton |
+| CFBoolean | `Boolean _value` | `kCFBooleanTrue` / `kCFBooleanFalse` singletons |
+| CFNumber | `int64_t` or `double` union | All integers stored as int64, all floats as double |
+| CFData | Heap `uint8_t *_bytes` | Mutable variant, doubling growth from min 16 |
+| CFString | Heap `char *_buf` (UTF-8) | DJB2 hash, 1024-slot CFSTR interning table |
+| CFArray | Heap `const void **_values` | Insertion sort (qsort lacks context ptr) |
+| CFDictionary | Open-addressing hash table | Power-of-2 capacity, 70% load rehash, linear probing |
+| CFSet | Open-addressing hash table | Same strategy as CFDictionary, keys only |
+| CFDate | `double _time` (CFAbsoluteTime) | Seconds since 2001-01-01, via `gettimeofday()` |
+| CFAttributedString | CFStringRef + single CFDictionaryRef | Simplified: one attribute dict for entire string |
+| CFRunLoop | Mach port + mode arrays | Faithful to Apple's 12-step run loop |
+| CFRunLoopSource | Callback-based (version 0 only) | Signaled/fired pattern |
+| CFRunLoopTimer | Fire date + interval + callout | Repeating timers skip missed intervals |
+| CFRunLoopObserver | Activity mask + callout | Entry/BeforeTimers/BeforeSources/BeforeWaiting/AfterWaiting/Exit |
+
+**CFString** always stores UTF-8 internally, but exposes a UTF-16 `CFIndex _length`
+for API compatibility. Encoding conversion between UTF-8 and UTF-16 is done by
+manual codepoint walking (handling surrogate pairs for characters above U+FFFF).
+`CFStringGetCStringPtr()` returns a direct pointer only for UTF-8/ASCII encodings.
+Case-insensitive comparison is ASCII-only (A-Z + 32).
+
+**CFDictionary** uses parallel `_keys[]` and `_values[]` arrays with sentinel values
+(`NULL` = empty, `0xDEAD` = deleted). CFSet uses the same approach with a `0xBEEF`
+deleted sentinel.
+
+#### CFRunLoop
+
+The run loop is the most complex subsystem -- it provides the blocking wait
+mechanism for GUI applications. Each thread lazily gets a run loop via pthread TLS.
+
+Per-mode storage (fixed arrays, max 8 modes):
+- Up to 64 sources, 32 timers, 32 observers per mode
+- Common modes: adding a source/timer to `kCFRunLoopCommonModes` copies it to all
+  registered common modes
+
+The core loop (`__CFRunLoopRun`, line 3984) faithfully implements Apple's 12-step
+algorithm:
+
+```
+[1]  If mode is empty -> return kCFRunLoopRunFinished
+[2]  Notify observers: kCFRunLoopEntry
+[3]  Loop:
+       [3a] Notify kCFRunLoopBeforeTimers
+       [3b] Notify kCFRunLoopBeforeSources
+       [3c] Fire signaled version-0 sources
+       [3d] Check stopped flag
+       [3e] Compute sleep = min(next timer, deadline)
+       [3f] Notify kCFRunLoopBeforeWaiting
+       [3g] Sleep via mach_msg(MACH_RCV_MSG | MACH_RCV_TIMEOUT)
+            on the run loop's wakeup port
+       [3h] Notify kCFRunLoopAfterWaiting
+       [3i] Fire timers
+       [3j] Fire newly-signaled sources
+       [3k] Check: stopped, timed out, mode empty -> break
+[4]  Notify observers: kCFRunLoopExit
+```
+
+`CFRunLoopWakeUp()` sends a zero-size Mach message to the wakeup port, unblocking
+the `mach_msg` receive. If Mach port allocation failed at init time, a `nanosleep()`
+fallback is used instead.
+
+**Notable limitations vs Apple CF**: No version-1 (Mach port-based) run loop sources.
+No block-based timer/observer creation (ObjC blocks runtime unavailable).
+`CFAutorelease` is a no-op. `CFStringCreateWithFormat` passes the format to C
+`vsnprintf` (no `%@` support). Array sort uses O(n^2) insertion sort.
+
+### 13.3 CoreGraphics
+
+**Source**: `userland/CoreGraphics/CoreGraphics.c` (3,162 lines, freestanding C)
+
+CoreGraphics (CG, also known as Quartz 2D on macOS) is a pure software 2D
+rasteriser. It provides bitmap contexts, drawing primitives, colour management,
+path construction, and image handling. It has **no connection to WindowServer** --
+it operates entirely on in-memory pixel buffers. The caller (typically AppKit)
+creates a `CGBitmapContext`, draws into it, then blits the pixels to WindowServer
+via Mach IPC.
+
+#### Implemented Types
+
+| Type | Lines | Description |
+|---|---|---|
+| CGColorSpace | 542-624 | Colour model (4 immortal singletons: DeviceRGB, DeviceGray, DeviceCMYK, sRGB) |
+| CGColor | 632-737 | Up to 5 components (CMYK+A), custom refcounting |
+| CGDataProvider | 746-807 | Wraps raw data or CFData for deferred pixel access |
+| CGImage | 813-888 | Metadata (width/height/format) + CGDataProvider |
+| CGPath | 907-1328 | Dynamic array of path elements (move/line/quad/cubic/close/arc) |
+| CGContext | 1456-1475 | Bitmap context with graphics state stack |
+| CGGradient | 3027-3054 | **Stub** -- create returns NULL |
+| CGLayer | 3075-3106 | **Stub** -- all functions return NULL |
+
+Each type uses a simple `__CGRefCounted` header (`int32_t _refCount`, immortal
+sentinel `0x7FFFFFFF`).
+
+#### The Graphics State
+
+Every CGContext maintains a linked-list stack of graphics states. `CGContextSaveGState`
+pushes a copy; `CGContextRestoreGState` pops and frees:
+
+```c
+/* CoreGraphics.c:1351-1395 -- graphics state */
+struct __CGGState {
+    CGFloat fillColor[4];           /* RGBA */
+    CGFloat strokeColor[4];
+    CGAffineTransform ctm;          /* current transform matrix */
+    CGRect clipRect;                /* single-rect clip (simplified) */
+    CGFloat lineWidth;              /* default 1.0 */
+    CGLineCap lineCap;
+    CGLineJoin lineJoin;
+    CGFloat miterLimit;             /* default 10.0 */
+    CGBlendMode blendMode;          /* Normal, Copy, Clear only */
+    CGFloat alpha;                  /* global alpha, default 1.0 */
+    bool shouldAntialias;           /* stored but NOT used */
+    CGTextDrawingMode textDrawingMode;
+    CGFloat characterSpacing;
+    CGPoint textPosition;
+    CGSize shadowOffset;            /* stored but NOT rendered */
+    CGFloat shadowBlur;
+    struct __CGGState *_prev;       /* linked-list for save/restore */
+};
+```
+
+#### Pixel Format
+
+Both BGRA and RGBA 32bpp formats are supported, detected at runtime:
+
+- **BGRA** (macOS native): `kCGBitmapByteOrder32Little` + `kCGImageAlphaPremultipliedFirst`
+  -- byte order `[B, G, R, A]`. This is what WindowServer and VirtIO GPU expect.
+- **RGBA**: `kCGImageAlphaPremultipliedLast` -- byte order `[R, G, B, A]`.
+
+Always 8 bits per component, 4 bytes per pixel. `CGBitmapContextCreate` rejects
+anything other than 8 bpc.
+
+#### Drawing Primitives
+
+The rasteriser is entirely software-based, operating on the bitmap context's pixel
+buffer:
+
+| Primitive | Algorithm |
+|---|---|
+| `CGContextFillRect` | Transform corners by CTM, clip, fast-path `memset`-style for opaque fills |
+| `CGContextStrokeRect` | Four thin edge rectangles |
+| `CGContextClearRect` | `memset` to zero |
+| `CGContextStrokeLineSegments` | **Bresenham's line algorithm** with width stamping |
+| `CGContextFillPath` | **Scanline rasteriser**: flatten curves to edges, compute x-intersections per scanline, sort, fill between pairs |
+| `CGContextStrokePath` | Walk path elements, Bresenham each segment |
+| `CGContextFillEllipseInRect` | Build ellipse path, then scanline fill |
+| `CGContextDrawImage` | **Nearest-neighbour scaling**, handles BGRA/RGBA source |
+| `CGContextShowTextAtPoint` | Embedded 8x16 VGA bitmap font, per-pixel blit |
+
+Pixel compositing (`__CGContextBlendPixel`, line 2151) implements source-over
+Porter-Duff: `out = src + dst * (1 - srcA)`. Only three blend modes are
+functional: Normal/SourceAtop, Copy, and Clear.
+
+**Clipping** is simplified to a single rectangle. `CGContextClip()` uses the
+current path's bounding box (not the actual path shape). This means complex
+clip regions are approximated as their bounding rectangle.
+
+**Curves** in path fills are simplified: quadratic and cubic Bezier segments are
+flattened to a straight line from start to end during scanline rasterisation.
+The curve control points are ignored during fill -- only path stroke walks
+the actual curve via Bresenham.
+
+**Notable omissions**: No anti-aliasing (stored but never consulted). No dashed
+lines. No gradients (stub returns NULL). No shadows (stored but never rendered).
+No colour management (sRGB = DeviceRGB = DisplayP3). No PDF generation.
+
+### 13.4 CoreText
+
+**Source**: `userland/CoreText/CoreText.c` (1,961 lines, freestanding C)
+
+CoreText provides text layout and rendering. On macOS, it is the low-level text
+engine that shapes glyphs using TrueType/OpenType fonts. Kiseki's implementation
+is greatly simplified -- it uses a single embedded 8x16 bitmap font with integer
+scaling -- but faithfully reproduces the API surface (66 exported functions).
+
+#### Types
+
+| Type | Internal | Description |
+|---|---|---|
+| CTFont | Manual refcount, scale factor | Wraps the embedded bitmap font at a requested size |
+| CTRun | Parallel glyph/position/advance arrays | A contiguous run of glyphs with uniform attributes |
+| CTLine | Array of CTRuns | A single line of laid-out text |
+| CTFramesetter | Owns a CFAttributedString | Factory for CTFrames |
+| CTFrame | Array of CTLines + line origins | Multi-line text laid out within a rectangle |
+| CTParagraphStyle | Alignment, line break mode, spacing | Paragraph-level formatting |
+| CTFontDescriptor | Stub (all functions return NULL) | |
+| CTFontCollection | Stub (all functions return NULL) | |
+
+Note: CTFont/CTRun/CTLine/CTFrame use manual `intptr_t _refCount` fields, NOT
+CFRuntime. They are not toll-free bridged.
+
+#### Font Rendering
+
+All font names resolve to the same embedded CP437/VGA 8x16 bitmap
+(`__CTBitmapFontData`, 256 glyphs x 16 rows). Font size is mapped to an integer
+scale: `scale = max(1, round(size / 16))`. A 32pt font renders at 2x scale
+(16x32 pixels per glyph). There is no anti-aliasing, hinting, or subpixel
+rendering.
+
+The rendering path goes through `CTRunDraw()` -> `__CTRunDrawGlyph()`, which
+directly accesses the CGContext's internal struct fields (`ctx->_data`,
+`ctx->_width`, `ctx->_bytesPerRow`, `ctx->_bitmapInfo`) to write pixels. This
+tight coupling means CoreText and CoreGraphics must have exactly matching struct
+layouts.
+
+#### Text Layout
+
+`CTLineCreateWithAttributedString()` creates a single CTRun for the entire string
+(no splitting at attribute boundaries). Each character gets the same fixed-width
+advance (`glyphWidth`). Layout is a simple linear walk:
+
+```
+For each character in the attributed string:
+    glyph_index = (codepoint < 256) ? codepoint : 0
+    position[i] = (i * glyphWidth, 0)
+    advance[i]  = glyphWidth
+    -> one CTRun -> one CTLine
+```
+
+`CTFramesetterCreateFrame()` performs word-wrapping by iterating through the string
+and breaking lines when the accumulated width exceeds the frame rectangle. A simple
+heuristic tries to break at the last space character. No Unicode line-break
+algorithm or hyphenation is implemented.
+
+### 13.5 Foundation
+
+**Source**: `userland/Foundation/Foundation.m` (1,616 lines, freestanding Objective-C)
+
+Foundation is the Objective-C bridge layer. It provides the `NS*` classes that
+applications use (`NSString`, `NSArray`, `NSDictionary`, etc.) as thin wrappers
+around CoreFoundation types, connected via toll-free bridging.
+
+#### Implemented Classes
+
+| Class | Lines | Bridges To | Key Methods |
+|---|---|---|---|
+| NSObject | 298-482 | -- (root class) | alloc, init, retain, release, dealloc, isKindOfClass: |
+| NSString | 492-719 | CFString | stringWithUTF8String:, length, UTF8String, isEqualToString: |
+| NSMutableString | 725-748 | CFMutableString | appendString: (stub) |
+| NSNumber | 754-829 | CFNumber | numberWithInt:, intValue, doubleValue, boolValue |
+| NSArray | 835-898 | CFArray | array, arrayWithObjects:count:, count, objectAtIndex: |
+| NSMutableArray | 904-953 | CFMutableArray | addObject:, removeObjectAtIndex: (stub) |
+| NSDictionary | 959-1013 | CFDictionary | dictionary, objectForKey:, allKeys |
+| NSMutableDictionary | 1019-1053 | CFMutableDictionary | setObject:forKey:, removeObjectForKey: |
+| NSData | 1059-1089 | CFData | (mostly stubs) |
+| NSRunLoop | 1098-1146 | CFRunLoop | currentRunLoop, run, runUntilDate: |
+| NSAutoreleasePool | 1154-1196 | -- | init, drain (ARC no-ops) |
+| NSNotificationCenter | 1223-1299 | -- | defaultCenter, addObserver:, postNotificationName: |
+| NSProcessInfo | 1321-1356 | -- | processInfo, processName |
+| NSThread | 1362-1389 | -- | isMainThread (always YES) |
+| NSDate | 1395-1437 | CFDate | date, timeIntervalSinceReferenceDate |
+| NSBundle | 1443-1479 | -- | mainBundle, bundleIdentifier |
+| NSTimer | 1485-1532 | -- | (all stubs returning nil) |
+
+#### Toll-Free Bridging
+
+The central architectural pattern is that NS collection methods cast `self` to
+the corresponding CF type and call CF functions directly:
+
+```objc
+/* Foundation.m:540 -- NSString length delegates to CFString */
+- (unsigned long)length {
+    return CFStringGetLength((CFStringRef)self);
+}
+
+/* Foundation.m:864 -- NSArray count delegates to CFArray */
+- (long)count {
+    return CFArrayGetCount((CFArrayRef)self);
+}
+```
+
+Creation methods return CF objects cast to `id`:
+
+```objc
+/* Foundation.m:523 */
++ (id)stringWithUTF8String:(const char *)s {
+    return (id)CFStringCreateWithCString(NULL, s, 0x08000100 /*UTF8*/);
+}
+```
+
+This works because CF objects and ObjC objects share the same memory layout:
+
+```
+        CF object                       ObjC object (GNUstep libobjc2)
+   -8:  intptr_t refcount          -8:  intptr_t refcount
+    0:  uintptr_t _cfisa (= isa)    0:  Class isa
+    8:  uint64_t _cfinfoa            8:  (instance variables)
+   16:  (type fields)               ...
+```
+
+The `_cfisa` field at offset 0 in CFRuntimeBase IS the ObjC `isa` pointer. When
+Foundation initialises, it registers a bridge ISA lookup function with CF:
+
+```c
+/* Foundation.m:1567-1581 -- bridge callback */
+static uintptr_t __FoundationBridgeISALookup(CFTypeID typeID) {
+    if (typeID == CFStringGetTypeID())     return (uintptr_t)objc_getClass("NSString");
+    if (typeID == CFArrayGetTypeID())      return (uintptr_t)objc_getClass("NSArray");
+    if (typeID == CFDictionaryGetTypeID()) return (uintptr_t)objc_getClass("NSDictionary");
+    if (typeID == CFNumberGetTypeID())     return (uintptr_t)objc_getClass("NSNumber");
+    if (typeID == CFDataGetTypeID())       return (uintptr_t)objc_getClass("NSData");
+    if (typeID == CFDateGetTypeID())       return (uintptr_t)objc_getClass("NSDate");
+    return 0;
+}
+```
+
+This is called by `_CFRuntimeCreateInstance()` whenever a new CF object is
+allocated. The returned class pointer is stored in `_cfisa`, making the CF object
+a valid ObjC object that responds to messages like `-length`, `-count`, etc.
+
+#### NSObject Memory Management
+
+NSObject's `+alloc` mirrors CF's layout exactly (`Foundation.m:337`):
+
+```objc
++ (id)alloc {
+    size_t size = class_getInstanceSize(self);
+    intptr_t *raw = calloc(1, sizeof(intptr_t) + size);
+    raw[0] = 1;              /* hidden refcount = 1 */
+    id obj = (id)(raw + 1);  /* object starts past hidden word */
+    obj->isa = self;
+    return obj;
+}
+
+- (void)dealloc {
+    free(((intptr_t *)self) - 1);  /* free from hidden word */
+}
+```
+
+`-retain` and `-release` increment/decrement the hidden word at `((intptr_t *)self)[-1]`,
+exactly matching `CFRetain`/`CFRelease`. This means `CFRetain` works on NSObjects
+and `[cfObj retain]` works on CF objects -- full bidirectional bridging.
+
+### 13.6 AppKit
+
+**Source**: `userland/AppKit/AppKit.m` (3,410 lines, freestanding Objective-C)
+
+AppKit is the top of the framework stack -- the Objective-C toolkit that applications
+use to create windows, handle events, draw content, and build menus. It connects to
+WindowServer via Mach IPC and orchestrates the entire GUI application lifecycle.
+
+#### Implemented Classes (15)
+
+| Class | Lines | Role |
+|---|---|---|
+| NSGraphicsContext | 712-781 | Wraps CGContextRef, manages current context |
+| NSColor | 792-905 | RGBA colour values, 14 named colours (systemRed, etc.) |
+| NSFont | 917-1021 | Wraps CTFont, font metrics |
+| NSEvent | 1086-1176 | Keyboard/mouse/scroll events from WindowServer |
+| NSResponder | 1621-1695 | Base class for event handling, responder chain |
+| NSView | 1715-1909 | Rectangular drawable area, subview tree (max 32) |
+| NSWindow | 1931-2355 | WindowServer-backed window with backing store |
+| NSMenuItem | 2366-2439 | Menu item (title, action, key equivalent) |
+| NSMenu | 2453-2566 | Menu container, syncs to WindowServer menu bar |
+| NSApplication | 2593-2939 | Singleton app object, main event loop |
+| NSCell | 2968-3019 | Base for controls (title, enabled, target/action) |
+| NSControl | 3030-3097 | Clickable control, sends action on mouse-up |
+| NSTextField | 3108-3230 | Text label/field with drawRect: |
+| NSButton | 3259-3393 | Push button with drawRect: |
+
+#### WindowServer Connection
+
+AppKit communicates with WindowServer through 10 static C functions that build
+and send Mach IPC messages:
+
+```
+_WSConnect(appName)        -- bootstrap_look_up + CONNECT handshake
+_WSDisconnect()            -- send DISCONNECT message
+_WSCreateWindow(...)       -- send CREATE_WINDOW, get window_id reply
+_WSDestroyWindow(id)       -- send DESTROY_WINDOW
+_WSOrderWindow(id, order)  -- send ORDER_WINDOW (FRONT/BACK/OUT)
+_WSSetTitle(id, title)     -- send SET_TITLE
+_WSSetFrame(id, rect)      -- send SET_FRAME
+_WSDrawRect(id, pixels...) -- send DRAW_RECT with OOL pixel data
+_WSSetMenu(items)          -- send SET_MENU
+_WSPollEvent(buf, timeout) -- mach_msg(MACH_RCV_MSG | MACH_RCV_TIMEOUT)
+```
+
+The pixel blit path (`_WSDrawRect`) uses Mach OOL descriptors for zero-copy
+transfer of the window's backing store to WindowServer:
+
+```c
+/* AppKit.m:1512-1523 -- OOL pixel transfer */
+msg.header.msgh_bits = MACH_MSGH_BITS(COPY_SEND, 0) | MACH_MSGH_BITS_COMPLEX;
+msg.body.msgh_descriptor_count = 1;
+msg.surface_desc.address = pixels;
+msg.surface_desc.size = rowbytes * height;
+msg.surface_desc.copy = MACH_MSG_VIRTUAL_COPY;
+msg.surface_desc.type = MACH_MSG_OOL_DESCRIPTOR;
+```
+
+If `mach_msg` returns `MACH_SEND_NO_BUFFER`, the send is retried up to 5 times
+with 1ms sleeps between attempts.
+
+#### NSWindow and the Backing Store
+
+Each NSWindow maintains a pixel buffer (the "backing store") as a CGBitmapContext:
+
+```
+NSWindow
+  |
+  +-- _windowNumber    (int32_t from WindowServer)
+  +-- _backingData     (calloc'd pixel buffer, BGRA 32bpp)
+  +-- _backingContext  (CGBitmapContextCreate wrapping _backingData)
+  +-- _contentView     (NSView tree root)
+```
+
+The display cycle (`-display`, line 2198):
+
+```
+[window display]
+  |
+  +-- Get/create NSGraphicsContext wrapping _backingContext
+  +-- Set as current context
+  +-- Clear to window background colour (grey)
+  +-- [_contentView display]
+  |     |
+  |     +-- CGContextSaveGState
+  |     +-- CGContextClipToRect(_bounds)
+  |     +-- Draw background if set
+  |     +-- [self drawRect:_bounds]    <-- subclass override point
+  |     +-- For each subview (back to front):
+  |     |     [subview display]        <-- recursive
+  |     +-- CGContextRestoreGState
+  |
+  +-- Clear current context
+  +-- [self flushWindow]
+        |
+        +-- _WSDrawRect(pixels -> WindowServer via Mach OOL)
+```
+
+#### Event Dispatch and the Responder Chain
+
+The main event loop lives in `[NSApplication run]` (line 2722):
+
+```
+-[NSApplication run]
+  |
+  +-- [self finishLaunching]
+  |     +-- _WSConnect(appName)
+  |     +-- sync menu to WindowServer
+  |     +-- [delegate applicationDidFinishLaunching:]
+  |
+  +-- while (_isRunning):
+        |
+        +-- _WSPollEvent(&buf, 100ms timeout)
+        +-- [self _processWSEvent:&buf]
+        |     |
+        |     +-- Switch on mach_msg_id_t:
+        |     |   KEY_DOWN/UP -> create NSEvent -> [self sendEvent:]
+        |     |   MOUSE_DOWN/UP/MOVED/DRAGGED -> create NSEvent -> [self sendEvent:]
+        |     |   SCROLL -> create NSEvent -> [self sendEvent:]
+        |     |   WINDOW_ACTIVATE -> set _isKeyWindow on target
+        |     |   WINDOW_CLOSE -> [targetWindow close]
+        |     |   WINDOW_RESIZE -> [targetWindow setFrame:display:]
+        |     +--
+        |
+        +-- For each window: [window displayIfNeeded]
+        +-- CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, YES)
+            (fires ready timers/sources without blocking)
+```
+
+`-[NSApplication sendEvent:]` looks up the target NSWindow by `windowNumber` in
+a global `__allWindows[]` array (max 16 windows), then forwards via
+`-[NSWindow sendEvent:]`. The window dispatches based on event type:
+
+- **Key events** -> `_firstResponder` (the view with keyboard focus)
+- **Mouse down** -> hit-test the content view tree, make the hit view the first
+  responder if it accepts, call `[hitView mouseDown:event]`
+- **Scroll** -> hit-test, call `[hitView scrollWheel:event]`
+
+The **responder chain** follows: NSView -> superview -> ... -> NSWindow ->
+NSApplication. Unhandled events propagate up via `-nextResponder`.
+
+NSEvent objects are reused via a single static cache (Bug 28 optimisation) --
+safe because events are consumed synchronously within a single iteration.
+
+### 13.7 The Objective-C Runtime (libobjc)
+
+**Source**: `userland/libobjc/` (82 files, ported from GNUstep libobjc2)
+
+Kiseki's ObjC runtime is a port of the GNUstep libobjc2 runtime, built as
+`/usr/lib/libobjc.A.dylib`. All `.m`/`.mm` files have been converted to pure
+C/C++ for Mach-O compatibility. It provides `objc_msgSend`, class registration,
+method dispatch, ARC, and the non-fragile ABI.
+
+#### Class Structure
+
+```c
+/* libobjc/class.h -- struct objc_class (LP64, 136 bytes) */
+offset  0:  Class isa               /* metaclass pointer */
+offset  8:  Class super_class
+offset 16:  const char *name
+offset 24:  long version
+offset 32:  unsigned long info       /* class flags bitfield */
+offset 40:  long instance_size
+offset 48:  struct objc_ivar_list *ivars
+offset 56:  struct objc_method_list *methods   /* linked list */
+offset 64:  void *dtable             /* SparseArray dispatch table */
+offset 72:  Class subclass_list      /* intrusive linked list */
+offset 80:  IMP cxx_construct
+offset 88:  IMP cxx_destruct
+offset 96:  Class sibling_class
+offset 104: struct objc_protocol_list *protocols
+offset 112: struct reference_list *extra_data
+offset 120: long abi_version
+offset 128: struct objc_property_list *properties
+```
+
+The dispatch table at offset 64 is a **sparse array** (up to 3 levels of 256-entry
+arrays) that maps selector indices to method IMPs. This is the data structure
+that makes `objc_msgSend` fast.
+
+#### objc_msgSend -- The Fast Path
+
+`objc_msgSend` is the most performance-critical function in the runtime. It is
+implemented in AArch64 assembly (`objc_msgSend.aarch64.S`, 325 lines):
+
+```
+objc_msgSend(id self, SEL _cmd, ...):
+  |
+  +-- [1] Nil check: if self == NULL, return 0
+  +-- [2] Small object check: extract low 3 bits of self
+  |        If non-zero -> load class from SmallObjectClasses[tag]
+  +-- [3] Load isa: x9 = [self + 0]  (Class pointer)
+  +-- [4] Load dtable: x9 = [x9 + 64]  (DTABLE_OFFSET)
+  +-- [5] Load selector index: w10 = [_cmd + 0]
+  +-- [6] Sparse array traversal (1-3 levels based on shift value):
+  |        level = dtable->data[(index >> shift) & 0xFF]
+  |        ... repeat until shift == 0 ...
+  +-- [7] Load IMP: x9 = [slot + 0]  (SLOT_OFFSET)
+  +-- [8] If slot is NULL -> slow path (spill regs, call C lookup)
+  +-- [9] br x9  (tail-call the method implementation)
+```
+
+The fast path is 5-10 instructions for a cache hit. The slow path
+(`objc_msg_lookup_internal` in `sendmsg2.c`) handles:
+
+- **Lazy dispatch table installation**: First message to a class triggers
+  `+initialize` and dispatch table creation
+- **Untyped selector fallback**: Retries lookup without type information
+- **Proxy forwarding**: Can change the receiver and retry
+- **Message forwarding**: Falls back to `__objc_msg_forward2()`
+
+#### Class Registration Lifecycle
+
+```
+[1] dyld loads ObjC module
+      -> __objc_load() called per module
+      -> Register selectors, load classes into hash table
+      -> dtable = uninstalled_dtable (lazy)
+
+[2] First message to class
+      -> objc_send_initialize() triggered
+      -> Resolve superclass chain
+      -> Create dispatch table (copy super + install own methods)
+      -> Call +initialize
+      -> Install real dtable
+
+[3] Dynamic creation (optional)
+      -> objc_allocateClassPair() + add methods/ivars
+      -> objc_registerClassPair()
+```
+
+#### Kiseki-Specific Adaptations
+
+- **No TLS support**: `__thread` replaced with `static` (safe for single-threaded
+  GUI apps; noted as a known limitation for multi-threaded use)
+- **All ObjC sources converted to C/C++**: Avoids Mach-O COMDAT section
+  incompatibility with GNUstep's ObjC ABI
+- **v2 ABI method list conversion**: The compiler emits method lists in a different
+  layout; `upgradeV2MethodList()` in `loader.c` converts them to the runtime's
+  expected format at load time
+
+#### IOKitLib -- The User-Space IOKit Client
+
+**Source**: `userland/IOKit/IOKitLib.c` (977 lines, freestanding C)
+
+IOKitLib provides the user-space API for interacting with kernel IOKit drivers.
+Every function is a synchronous Mach RPC to the kernel's IOKit subsystem (message
+IDs in the 2800-2873 range, matching XNU's MIG-generated stubs):
+
+| Function | Mach msg ID | Purpose |
+|---|---|---|
+| `IOMasterPort()` | bootstrap_look_up | Get IOKit master port |
+| `IOServiceGetMatchingService()` | 2873 | Find first matching driver |
+| `IOServiceOpen()` | 2862 | Open user client connection |
+| `IOServiceClose()` | 2816 | Close connection |
+| `IOConnectCallMethod()` | 2865 | Call external method on driver |
+| `IOConnectCallScalarMethod()` | (wraps above) | Scalar-only convenience |
+| `IOConnectMapMemory64()` | 2863 | Map driver memory into task |
+| `IORegistryEntryGetProperty()` | 2812 | Read property from I/O Registry |
+| `IOObjectRelease()` | -- | `mach_port_deallocate()` |
+
+Each RPC allocates a one-shot reply port via `mach_reply_port()`, sends a
+combined SEND+RCV `mach_msg`, parses the reply, and deallocates the reply port.
+This is the mechanism WindowServer uses to open the framebuffer and HID event ring
+(see Chapter 12), and that applications use indirectly through CoreGraphics and
+AppKit.
+
+---
+
+## Chapter 14: Applications
+
+Kiseki ships four GUI applications that together form the desktop experience:
+**Dock.app**, **Finder.app**, **Terminal.app**, and **SystemUIServer.app**.
+All four follow an identical architectural pattern: they are Objective-C programs
+compiled as arm64 Mach-O executables, linked against AppKit (and transitively
+against Foundation, CoreFoundation, CoreGraphics, CoreText, libobjc, and
+libSystem).  They communicate with WindowServer over Mach IPC and receive HID
+events through the same channel.
+
+This chapter examines every application in detail -- not just what it does, but
+how it is built, what patterns it shares with the others, and how each one
+exercises different parts of the framework stack.
+
+### 14.1  Application Architecture -- Common Patterns
+
+All four applications share a set of architectural patterns that emerge from the
+constraints of Kiseki's freestanding Objective-C environment.
+
+#### Dynamic ObjC Class Creation
+
+None of the applications use `@interface` / `@implementation` blocks to define
+custom classes.  Instead, they create classes at runtime using the C API:
+
+```c
+/* From Dock.m:255-260 */
+Class DockAppDelegate = objc_allocateClassPair(
+    [NSObject class], "DockAppDelegate", 0);
+class_addMethod(DockAppDelegate,
+                @selector(applicationDidFinishLaunching:),
+                (IMP)_dockAppDidFinishLaunching, "v@:@");
+objc_registerClassPair(DockAppDelegate);
+```
+
+This three-step pattern -- `objc_allocateClassPair()`, one or more
+`class_addMethod()` calls, `objc_registerClassPair()` -- appears in every
+application.  The reason is pragmatic: each `.m` file is compiled in isolation
+with `-fobjc-runtime=gnustep-1.9`, and the COMDAT-stripping pipeline (see
+Chapter 15) means that normal ObjC class metadata emitted by the compiler would
+reference weak-linkage COMDAT sections that Mach-O cannot represent.  Dynamic
+registration side-steps the issue entirely.
+
+Every application creates at least two dynamic classes:
+
+| Application    | Classes Created                            |
+|----------------|--------------------------------------------|
+| Dock.app       | DockAppDelegate, DesktopView, DockView     |
+| Finder.app     | FinderAppDelegate, FinderView              |
+| Terminal.app   | TerminalAppDelegate, TerminalView          |
+| SystemUIServer | SystemUIServerDelegate, ClockView          |
+
+All custom view classes subclass `NSView` and override `drawRect:` with a C
+function that receives `(id self, SEL _cmd, CGRect dirtyRect)`.  All delegate
+classes subclass `NSObject` and override `applicationDidFinishLaunching:`.
+
+#### The _safe_fprintf_stderr Workaround
+
+Every application contains an identical `_safe_fprintf_stderr()` function that
+bypasses libSystem's `FILE*`-based `fprintf`.  The function formats into a
+256-byte stack buffer with `vsnprintf`, then writes directly via an inline
+`svc #0x80` syscall (x16=4 for `write`, fd=2 for stderr):
+
+```c
+/* Dock.m:38-59, Finder.m:44-65, Terminal.m:46-67, SystemUIServer.m:36-57 */
+static int _safe_fprintf_stderr(const char *fmt, ...) {
+    char _buf[256];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int n = vsnprintf(_buf, sizeof(_buf), fmt, ap);
+    __builtin_va_end(ap);
+    if (n > 0) {
+        unsigned long len = (unsigned long)n;
+        if (len > sizeof(_buf) - 1) len = sizeof(_buf) - 1;
+        long r;
+        __asm__ volatile(
+            "mov x0, #2\n"      /* fd = stderr           */
+            "mov x1, %1\n"      /* buf                   */
+            "mov x2, %2\n"      /* count                 */
+            "mov x16, #4\n"     /* SYS_write             */
+            "svc #0x80\n"       /* BSD syscall trap       */
+            "mov %0, x0"
+            : "=r"(r) : "r"(_buf), "r"(len)
+            : "x0","x1","x2","x16","memory");
+    }
+    return n;
+}
+#define fprintf(stream, ...) _safe_fprintf_stderr(__VA_ARGS__)
+```
+
+This exists because the applications are linked against libSystem via TBD stubs
+(see Chapter 15), and the `FILE*` for `stderr` is a data symbol that may not be
+correctly resolved at link time in the freestanding environment.  The inline
+syscall ensures logging always works regardless of `FILE*` state.
+
+#### Application Startup Sequence
+
+Every application follows the same startup sequence in `main()`:
+
+```
+1. objc_autoreleasePoolPush()
+2. [NSApplication sharedApplication]     -- creates NSApp singleton
+3. Create delegate class dynamically     -- objc_allocateClassPair + methods
+4. objc_registerClassPair()
+5. id delegate = [DelegateClass new]
+6. [NSApp setDelegate:delegate]
+7. [NSApp run]  (or custom run loop)     -- enters event loop
+8. objc_autoreleasePoolPop(pool)         -- never reached in practice
+```
+
+Step 7 varies: Dock.app and Finder.app use `[NSApp run]` (the standard AppKit
+run loop), while Terminal.app and SystemUIServer.app implement custom run loops
+to interleave I/O polling with event dispatch.
+
+#### Window Backing Store Flow
+
+When an application creates an `NSWindow`, the following chain creates the
+backing pixel buffer and connects it to WindowServer:
+
+```
+   NSWindow -initWithContentRect:styleMask:backing:defer:
+       |
+       +---> calloc(width * height * 4)          backing store (BGRA)
+       +---> CGBitmapContextCreate()             wraps pixel buffer
+       +---> _WSCreateWindow(x, y, w, h)         Mach IPC to WindowServer
+       |         |
+       |         +---> WS allocates window slot
+       |         +---> Returns window_id
+       |
+       +---> Stores window_id for future IPC
+```
+
+When the view tree is dirty, the display cycle is:
+
+```
+   [window displayIfNeeded]
+       |
+       +---> [contentView drawRect:bounds]
+       |         |
+       |         +---> [NSGraphicsContext currentContext]
+       |         +---> [ctx CGContext]   --> backing CGBitmapContext
+       |         +---> CG drawing calls write to pixel buffer
+       |
+       +---> _WSDrawRect(window_id, 0, 0, w, h, pixels, size)
+                  |
+                  +---> Mach OOL message with pixel data
+                  +---> WindowServer composites into framebuffer
+```
+
+---
+
+### 14.2  Dock.app -- Desktop & Dock Bar
+
+**Source**: `userland/apps/Dock.app/Dock.m` (271 lines)
+
+On macOS, the Dock process serves a dual purpose: it renders the desktop
+background (via `CGSSetDesktopBackground`) and the dock bar at the bottom of the
+screen.  Kiseki's Dock.app faithfully replicates this two-window architecture.
+
+#### Two-Window Architecture
+
+Dock.app creates exactly two borderless windows:
+
+```
++------------------------------------------------------------------+
+|                                                                  |  Window 1: "Desktop"
+|                                                                  |  Frame: (0, 0, 1280, 800)
+|                  Desktop Background                              |  Style: Borderless
+|                  (Blue-teal gradient)                             |  Z-order: orderBack (behind all)
+|                                                                  |
+|                                                                  |
+|                                                                  |
++------------------------------------------------------------------+
+| [  Finder  ] [  Terminal ] [  System  ]                          |  Window 2: "Dock"
++------------------------------------------------------------------+  Frame: (0, 746, 1280, 54)
+                                                                      Style: Borderless
+                                                                      Z-order: Front
+```
+
+The **desktop window** is fullscreen (1280x800) and sent to the back via
+`[desktopWindow orderBack:nil]`, which sends a `WS_ORDER_BACK` message to
+WindowServer.  This mirrors macOS, where the desktop window uses
+`kCGDesktopWindowLevel`.
+
+The **dock bar window** is a 54-pixel-tall strip at the bottom of the screen
+(y=746, since SCREEN_HEIGHT - DOCK_HEIGHT = 800 - 54 = 746), brought to front
+via `[dockWindow makeKeyAndOrderFront:nil]`.
+
+#### Desktop Gradient Rendering
+
+The desktop is not a flat colour -- `_DesktopDrawRect` simulates a gradient
+by drawing 200 horizontal bands (4 pixels each), interpolating RGB values
+from top to bottom (`Dock.m:167-174`):
+
+```c
+for (int y = 0; y < SCREEN_HEIGHT; y += 4) {
+    CGFloat t = (CGFloat)y / (CGFloat)SCREEN_HEIGHT;  /* 0.0 -> 1.0 */
+    CGFloat r = 0.05 + t * 0.10;   /* 0.05 -> 0.15 */
+    CGFloat g = 0.20 + t * 0.15;   /* 0.20 -> 0.35 */
+    CGFloat b = 0.40 + t * 0.15;   /* 0.40 -> 0.55 */
+    CGContextSetRGBFillColor(ctx, r, g, b, 1.0);
+    CGContextFillRect(ctx, CGRectMake(0, y, SCREEN_WIDTH, 4));
+}
+```
+
+This produces a dark teal gradient reminiscent of macOS Big Sur's default
+wallpaper, using only `CGContextFillRect` calls -- since Kiseki's CoreGraphics
+has no gradient API.
+
+#### Dock Bar Icon Rendering
+
+The dock bar displays three icons as coloured squares with text labels,
+defined in a static array (`Dock.m:84-88`):
+
+| Icon     | Colour       | RGB                |
+|----------|--------------|--------------------|
+| Finder   | Blue         | (0.25, 0.55, 0.95) |
+| Terminal | Dark grey    | (0.15, 0.15, 0.15) |
+| System   | Light grey   | (0.70, 0.70, 0.70) |
+
+Icons are 40x40 pixels, centred horizontally with 8-pixel padding between them.
+Each icon is a filled rectangle with a 0.3-alpha white border (via
+`CGContextStrokeRect`) and a text label rendered inside using
+`CGContextShowTextAtPoint` -- truncated to 5 characters maximum.
+
+The dock bar itself has a dark translucent background (RGBA 0.15, 0.15, 0.15,
+0.85) with a subtle 1-pixel top separator line in lighter grey.
+
+#### macOS Comparison
+
+| Feature           | macOS Dock              | Kiseki Dock.app       |
+|-------------------|-------------------------|-----------------------|
+| Desktop rendering | CGSSetDesktopImage      | Manual gradient fill  |
+| Dock position     | Bottom/Left/Right       | Bottom only           |
+| Icon source       | Bundle icons            | Coloured rectangles   |
+| Magnification     | Yes                     | No                    |
+| App launching     | LaunchServices          | Not implemented       |
+| Window level      | kCGDesktopWindowLevel   | orderBack             |
+| Spaces            | Multiple                | Single                |
+
+---
+
+### 14.3  Finder.app -- File Browser
+
+**Source**: `userland/apps/Finder.app/Finder.m` (925 lines)
+
+Finder.app is the largest and most interactive of the four applications.  It is
+a fully functional file browser that reads the real filesystem via POSIX
+`opendir`/`readdir`/`stat` syscalls and displays files with type-specific icons.
+
+#### Layout
+
+The Finder window is divided into three regions:
+
+```
++-----+---------------------------------------------+
+|     |  < Back            /Users                    |  Header (28px)
++-----+---------------------------------------------+
+|Fav- |  [D] Applications                       --  |
+|our- |  [D] System                              --  |
+|ites |  [D] bin                                 --  |
+|     |  [F] hello                           4 KB   |
+|  /  |  [X] test_libc                       12 KB  |
+| App |  [L] sh -> bash                          --  |
+| Sys |                                              |
+| Usr |                                              |
+| bin |                                              |
+| sbin|                                              |
+| etc |                                              |
+| tmp |                                              |
++-----+---------------------------------------------+
+  120px                    380px
+```
+
+- **Header** (28px tall): Back button (if not at root), current path display
+- **Sidebar** (120px wide): 8 hardcoded favourite paths
+- **Content area**: Scrollable file listing with Name and Size columns
+
+#### Directory Reading
+
+`finder_read_directory()` (`Finder.m:234-325`) scans the current directory:
+
+1. `opendir(g_current_path)` opens the directory
+2. `readdir()` loop fills up to 128 `FinderEntry` structs
+3. `.` and `..` are skipped
+4. `stat()` on each entry determines mode, size, and type flags
+5. `.app` bundles detected by checking if a directory name ends in ".app"
+6. Entries are sorted: directories first, then alphabetically within each group
+   (bubble sort -- adequate for <= 128 entries)
+
+Each `FinderEntry` carries classification flags:
+
+```c
+/* Finder.m:186-196 */
+typedef struct {
+    char        name[256];
+    uint8_t     d_type;
+    mode_t      mode;
+    off_t       size;
+    BOOL        is_dir;
+    BOOL        is_symlink;
+    BOOL        is_executable;
+    BOOL        is_device;
+    BOOL        is_app_bundle;
+} FinderEntry;
+```
+
+#### Type-Specific Icons
+
+Each file type gets a distinctive coloured icon (16x16 pixels):
+
+| Type          | Colour                  | Indicator   |
+|---------------|-------------------------|-------------|
+| .app bundle   | Dark slate (0.40,0.40)  | White "A"   |
+| Directory     | Blue (0.30,0.60,0.95)   | Tab shape   |
+| Symlink       | Cyan (0.30,0.80,0.80)   | White "@"   |
+| Device        | Orange (0.90,0.60,0.20) | Solid block |
+| Executable    | Green (0.30,0.75,0.30)  | Solid block |
+| Regular file  | White with grey border  | Empty       |
+
+Directory icons have an additional 3-pixel "tab" above the left portion,
+mimicking the folder tab appearance.
+
+#### Navigation
+
+Three navigation mechanisms are supported:
+
+- **Double-click**: Enters directories or launches executables/apps
+- **Sidebar click**: Jumps to one of 8 favourite paths
+- **Back button**: `finder_navigate_parent()` strips the last path component
+- **Keyboard**: Up/Down arrows move selection, Enter opens, Backspace goes up
+- **Scroll wheel**: Adjusts `g_scroll_offset` by +/-3 entries per scroll event
+
+Path construction (`Finder.m:340-350`) handles trailing-slash ambiguity:
+
+```c
+static void finder_navigate_into(const char *name) {
+    char newpath[PATH_MAX];
+    size_t plen = strlen(g_current_path);
+    if (plen > 0 && g_current_path[plen - 1] == '/')
+        snprintf(newpath, PATH_MAX, "%s%s", g_current_path, name);
+    else
+        snprintf(newpath, PATH_MAX, "%s/%s", g_current_path, name);
+    finder_navigate_to(newpath);
+}
+```
+
+#### Application Launching
+
+Double-clicking an executable or `.app` bundle triggers `finder_open_item()`
+(`Finder.m:484-510`):
+
+For **.app bundles**, the convention is that `Foo.app/Foo` is the executable
+(matching the disk layout created by `mkdisk.sh`).
+`finder_resolve_app_executable()` strips the `.app` suffix to derive the binary
+name:
+
+```
+/Applications/Terminal.app  -->  /Applications/Terminal.app/Terminal
+```
+
+For **plain executables**, the full path is used directly.
+
+The launch itself (`Finder.m:440-478`) follows the Unix pattern:
+
+```
+fork()
+  |
+  +--- Child:
+  |      setsid()                     -- new session
+  |      Build envp from getenv()     -- HOME, USER, PATH, TERM, etc.
+  |      execve(exe_path, argv, envp) -- replace with target
+  |      _exit(127)                   -- only reached on failure
+  |
+  +--- Parent:
+         returns immediately           -- no waitpid (fire and forget)
+```
+
+The child inherits the environment from the parent (Finder itself was launched
+by loginwindow with proper HOME, USER, etc.), constructing environment strings
+on the stack before calling `execve`.
+
+#### Finder State Management
+
+All state is in global variables:
+
+| Variable          | Type              | Purpose                  |
+|-------------------|-------------------|--------------------------|
+| `g_current_path`  | `char[1024]`      | Current directory path   |
+| `g_entries`       | `FinderEntry[128]`| Directory listing cache  |
+| `g_entry_count`   | `int`             | Number of entries        |
+| `g_selected_idx`  | `int`             | Selected row (-1=none)   |
+| `g_scroll_offset` | `int`             | Scroll position          |
+| `g_finderView`    | `NSView*`         | Cached for setNeedsDisplay |
+| `g_finderWindow`  | `NSWindow*`       | Cached for operations    |
+
+This single-window, single-directory design means Finder.app supports only one
+browser window at a time -- a simplification compared to macOS Finder's
+multi-window, multi-tab model.
+
+---
+
+### 14.4  Terminal.app -- VT100 Terminal Emulator
+
+**Source**: `userland/apps/Terminal.app/Terminal.m` (1,071 lines)
+
+Terminal.app is the most complex application in Kiseki.  It allocates a
+pseudo-terminal (PTY) pair, forks a shell process (`/bin/bash`), and runs a
+full VT100/ANSI terminal emulator with 8-colour SGR support.
+
+#### Architecture Overview
+
+```
++-------------------------------------------------------+
+|  Terminal.app (parent process)                         |
+|                                                        |
+|  +-------------+    +------------------+               |
+|  | Custom Run  |    | VT100 Emulator   |               |
+|  | Loop        |--->| (5-state parser) |               |
+|  |             |    | 80x24 cell grid  |               |
+|  | 1. Poll WS  |    +--------+---------+               |
+|  | 2. Read PTY |             |                         |
+|  | 3. Display  |    +--------v---------+               |
+|  +------+------+    | TerminalView     |               |
+|         |           | (drawRect:)      |               |
+|         |           +------------------+               |
+|         |                                              |
++---------|----------------------------------------------+
+          | PTY master fd (non-blocking read/write)
+          |
+  ========|================ kernel PTY layer =============
+          |
++---------|----------------------------------------------+
+|  /bin/bash (child process)                             |
+|         |                                              |
+|    stdin/stdout/stderr = PTY slave                     |
+|    setsid() + TIOCSCTTY (controlling terminal)         |
++--------------------------------------------------------+
+```
+
+#### PTY Setup
+
+`term_setup_pty()` (`Terminal.m:635-723`) establishes the terminal connection:
+
+1. `openpty(&master, &slave, NULL, NULL, NULL)` -- allocates a PTY pair
+2. `fcntl(master, F_SETFL, O_NONBLOCK)` -- master fd is non-blocking
+3. `fork()` -- splits into parent and child
+4. **Child process**:
+   - `close(master)` -- child only needs the slave side
+   - `setsid()` -- create new session (detach from parent's terminal)
+   - `ioctl(slave, TIOCSCTTY, 0)` -- make slave the controlling terminal
+   - `ioctl(slave, TIOCSWINSZ, &ws)` -- set window size (80x24, 640x384)
+   - `dup2(slave, 0/1/2)` -- redirect stdin/stdout/stderr to slave
+   - `execve(shell, argv, envp)` -- replace with shell
+   - Falls back: user's shell -> /bin/bash -> /bin/sh -> `_exit(127)`
+5. **Parent**: closes slave fd, stores master fd and child PID
+
+The child's environment includes `TERM=vt100`, `COLUMNS=80`, `LINES=24`.
+
+#### VT100 Emulator -- 5-State Parser
+
+The terminal emulator is a character-at-a-time state machine matching the
+implementation in WindowServer's built-in terminal (which itself follows XNU's
+`gc_putchar` in `osfmk/console/video_console.c`).
+
+```
+                  ESC
+  +--------+   (0x1B)   +--------+     '['     +-----------+
+  | NORMAL |----------->|  ESC   |------------>| CSI_INIT  |
+  +---+----+            +---+----+             +-----+-----+
+      |                     |                        |
+      | printable           | c,D,M,7,8              | clears params,
+      | char: write         | (special ESC           | falls through to
+      | to cell grid        |  commands)              | CSI_PARS
+      |                     v                        v
+      |                 (back to              +-----------+
+      |                  NORMAL)              | CSI_PARS  |<--+
+      |                                       +-----+-----+   |
+      |                                  digit|     |';'      |
+      |                              (accum   |     |(next    |
+      |                               param)  +-----+ param)  |
+      |                                       |               |
+      |                         '?'           | letter        |
+      |                    +-----------+      | (dispatch)    |
+      |                    | DEC_PRIV  |      v               |
+      |                    +-----+-----+  (back to            |
+      |                          |         NORMAL)            |
+      |                     h/l  |                            |
+      |                     (DECAWM                           |
+      |                      toggle)                          |
+      v                          v                            |
+ (cell grid                 (back to                          |
+  update)                    NORMAL)                          |
+```
+
+The five states and their transitions:
+
+| State     | Entered When         | Processes                                   |
+|-----------|----------------------|---------------------------------------------|
+| NORMAL    | Default / after CSI  | Printable chars, control chars (BS,TAB,LF,CR,ESC) |
+| ESC       | ESC (0x1B) received  | `[` -> CSI_INIT; `c` -> reset; `D` -> index down; `M` -> reverse index; `7`/`8` -> save/restore cursor |
+| CSI_INIT  | `[` after ESC        | Clears params, falls through to CSI_PARS    |
+| CSI_PARS  | Digit/`;` in CSI     | Accumulates numeric params; letter dispatches CSI command |
+| DEC_PRIV  | `?` in CSI           | Handles DEC private modes (DECAWM via `?7h`/`?7l`) |
+
+#### CSI Command Support
+
+`term_csi_dispatch()` (`Terminal.m:333-484`) handles these CSI sequences:
+
+| CSI Code | Name                      | Effect                              |
+|----------|---------------------------|-------------------------------------|
+| `A`      | Cursor Up                 | Move cursor up N rows               |
+| `B`      | Cursor Down               | Move cursor down N rows             |
+| `C`      | Cursor Forward            | Move cursor right N columns         |
+| `D`      | Cursor Backward           | Move cursor left N columns          |
+| `H`/`f`  | Cursor Position           | Move to (row, col) -- 1-based       |
+| `G`      | Cursor Horizontal Abs     | Move to column N                    |
+| `d`      | Cursor Vertical Abs       | Move to row N                       |
+| `J`      | Erase in Display          | 0=below, 1=above, 2=all            |
+| `K`      | Erase in Line             | 0=right, 1=left, 2=entire line      |
+| `X`      | Erase Characters          | Clear N chars from cursor           |
+| `P`      | Delete Characters         | Delete N chars, shift left          |
+| `L`      | Insert Lines              | Insert N blank lines at cursor      |
+| `M`      | Delete Lines              | Delete N lines, scroll up           |
+| `m`      | SGR (colours/attributes)  | See below                           |
+| `r`      | Set Scrolling Region      | (Simplified: resets cursor to 0,0)  |
+
+#### SGR Colour and Attribute Support
+
+The `m` command (`Terminal.m:457-475`) processes Select Graphic Rendition:
+
+| SGR Code  | Effect                        |
+|-----------|-------------------------------|
+| 0         | Reset all attributes          |
+| 1         | Bold on                       |
+| 4         | Underline on                  |
+| 7         | Reverse video on              |
+| 22        | Bold off                      |
+| 24        | Underline off                 |
+| 27        | Reverse off                   |
+| 30-37     | Set foreground (8 ANSI colours)|
+| 39        | Default foreground            |
+| 40-47     | Set background (8 ANSI colours)|
+| 49        | Default background            |
+
+Colours are stored as 3-bit indices into two lookup tables
+(`Terminal.m:197-203`): normal and bright (used when bold is active).  The
+8-colour ANSI palette:
+
+| Index | Normal          | Bright          |
+|-------|-----------------|-----------------|
+| 0     | Black (0,0,0)   | Dark grey       |
+| 1     | Red             | Bright red      |
+| 2     | Green           | Bright green    |
+| 3     | Yellow/brown    | Bright yellow   |
+| 4     | Blue            | Bright blue     |
+| 5     | Magenta         | Bright magenta  |
+| 6     | Cyan            | Bright cyan     |
+| 7     | Light grey      | White           |
+
+#### Cell Grid and Rendering
+
+The terminal state is a struct-of-arrays for 80x24 = 1,920 cells:
+
+```c
+/* Terminal.m:211-244 */
+static struct {
+    unsigned char   cells[24][80];       /* ASCII character       */
+    uint8_t         cell_fg[24][80];     /* Foreground colour idx */
+    uint8_t         cell_bg[24][80];     /* Background colour idx */
+    uint8_t         cell_attr[24][80];   /* ATTR_BOLD/UNDERLINE/REVERSE */
+
+    uint32_t        cur_col, cur_row;    /* Cursor position       */
+    int             vt_state;            /* Parser state          */
+    uint32_t        vt_par[16];          /* CSI parameters        */
+    uint32_t        vt_numpars;          /* Number of params      */
+    uint8_t         vt_attr;             /* Current attributes    */
+    uint8_t         vt_fg_idx, vt_bg_idx;/* Current colours       */
+    int             vt_wrap_mode;        /* DECAWM                */
+
+    /* Saved cursor state (DECSC/DECRC via ESC 7 / ESC 8) */
+    uint32_t        saved_col, saved_row;
+    uint8_t         saved_attr, saved_fg_idx, saved_bg_idx;
+
+    int             dirty;               /* Needs redraw flag     */
+} term;
+```
+
+`_TerminalDrawRect` (`Terminal.m:756-854`) renders every cell on each
+redraw:
+
+1. For each of the 1,920 cells:
+   - Compute foreground/background RGB from colour index + bold/reverse flags
+   - Fill background rectangle (8x16 pixels)
+   - If character is printable (0x21-0x7E), draw with `CGContextShowTextAtPoint`
+   - If underline flag set, draw a 1-pixel line at the bottom
+2. Draw block cursor at `(cur_col, cur_row)` with inverted colours
+
+The total rendering area is 640x384 pixels (80 * 8 x 24 * 16).
+
+#### Custom Run Loop with PTY Polling
+
+Terminal.app cannot use `[NSApp run]` because it needs to interleave PTY reads
+with event processing.  Instead, `main()` implements a custom event loop
+(`Terminal.m:1049-1067`):
+
+```c
+/* Step 1: finishLaunching (sends applicationDidFinishLaunching:) */
+[NSApp finishLaunching];
+
+/* Step 2: Interleaved event loop */
+for (;;) {
+    /* 2a. Poll WindowServer for one event (10ms timeout) */
+    NSEvent *event = [NSApp nextEventMatchingMask:0xFFFFFFFF
+                                        untilDate:nil
+                                           inMode:CFSTR("kCFRunLoopDefaultMode")
+                                          dequeue:YES];
+    if (event) [NSApp sendEvent:event];
+
+    /* 2b. Non-blocking read from PTY master, feed VT100 parser */
+    term_poll_and_redraw();
+
+    /* 2c. Push dirty pixels to WindowServer */
+    if (g_window) [g_window displayIfNeeded];
+}
+```
+
+`term_poll_and_redraw()` (`Terminal.m:935-956`) does:
+1. `read(master_fd, buf, 4096)` -- non-blocking (returns EAGAIN if no data)
+2. Feed each byte through `term_putc()` (the VT100 state machine)
+3. If `term.dirty`, mark the view for redraw
+4. `waitpid(shell_pid, WNOHANG)` to detect shell exit
+
+#### Keyboard Input
+
+`_TerminalKeyDown` (`Terminal.m:861-929`) translates WindowServer key events
+into bytes written to the PTY master:
+
+- **Arrow keys**: Send VT100 escape sequences (`\033[A`/`B`/`C`/`D`)
+- **Home/End**: `\033[H` / `\033[F`
+- **Delete**: `\033[3~`
+- **Page Up/Down**: `\033[5~` / `\033[6~`
+- **Ctrl+letter**: Converts to control character (ch - 'a' + 1)
+- **Regular ASCII**: Written as single bytes
+
+Key codes are Linux-style HID keycodes matching WindowServer's VirtIO input
+driver (e.g., KEY_UP=103, KEY_DOWN=108).
+
+---
+
+### 14.5  SystemUIServer.app -- Menu Bar Clock
+
+**Source**: `userland/apps/SystemUIServer.app/SystemUIServer.m` (289 lines)
+
+SystemUIServer.app is the simplest of the four applications.  On macOS,
+SystemUIServer manages the right side of the menu bar: clock, Wi-Fi, battery,
+volume, Spotlight, etc.  Kiseki's version displays only a clock.
+
+#### Window Placement
+
+SystemUIServer creates a single borderless window positioned to overlap the
+menu bar area that WindowServer renders:
+
+```
++--------------------------------------------------+--[HH:MM]--+
+|  [App Name]  File  Edit  View                    |            |
++--------------------------------------------------+            |
+|                                                   | 160 x 22  |
+|                         (desktop)                 | at (1120,0)|
+                                                    +------------+
+```
+
+The window is 160x22 pixels at position (1120, 0), which places it in the
+top-right corner of the 1280x800 screen.  The 22-pixel height matches the
+menu bar height.  The background colour (0.96, 0.96, 0.96) exactly matches
+WindowServer's menu bar rendering, so the clock blends seamlessly.
+
+#### Time Computation
+
+`_clockGetTimeString()` (`SystemUIServer.m:82-111`) derives HH:MM from
+`CFAbsoluteTimeGetCurrent()`:
+
+```c
+CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+
+/* Convert to seconds-of-day (UTC) */
+double day_seconds = now - (double)((long)(now / 86400.0)) * 86400.0;
+if (day_seconds < 0.0) day_seconds += 86400.0;
+
+int total_minutes = (int)(day_seconds / 60.0);
+int hours   = (total_minutes / 60) % 24;
+int minutes = total_minutes % 60;
+```
+
+`CFAbsoluteTime` is seconds since 2001-01-01 00:00:00 UTC.  The code
+extracts the time-of-day by computing `now mod 86400`.  If the kernel has
+no real-time clock (which is the case on QEMU without RTC passthrough), the
+function falls back to displaying "12:00".
+
+The time string is always exactly 5 characters ("HH:MM"), formatted
+character-by-character without any printf-family function:
+
+```c
+buf[0] = '0' + (hours / 10);
+buf[1] = '0' + (hours % 10);
+buf[2] = ':';
+buf[3] = '0' + (minutes / 10);
+buf[4] = '0' + (minutes % 10);
+buf[5] = '\0';
+```
+
+#### Minute-Based Update Polling
+
+Like Terminal.app, SystemUIServer uses a custom run loop rather than
+`[NSApp run]`.  A static variable `g_lastMinuteDrawn` tracks the last
+displayed minute.  `_clockNeedsUpdate()` (`SystemUIServer.m:209-224`)
+compares the current minute-of-day to the last drawn value:
+
+```c
+static BOOL _clockNeedsUpdate(void) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now <= 0.0) return NO;
+
+    /* ... compute current_minute (0..1439) ... */
+
+    if (current_minute != g_lastMinuteDrawn) {
+        g_lastMinuteDrawn = current_minute;
+        return YES;
+    }
+    return NO;
+}
+```
+
+This ensures the clock view redraws only when the minute changes, not on every
+event loop iteration.  The event loop polls WindowServer with no timeout
+(`untilDate:nil`), processes any events, checks the clock, and calls
+`displayIfNeeded`.
+
+#### macOS Comparison
+
+| Feature            | macOS SystemUIServer          | Kiseki SystemUIServer    |
+|--------------------|-------------------------------|--------------------------|
+| Clock update       | CFRunLoopTimer (60s)          | Polling on every iteration|
+| Menu extras        | NSStatusItem API              | None                     |
+| Wi-Fi/BT/Battery   | IOKit power assertions        | Not implemented          |
+| Spotlight          | Search field                  | Not implemented          |
+| Time zone          | ICU / NSTimeZone              | UTC only                 |
+| Window level       | NSStatusWindowLevel           | Regular borderless       |
+
+---
+
+## Chapter 15: Build System & Toolchain
+
+Kiseki's build system produces a bootable system from source using two
+completely separate toolchains: a bare-metal GCC cross-compiler for the kernel
+and macOS Clang for the Mach-O userland.  This chapter walks through the entire
+pipeline from `make world` to a running QEMU instance.
+
+### 15.1  Build Overview -- `make world`
+
+The top-level `Makefile` (359 lines) provides a single command to build
+everything:
+
+```
+$ make world
+```
+
+This executes three phases in order:
+
+```
+  make world
+    |
+    +---> make all        [1] Build kernel (ELF)
+    |       |
+    |       +---> check-toolchain     Verify aarch64-*-gcc exists
+    |       +---> Compile .S files    boot.S, vectors.S, context_switch.S
+    |       +---> Compile .c files    50 kernel C files
+    |       +---> Link kiseki.elf     Static ELF with custom linker script
+    |       +---> objcopy kiseki.bin  Flat binary for QEMU -kernel
+    |
+    +---> make userland   [2] Build userland (Mach-O)
+    |       |
+    |       +---> dyld                MH_DYLINKER binary
+    |       +---> libSystem           MH_DYLIB (libSystem.B.dylib)
+    |       +---> IOKit               MH_DYLIB framework
+    |       +---> libobjc             MH_DYLIB (libobjc.A.dylib)
+    |       +---> CoreFoundation      MH_DYLIB framework
+    |       +---> CoreGraphics        MH_DYLIB framework
+    |       +---> CoreText            MH_DYLIB framework
+    |       +---> Foundation          MH_DYLIB framework (ObjC)
+    |       +---> AppKit              MH_DYLIB framework (ObjC)
+    |       +---> sbin                MH_EXECUTE (init, getty, WindowServer...)
+    |       +---> apps                MH_EXECUTE (Dock, Finder, Terminal, SystemUIServer)
+    |       +---> bash                MH_EXECUTE
+    |       +---> coreutils           MH_EXECUTE (50+ programs)
+    |       +---> nettools            MH_EXECUTE (ifconfig, ping, nc, curl, ntpdate)
+    |       +---> tcc                 MH_EXECUTE (Tiny C Compiler)
+    |       +---> tests               MH_EXECUTE (test_libc, etc.)
+    |
+    +---> make disk       [3] Create ext4 disk image
+            |
+            +---> scripts/mkdisk.sh   Creates 64MB ext4 image
+            +---> Installs all binaries, configs, LaunchDaemons
+```
+
+### 15.2  Kernel Build -- Bare-Metal ELF
+
+#### Toolchain Detection
+
+The Makefile auto-detects the cross-compiler by trying prefixes in order
+(`Makefile:20-25`):
+
+1. `aarch64-none-elf-gcc` (ARM official toolchain)
+2. `aarch64-elf-gcc` (Homebrew on macOS)
+3. `aarch64-linux-gnu-gcc` (Debian/Ubuntu packages)
+4. `aarch64-unknown-elf-gcc` (custom builds)
+
+If none is found, `make` fails with installation instructions for macOS
+(Homebrew), Debian, and Arch Linux.
+
+#### Compiler Flags
+
+```makefile
+CFLAGS := -Wall -Wextra -Werror \
+          -ffreestanding -fno-builtin -fno-stack-protector \
+          -nostdinc -nostdlib \
+          -mcpu=cortex-a72 -mgeneral-regs-only -mno-outline-atomics \
+          -std=gnu11 -O2 -g \
+          $(PLATFORM_DEF) $(DEBUG_DEF) $(INCLUDES)
+```
+
+Key flags explained:
+
+| Flag                     | Purpose                                              |
+|--------------------------|------------------------------------------------------|
+| `-ffreestanding`         | No hosted environment; compiler won't assume libc exists |
+| `-fno-builtin`           | Don't replace patterns like memcpy loops with calls  |
+| `-fno-stack-protector`   | No stack canaries (no `__stack_chk_guard` available) |
+| `-nostdinc -nostdlib`    | No system headers or libraries                       |
+| `-mcpu=cortex-a72`       | ARMv8.0 instruction set, Cortex-A72 scheduling       |
+| `-mgeneral-regs-only`    | Forbid FP/NEON in kernel code (avoids saving q0-q31) |
+| `-mno-outline-atomics`   | Inline atomics (no `__aarch64_ldadd4_acq_rel` calls) |
+| `-std=gnu11`             | C11 with GNU extensions (asm labels, attributes)     |
+
+The `-mgeneral-regs-only` flag is critical: it prevents the compiler from using
+NEON/FP registers in kernel code, so the kernel only needs to save/restore GPRs
+during context switches.  FP/NEON state is only saved on traps from EL0 (user
+mode), where the full 816-byte trap frame includes q0-q31.
+
+#### Source Organisation
+
+The kernel is compiled from 50 C files and 3 assembly files, organised by
+subsystem:
+
+| Category    | Source Directory              | Files | Description              |
+|-------------|-------------------------------|-------|--------------------------|
+| Boot/Arch   | `kernel/arch/arm64/`          | 4     | boot.S, vectors.S, context_switch.S, smp.c |
+| Kernel Core | `kernel/kern/`                | 14    | main, pmm, vmm, sched, sync, proc, trap, tty, pty, fbconsole, macho, commpage, kprintf, font8x16 |
+| Drivers     | `kernel/drivers/`             | 10    | PL011, GICv2, timer, VirtIO (blk/gpu/input/net), eMMC, blkdev |
+| BSD         | `kernel/bsd/`                 | 2     | syscalls, security       |
+| Mach        | `kernel/mach/`                | 1     | ipc                      |
+| IOKit       | `kernel/iokit/`               | 11    | Object model, registry, services, framebuffer, HID |
+| Filesystem  | `kernel/fs/`                  | 4     | vfs, ext4, buf, devfs    |
+| Networking  | `kernel/net/`                 | 7     | socket, tcp, ip, eth, icmp, udp, dhcp |
+
+Assembly sources are ordered carefully: `boot.S` must be first because the
+linker script places `*boot.o(.text)` at the entry point address.
+
+#### Linker Script
+
+`kernel/arch/arm64/linker-qemu.ld` (95 lines) defines the kernel memory layout:
+
+```
+ENTRY(_start)
+KERNEL_PHYS_BASE = 0x40080000;
+
+MEMORY {
+    RAM (rwx) : ORIGIN = 0x40080000, LENGTH = 960M
+}
+```
+
+QEMU's virt machine loads the kernel at 0x40080000 (RAM starts at 0x40000000,
+first 512KB is reserved for DTB/firmware).  The sections are:
+
+```
+  0x40080000  +------------------+  __text_start
+              |  .text           |  boot.S first, then vectors.S, then all .text
+              +------------------+  __text_end
+              |  .rodata (4K)    |  Read-only data (aligned to page boundary)
+              +------------------+
+              |  .data (4K)      |  Initialised data
+              +------------------+
+              |  .bss (4K)       |  Zero-initialised data
+              +------------------+  __kernel_end
+              |  .stack (NOLOAD) |  Per-CPU stacks: 32KB * 4 cores = 128KB
+              +------------------+  __stack_top
+              |                  |  __heap_start: buddy allocator starts here
+              v  (free memory)   v
+```
+
+The linker script exports symbols used by kernel code:
+- `__bss_start` / `__bss_end` -- zeroed by boot.S
+- `__stack_top` -- initial SP; each core uses `__stack_top - core_id * 0x8000`
+- `__heap_start` -- PMM starts allocating from here
+- `__kernel_end` -- used to calculate kernel image size
+
+Per-CPU stacks are 32KB each (`KERNEL_STACK_SIZE = 0x8000`), placed in a
+NOLOAD section (no data in the ELF, just address reservations).
+
+#### Linking and Output
+
+```makefile
+$(KERNEL_ELF): $(ALL_OBJS) $(LDSCRIPT)
+    $(LD) -nostdlib -static -T $(LDSCRIPT) -Map=$(KERNEL_MAP) $(ALL_OBJS) -o $@
+
+$(KERNEL_BIN): $(KERNEL_ELF)
+    $(OBJCOPY) -O binary $< $@
+```
+
+The kernel links statically into a single ELF binary, then `objcopy` strips it
+to a flat binary.  QEMU's `-kernel` flag accepts ELF directly, so `kiseki.elf`
+is what actually boots.
+
+### 15.3  Userland Build -- Mach-O with macOS Clang
+
+The entire userland is compiled on macOS using the host `clang` with
+`-target arm64-apple-macos11`.  This produces genuine arm64 Mach-O binaries
+that Kiseki's dyld can load.
+
+#### Why macOS Clang?
+
+Kiseki's userland uses real Mach-O binaries -- the same binary format as macOS.
+Using macOS `clang` as the cross-compiler means:
+
+1. The linker (`ld64`) produces correct Mach-O with LC_LOAD_DYLIB, LC_MAIN,
+   chained fixups, and all standard load commands
+2. TBD (text-based definition) stubs work natively for declaring library exports
+3. Framework install names (`-install_name`) are handled correctly
+4. The ObjC compiler supports `-fobjc-runtime=gnustep-1.9` for the non-Apple
+   ObjC ABI
+
+The key difference from a real macOS build is that every binary uses
+`-nostdlib -ffreestanding` and links against custom TBD stubs instead of
+the system libraries.
+
+#### TBD Stub Linking
+
+Text-Based Definition (TBD) files are YAML documents that describe a dynamic
+library's exported symbols without containing any code.  They tell the linker
+"this library exists at this install path and exports these symbols", so it can
+generate the correct LC_LOAD_DYLIB and fixup records.
+
+Example (`userland/AppKit/libSystem.tbd`, 22 lines):
+
+```yaml
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1.0.0
+exports:
+  - targets:     [ arm64-macos ]
+    symbols:     [ _malloc, _calloc, _free, _memcpy, _strlen,
+                   _printf, _fprintf, ___stderrp, ___stdoutp,
+                   _pthread_mutex_init, _pthread_mutex_lock,
+                   _mach_msg, _mach_task_self_,
+                   _bootstrap_look_up, _bootstrap_register,
+                   ___stack_chk_fail, ___stack_chk_guard ]
+```
+
+Each userland component has its own set of TBD files for the libraries it
+depends on.  This is how the link-time dependency graph is established without
+needing the actual dylib binaries during compilation.
+
+#### Build Dependency Order
+
+The userland Makefile (`userland/Makefile:36`) specifies a build order that
+respects the framework dependency chain:
+
+```
+dyld -> libSystem -> IOKit -> libobjc -> CoreFoundation -> CoreGraphics
+     -> CoreText -> Foundation -> AppKit -> sbin -> apps -> bash
+     -> coreutils -> nettools -> tcc -> tests
+```
+
+Each component is built by delegating to its own sub-Makefile:
+
+```makefile
+dyld:
+    @$(MAKE) -C dyld
+
+libsystem:
+    @$(MAKE) -C libSystem dylib
+
+appkit:
+    @$(MAKE) -C AppKit
+```
+
+#### Component Build Modes
+
+Different userland components use different build pipelines:
+
+| Component       | Language | Pipeline                              | Output Type   |
+|-----------------|----------|---------------------------------------|---------------|
+| dyld            | C + ASM  | clang -ffreestanding -> ld -dylinker  | MH_DYLINKER   |
+| libSystem       | C        | clang -shared -> dylib                | MH_DYLIB      |
+| IOKit/CF/CG/CT  | C        | clang -shared -> framework dylib      | MH_DYLIB      |
+| libobjc         | C/C++    | clang -shared -> dylib                | MH_DYLIB      |
+| Foundation      | ObjC     | COMDAT pipeline -> framework dylib    | MH_DYLIB      |
+| AppKit          | ObjC     | COMDAT pipeline -> framework dylib    | MH_DYLIB      |
+| sbin programs   | C        | clang -> executable                   | MH_EXECUTE    |
+| GUI apps        | ObjC     | COMDAT pipeline -> executable         | MH_EXECUTE    |
+| bash/coreutils  | C        | clang -> executable                   | MH_EXECUTE    |
+
+#### dyld Build
+
+dyld is special: it must be completely self-contained with no dynamic library
+dependencies.  Its linker flags (`userland/dyld/Makefile:85-91`):
+
+```makefile
+LDFLAGS := -target arm64-apple-macos11 \
+           -nostdlib -static \
+           -Wl,-dylinker \              # MH_DYLINKER filetype (7)
+           -Wl,-e,_start \              # Entry point
+           -Wl,-dylinker_install_name,/usr/lib/dyld
+```
+
+The `-static` flag ensures no LC_LOAD_DYLIB commands.  The `make verify`
+target checks this:
+
+```makefile
+verify:
+    @if otool -l $(TARGET) | grep -q LC_LOAD_DYLIB; then
+        echo "ERROR: dyld must not have LC_LOAD_DYLIB!"; exit 1; fi
+    @if ! otool -h $(TARGET) | grep -qE '\s7\s'; then
+        echo "ERROR: dyld must be MH_DYLINKER filetype (7)!"; exit 1; fi
+```
+
+#### libSystem Build
+
+libSystem.B.dylib is a single-file compilation (`libSystem.c`, 7,948 lines)
+producing a shared library:
+
+```makefile
+DYLIB_LDFLAGS := -target arm64-apple-macos11 \
+                 -nostdlib -shared \
+                 -Wl,-dylib \
+                 -Wl,-install_name,/usr/lib/libSystem.B.dylib
+```
+
+It links against `dyld.tbd` to resolve the `dyld_stub_binder` symbol -- the
+same circular dependency that exists in real macOS (dyld provides the lazy
+binding stub resolver, but libSystem needs to reference it).
+
+#### CPU Target: cortex-a53 vs cortex-a72
+
+A subtle difference: the kernel is compiled with `-mcpu=cortex-a72` but the
+userland uses `-mcpu=cortex-a53`.  Both are ARMv8.0, but cortex-a53 is more
+conservative with atomics -- it uses `LDXR`/`STXR` (load-exclusive/store-
+exclusive) loops instead of ARMv8.1 LSE atomics (`SWPAL`, `LDADD`, etc.).
+This matters because QEMU TCG (software emulation) may have subtle differences
+in LSE atomic behaviour, and the kernel's `-mno-outline-atomics` flag
+separately ensures inline atomic operations.
+
+### 15.4  The COMDAT-Stripping Pipeline
+
+Objective-C code compiled with `-fobjc-runtime=gnustep-1.9` generates LLVM IR
+that uses COMDAT groups for ObjC metadata (selector name strings, class
+references, etc.).  COMDAT is an ELF feature that allows the linker to
+deduplicate identical sections across translation units.  Mach-O has no COMDAT
+support -- it uses a different mechanism (weak definitions) that Clang's
+GNUstep runtime codegen does not emit correctly.
+
+Kiseki solves this with a three-stage pipeline:
+
+```
+  .m source file
+       |
+       | Stage 1: clang -S -emit-llvm
+       v
+  .ll file (LLVM IR with COMDAT groups)
+       |
+       | Stage 2: sed transformations
+       |   - linkonce_odr constant -> private constant
+       |   - Remove "$.objc_sel_name.* = comdat any" lines
+       |   - Remove ", comdat" suffixes
+       v
+  .clean.ll file (LLVM IR without COMDATs)
+       |
+       | Stage 3: llc -filetype=obj
+       v
+  .o file (valid Mach-O object)
+       |
+       | Stage 4: clang -Wl,-dylib (or -Wl,-e,_main)
+       v
+  Mach-O framework dylib (or executable)
+```
+
+The `sed` command (`AppKit/Makefile:65`):
+
+```bash
+sed 's/linkonce_odr constant/private constant/g;
+     /^\$\.objc_sel_name.* = comdat any$/d;
+     s/, comdat//g' \
+    input.ll > output.clean.ll
+```
+
+Three transformations:
+1. **`linkonce_odr constant` -> `private constant`**: ObjC selector name
+   strings were `linkonce_odr` (deduplicated across TUs).  Since each framework
+   is a single `.m` file, there is only one TU, so `private` is safe.
+2. **Delete COMDAT group declarations**: Lines like
+   `$.objc_sel_name.drawRect: = comdat any` are pure ELF metadata with no
+   Mach-O equivalent.
+3. **Remove `, comdat` suffixes**: Global definitions that referenced COMDAT
+   groups (e.g., `@selector = ... , comdat`) need the reference stripped.
+
+The cleaned IR is then compiled to a Mach-O object file by `llc` (from LLVM,
+installed via Homebrew at `/opt/homebrew/opt/llvm/bin/llc`).
+
+This pipeline is used by: Foundation.framework, AppKit.framework, Dock.app,
+Finder.app, Terminal.app, and SystemUIServer.app -- every ObjC component.
+
+### 15.5  Disk Image Creation -- mkdisk.sh
+
+`scripts/mkdisk.sh` (835 lines) creates a bootable ext4 filesystem image and
+populates it with the entire userland.
+
+#### Image Creation
+
+```bash
+dd if=/dev/zero of=build/disk.img bs=1M count=64
+mkfs.ext4 -q -b 4096 -L "kiseki-root" -O extents,dir_index build/disk.img
+```
+
+The image is 64MB with 4KB block size, ext4 extent trees, and directory
+indexing.  The 4KB block size is important: it matches the kernel's page size
+and ensures files larger than 48KB (12 direct blocks * 4KB) work correctly with
+extent trees.
+
+#### Platform-Specific Population
+
+The script detects the host OS and uses different strategies:
+
+- **Linux**: Loop-mounts the image (`mount -o loop`), copies files with `cp`,
+  then unmounts.  Requires `sudo`.
+- **macOS**: Uses `debugfs` from e2fsprogs (no mount needed).  Builds a command
+  script with `write`, `mkdir`, and `symlink` directives, then runs
+  `debugfs -w -f commands.txt disk.img`.
+
+#### Filesystem Layout
+
+The script creates the complete Unix directory hierarchy and installs all
+binaries:
+
+```
+/
++-- bin/                 Essential commands (bash, cat, ls, grep, ...)
+|   +-- sh -> bash       Symlink
++-- sbin/                System admin (init, getty, WindowServer, ...)
++-- usr/
+|   +-- bin/             Non-essential (find, xargs, tcc, ...)
+|   +-- lib/
+|   |   +-- dyld                    Dynamic linker
+|   |   +-- libSystem.B.dylib       C library
+|   |   +-- libobjc.A.dylib         ObjC runtime
+|   +-- include/         C headers (for TCC on-device compilation)
+|       +-- stdio.h, stdlib.h, ...
+|       +-- sys/, mach/, arpa/, netinet/, servers/
++-- System/
+|   +-- Library/
+|       +-- Frameworks/
+|       |   +-- IOKit.framework/Versions/A/IOKit
+|       |   +-- CoreFoundation.framework/Versions/A/CoreFoundation
+|       |   +-- CoreGraphics.framework/Versions/A/CoreGraphics
+|       |   +-- CoreText.framework/Versions/A/CoreText
+|       |   +-- Foundation.framework/Versions/A/Foundation
+|       |   +-- AppKit.framework/Versions/A/AppKit
+|       +-- CoreServices/
+|       |   +-- Dock.app/Dock
+|       |   +-- Finder.app/Finder
+|       |   +-- SystemUIServer.app/SystemUIServer
+|       +-- LaunchDaemons/
+|           +-- *.plist              Daemon configurations
++-- Applications/
+|   +-- Terminal.app/Terminal
++-- Library/
+|   +-- LaunchDaemons/               Third-party daemons
++-- etc/
+|   +-- passwd                       root:x:0:0:root:/root:/bin/bash
+|   +-- shadow                       root:toor:19000:...
+|   +-- group                        root, wheel, sudo, daemon, users
+|   +-- hostname                     "kiseki"
+|   +-- fstab                        /dev/vda / ext4 defaults
+|   +-- profile                      PATH, TERM, PS1
+|   +-- sudoers                      root NOPASSWD, %sudo ALL
+|   +-- epoch                        Boot time (Unix timestamp)
+|   +-- resolv.conf                  8.8.8.8, 1.1.1.1
+|   +-- issue                        ASCII art login banner
+|   +-- skel/                        New user dotfiles
++-- root/
+|   +-- .bashrc                      Root prompt, aliases
+|   +-- .profile                     Sources .bashrc
++-- home/                            User home directories
++-- Users/                           macOS-style user directory
++-- dev/   proc/   sys/   tmp/       Standard directories
++-- var/log/   var/run/              Volatile state
+```
+
+#### Special File Permissions
+
+The script sets SUID bits on privileged binaries:
+
+```bash
+# Via debugfs:
+sif /bin/su mode 0104755        # SUID root
+sif /sbin/sudo mode 0104755     # SUID root
+
+# Via mount:
+chmod 4755 /bin/su
+chmod 4755 /sbin/sudo
+```
+
+The shadow file gets mode 0600 (readable only by root).
+
+#### Configuration Files
+
+The script generates `/etc/passwd`, `/etc/shadow`, `/etc/group`, and other
+configuration files inline.  The default root password is `toor` (stored
+in plaintext in `/etc/shadow` -- see Chapter 16 for security implications).
+The DNS resolver is configured with Google (8.8.8.8) and Cloudflare (1.1.1.1).
+
+### 15.6  QEMU Launch
+
+The `make run` target launches QEMU with a comprehensive set of VirtIO devices:
+
+```makefile
+QEMU_FLAGS := -M virt              # ARM virt machine
+              -accel tcg            # Software emulation (not HVF)
+              -cpu cortex-a72       # ARMv8.0 CPU model
+              -smp 4                # 4 CPU cores
+              -m 4G                 # 4GB RAM
+              -display cocoa        # macOS native window
+              -kernel kiseki.elf    # Kernel image
+              -serial mon:stdio     # Serial console on terminal
+```
+
+Plus the following devices:
+
+| Device                      | Purpose                                |
+|-----------------------------|----------------------------------------|
+| `virtio-blk-device`        | Block storage (disk.img, raw format)   |
+| `virtio-net-device`        | Network (vmnet-shared, real LAN IP)    |
+| `virtio-gpu-device`        | Framebuffer (1280x800 display)         |
+| `virtio-keyboard-device`   | HID keyboard input                     |
+| `virtio-tablet-device`     | Absolute pointer (mouse) input         |
+
+#### Why TCG, Not HVF?
+
+The Makefile explicitly uses `-accel tcg` (software CPU emulation) instead of
+`-accel hvf` (Apple Hypervisor Framework).  The comment in `Makefile:219-222`
+explains:
+
+> HVF on Apple Silicon has stricter cache coherency requirements that cause
+> External Aborts during instruction fetch after fork.
+
+When Kiseki's `fork()` copies page tables and the child process begins
+executing, the CPU must see the new page table mappings.  Under TCG, the
+software TLB handles this correctly.  Under HVF, the hardware TLB on Apple
+Silicon requires explicit cache maintenance that Kiseki's VMM does not yet
+perform, causing External Data Aborts (ESR class 0x25) on the first
+instruction fetch in the child.
+
+#### Networking
+
+The network uses `vmnet-shared` -- macOS's native networking framework that
+gives the guest a real IP on the host's local network.  This requires `sudo`
+(the vmnet framework needs root privileges).  The guest's static IP is
+192.168.64.10, with the host/gateway at 192.168.64.1.
+
+### 15.7  Debug and Test Targets
+
+#### Debug Mode
+
+`make world DEBUG=1` sets `-DDEBUG=1` across both kernel and userland builds,
+enabling verbose logging in:
+- Kernel: `kprintf`-based debug output for boot stages, VMM operations, IPC
+- dyld: Detailed library loading and fixup tracing
+- Various subsystems: Additional diagnostic output
+
+#### Unit Tests
+
+Two test pathways exist:
+
+**Host-side tests** (`make test`):
+```makefile
+$(BUILDDIR)/tests/%: $(TESTDIR)/unit/%.c
+    $(HOST_CC) -Wall -Wextra -g -I$(SRCDIR)/include -DUNIT_TEST -o $@ $<
+```
+
+Kernel unit tests are compiled with the host compiler (native macOS `cc`) and
+run directly on the build machine.  The `-DUNIT_TEST` flag allows kernel
+headers to be included in a hosted environment by providing stub definitions.
+
+**On-target tests** (`make test-kiseki`):
+This boots Kiseki in QEMU (with user-mode networking, no `sudo`) and runs
+`/bin/test_libc` inside the OS.  An expect-like script automates login:
+
+```bash
+{ sleep 4; echo "root"; sleep 1; echo "toor"; sleep 2;
+  echo "/bin/test_libc"; sleep 15; echo "exit";
+} | timeout 90 qemu-system-aarch64 $QEMU_TEST_FLAGS
+```
+
+The output is captured to `build/test_output.log` and checked for the string
+"All tests PASSED".
+
+### 15.8  Build Output Summary
+
+After `make world`, the `build/` directory contains:
+
+```
+build/
++-- kiseki.elf           Kernel ELF (bootable by QEMU)
++-- kiseki.bin           Kernel flat binary
++-- kiseki.map           Linker map (symbol addresses)
++-- disk.img             64MB ext4 filesystem image
++-- userland/
+    +-- dyld/dyld        Dynamic linker (MH_DYLINKER)
+    +-- lib/
+    |   +-- libSystem.B.dylib    C library
+    |   +-- libobjc.A.dylib      ObjC runtime
+    +-- System/Library/Frameworks/
+    |   +-- IOKit.framework/Versions/A/IOKit
+    |   +-- CoreFoundation.framework/Versions/A/CoreFoundation
+    |   +-- CoreGraphics.framework/Versions/A/CoreGraphics
+    |   +-- CoreText.framework/Versions/A/CoreText
+    |   +-- Foundation.framework/Versions/A/Foundation
+    |   +-- AppKit.framework/Versions/A/AppKit
+    +-- System/Library/CoreServices/
+    |   +-- Dock.app/Dock
+    |   +-- Finder.app/Finder
+    |   +-- SystemUIServer.app/SystemUIServer
+    +-- Applications/
+    |   +-- Terminal.app/Terminal
+    +-- bin/              50+ command-line programs
+    +-- sbin/             System daemons and servers
+    +-- obj/              Intermediate object files
+```
+
+---
+
+## Chapter 16: Security Audit & Hardening
+
+This chapter is an honest security assessment of Kiseki OS.  As an educational
+operating system designed for clarity rather than production use, Kiseki makes
+many simplifications that have security implications.  Understanding these gaps
+is valuable both for learning what production operating systems must do and for
+identifying areas where Kiseki could be hardened.
+
+The audit is organised by attack surface, from hardware up through the
+application layer.  Each section identifies the vulnerability, explains why it
+matters, describes what production systems (macOS/XNU in particular) do
+differently, and suggests a remediation path.
+
+### 16.1  Memory Safety
+
+#### No Stack Canaries
+
+The kernel is compiled with `-fno-stack-protector` (`Makefile:75`), and all
+userland binaries are compiled with `-fno-stack-protector`.  This means there
+are no stack canaries (`__stack_chk_guard`) to detect buffer overflows.
+
+**Impact**: A stack buffer overflow in any kernel or userland function can
+overwrite the return address and redirect control flow.  This is the classic
+exploitation primitive for arbitrary code execution.
+
+**macOS comparison**: XNU and all macOS userland are compiled with stack
+protectors.  The `__stack_chk_guard` value is randomised at boot (kernel) and
+per-process (userland via dyld).  A stack smash triggers `__stack_chk_fail`,
+which calls `abort()`.
+
+**Remediation**: Enable `-fstack-protector-strong` for both kernel and userland.
+Requires implementing `__stack_chk_guard` (a random value per context) and
+`__stack_chk_fail` (a panic/abort handler).
+
+#### No ASLR
+
+All user processes are loaded at the same virtual addresses:
+
+- The main binary's Mach-O segments are mapped at the addresses specified in
+  their LC_SEGMENT_64 commands (typically starting at 0x100000000)
+- dyld is always mapped at its fixed address
+- libSystem.B.dylib and frameworks are always at the same addresses
+- The user stack is always at the same location
+
+**Impact**: An attacker who discovers a vulnerability in any process knows the
+exact address of every function, every ROP gadget, and every data structure.
+Combined with the lack of stack canaries, this makes exploitation trivial.
+
+**macOS comparison**: macOS implements full ASLR:
+- Main binary slide: random offset applied to all segments
+- dyld slide: independently randomised
+- Shared library slide: DYLD_SHARED_CACHE has its own slide
+- Stack randomisation: random offset below the stack top
+- Heap randomisation: mmap returns randomised addresses
+
+**Remediation**: Implement a random slide in `proc_execve()` when mapping the
+main binary, and in dyld when mapping shared libraries.  The kernel needs a
+random number source (ARM generic timer counter, or VirtIO RNG device).
+
+#### No W^X Enforcement
+
+The kernel VMM does not enforce Write XOR Execute: a page can simultaneously
+be writable and executable.  The `vm_map_protect()` function does not check
+for `PROT_WRITE | PROT_EXEC` combinations.
+
+**Impact**: An attacker who can write to a memory page can inject shellcode and
+execute it directly, without needing ROP or JIT tricks.
+
+**macOS comparison**: macOS enforces W^X system-wide.  `mprotect()` with
+`PROT_WRITE | PROT_EXEC` fails with EPERM on code-signed processes.  The
+hardware page tables use the PXN/UXN bits to prevent execution of writable
+pages.  JIT compilers (JavaScriptCore) use special `MAP_JIT` and
+`pthread_jit_write_protect_np()` to toggle between write and execute.
+
+**Remediation**: Add W^X enforcement in `vm_map_protect()` and `vm_map_enter()`.
+Reject `PROT_WRITE | PROT_EXEC` unless a process has a special entitlement.
+
+### 16.2  Access Control
+
+#### DAC-Only Security Model
+
+Kiseki implements only traditional Unix Discretionary Access Control (DAC):
+UID/GID-based file permission checks in `bsd/security.c`.  There is no
+Mandatory Access Control (MAC), no sandboxing, no capabilities, and no
+entitlements.
+
+The security checks are:
+
+```
+Root (UID 0): bypass all permission checks
+Owner match:  check user permission bits (rwx)
+Group match:  check group permission bits (rwx)
+Otherwise:    check other permission bits (rwx)
+```
+
+**Impact**: Any process running as root has unrestricted access to the entire
+system.  There is no defence-in-depth: a vulnerability in a root-running
+daemon (like WindowServer, init, or any sbin program) gives the attacker
+complete control.
+
+**macOS comparison**: macOS layers multiple security mechanisms:
+- DAC (Unix permissions)
+- MAC (TrustedBSD mandatory access control framework)
+- App Sandbox (via Seatbelt profiles)
+- Entitlements (per-binary capability grants)
+- System Integrity Protection (SIP) -- even root cannot modify /System
+- Signed System Volume (SSV) -- cryptographic seal on the boot volume
+
+**Remediation**: Implement a MAC framework (e.g., a simplified TrustedBSD
+policy) that restricts what operations processes can perform based on labels
+or profiles, regardless of UID.
+
+#### Root-Running Services
+
+Several critical daemons run as root with no privilege separation:
+
+| Service         | Runs As | Risk                                      |
+|-----------------|---------|-------------------------------------------|
+| init            | root    | PID 1, full system control                |
+| WindowServer    | root    | Framebuffer access, all HID input         |
+| mDNSResponder   | root    | Network-facing, parses DNS packets        |
+| sshd            | root    | Network-facing, handles authentication    |
+| loginwindow     | root    | Handles passwords, spawns user sessions   |
+
+**Impact**: A buffer overflow in mDNSResponder's DNS packet parser (which
+processes untrusted network data) would give the attacker root access to the
+entire system.
+
+**macOS comparison**: macOS runs most daemons as dedicated unprivileged users
+(`_mdnsresponder`, `_windowserver`, etc.) and uses sandbox profiles to further
+restrict their capabilities.  WindowServer runs as `_windowserver:_windowserver`
+with a tight Seatbelt profile.
+
+**Remediation**: Create dedicated service accounts and drop privileges after
+binding to privileged resources (ports, devices).  loginwindow already drops
+privileges for user sessions (`Finder.m` inherits the dropped UID/GID from
+loginwindow's `setuid`/`setgid` calls).
+
+### 16.3  Authentication
+
+#### Plaintext Passwords
+
+Passwords in `/etc/shadow` are stored in plaintext:
+
+```
+root:toor:19000:0:99999:7:::
+```
+
+The `toor` string is the actual password, not a hash.  The login process
+(`loginwindow.c`, `login.c`) compares the user's input directly against this
+plaintext value.
+
+**Impact**: Anyone who can read `/etc/shadow` (which is mode 0600, so only
+root) can see all passwords.  More importantly, there is no protection against
+rainbow table attacks, brute force, or password reuse analysis -- because the
+passwords are not hashed at all.
+
+**macOS comparison**: macOS stores password hashes in `/var/db/dslocal/` using
+PBKDF2-HMAC-SHA512 with per-user random salts and configurable iteration
+counts (typically 30,000+).  The hash files are readable only by root and the
+directory services daemon.
+
+**Remediation**: Implement SHA-512 crypt (`$6$`) or bcrypt hashing in
+libSystem and update login/passwd to use it.  At minimum, use SHA-256 with a
+random salt.
+
+#### No Authentication Rate Limiting
+
+There is no lockout or delay after failed login attempts.  An attacker with
+console or SSH access can attempt unlimited passwords.
+
+**Remediation**: Implement exponential backoff after failed attempts (e.g.,
+1s, 2s, 4s, 8s...) or account lockout after N failures.
+
+### 16.4  Network Security
+
+#### No Firewall
+
+There is no packet filtering at any layer.  All incoming packets are processed
+by the TCP/IP stack regardless of source, destination, or port.
+
+**Impact**: Any network service that is listening is accessible from any host on
+the network.  There is no way to restrict access to specific ports or IPs.
+
+**macOS comparison**: macOS includes `pf` (packet filter) in the kernel and
+the Application Firewall in userland.  By default, incoming connections are
+blocked unless the user or an MDM profile explicitly allows them.
+
+#### No TCP Congestion Control
+
+The TCP implementation (`kernel/net/tcp.c`) has no congestion control -- no
+slow start, no congestion avoidance, no fast retransmit, no fast recovery.
+While this is primarily a reliability/performance issue, it has security
+implications: the system will flood the network in response to packet loss,
+potentially participating in or amplifying denial-of-service attacks.
+
+#### Simplified TIME_WAIT
+
+TCP's TIME_WAIT state (which prevents old duplicate segments from being
+accepted by new connections) is simplified.  This could allow connection
+hijacking in certain scenarios.
+
+#### No TLS/SSL
+
+There is no cryptographic transport layer.  All network communication
+(including the `curl` utility and any HTTP traffic) is in plaintext.
+
+**Remediation**: Implement a TLS library (e.g., a minimal TLS 1.3 handshake
+using a lightweight crypto library) or port BearSSL/mbedTLS.
+
+### 16.5  Kernel Attack Surface
+
+#### No System Call Argument Validation
+
+While the BSD syscall handler (`bsd/syscalls.c`) performs basic validation
+(e.g., checking file descriptor ranges, null pointer checks), there are gaps:
+
+- Path buffers are copied from user space without guaranteed null termination
+  length checks in some paths
+- `ioctl` commands are not validated against a whitelist -- any command code
+  is passed through
+- Mach IPC messages are parsed with minimal validation of field sizes
+
+**Impact**: Malformed syscall arguments could trigger kernel buffer overflows
+or information leaks.
+
+**macOS comparison**: XNU uses `copyin()`/`copyout()` with strict size limits,
+validates every argument range, and uses MIG (Mach Interface Generator) for
+type-safe Mach message parsing.
+
+#### Kernel Runs with Full Permissions
+
+The kernel runs at EL1 with full access to all hardware.  There is no EL2
+hypervisor providing additional isolation.  On macOS, the Secure Enclave
+Processor and the PPL (Page Protection Layer, running at a higher privilege
+within the kernel) protect critical data structures.
+
+#### Static Pool Exhaustion
+
+Many kernel subsystems use fixed-size static pools:
+
+| Resource           | Pool Size | Exhaustion Effect            |
+|--------------------|-----------|------------------------------|
+| Processes          | 256       | Cannot fork()                |
+| Mach ports         | 512       | Cannot allocate ports        |
+| Port names/space   | 256       | Cannot name ports            |
+| Open files (global)| 512       | Cannot open files            |
+| Vnodes             | 1024      | Cannot access files          |
+| Mounts             | 16        | Cannot mount filesystems     |
+| TCP connections    | 64 TCBs   | Cannot accept connections    |
+| Sockets            | 64        | Cannot create sockets        |
+| Buffer cache       | 256       | I/O stalls, LRU eviction     |
+| vm_map entries     | 512       | Cannot mmap                  |
+
+**Impact**: Any unprivileged user can exhaust these pools by creating many
+processes, opening many files, or establishing many connections.  This is a
+denial-of-service vector with no per-user resource limits.
+
+**macOS comparison**: XNU uses dynamic allocation for most resources (zones/
+kalloc), with per-process and per-user resource limits enforced by
+`setrlimit()`/launchd.
+
+**Remediation**: Add per-user resource limits (struct rlimit) and enforce them
+in the syscall paths.
+
+### 16.6  Information Disclosure
+
+#### Kernel Memory Leaks to Userspace
+
+The trap frame saves 816 bytes of register state on every syscall/exception.
+When a new process is created via `fork()`, the child's trap frame is a copy
+of the parent's -- including all 32 NEON registers and control registers.  If
+the kernel fails to zero unused fields before returning to user mode, register
+contents from the parent (or from kernel operations) could leak to the child.
+
+Similarly, the `fork_child_return` path may not zero all general-purpose
+registers, potentially leaking parent register state to the child.
+
+**macOS comparison**: XNU zeroes the child's register state in
+`thread_dup()` and `act_thread_csave()`, ensuring no register contents leak
+across fork boundaries.
+
+#### Predictable Initial Sequence Numbers
+
+TCP initial sequence numbers (ISS) are incremented by a fixed value (64000)
+on each new connection (`tcp_new_iss` in `kernel/net/tcp.c`).  This makes
+ISN prediction trivial.
+
+**Impact**: An off-path attacker can predict ISNs and inject forged TCP
+segments, enabling connection hijacking or RST attacks.
+
+**macOS comparison**: XNU uses a random ISN algorithm (RFC 6528) based on a
+keyed hash of the connection 4-tuple.
+
+**Remediation**: Use a cryptographic hash (e.g., SipHash) of the 4-tuple
+plus a secret key to generate ISNs.
+
+### 16.7  Physical and Side-Channel Attacks
+
+#### No Secure Boot
+
+The kernel is loaded directly by QEMU's `-kernel` flag with no verification.
+There is no chain of trust, no signed boot, no measured boot.
+
+**macOS comparison**: Apple Silicon Macs implement a full secure boot chain:
+Boot ROM -> iBoot -> kernel -> kexts, with each stage verified by the previous
+stage's signature check.
+
+#### No Spectre/Meltdown Mitigations
+
+The kernel does not implement any speculative execution mitigations:
+- No KPTI (Kernel Page Table Isolation)
+- No speculative barrier instructions (`CSDB`, `SB`)
+- No retpoline-style indirect branch mitigations
+
+**Impact on ARM64**: ARM64 is less affected than x86 by Spectre/Meltdown, but
+Cortex-A72 (the QEMU CPU model) is vulnerable to Spectre variant 2.  In a
+multi-user scenario, one user could potentially read another user's memory
+via speculative side channels.
+
+**macOS comparison**: macOS on Apple Silicon includes hardware mitigations
+(KTRR, PPL) and software mitigations where needed.
+
+### 16.8  Security Hardening Roadmap
+
+The following table summarises all identified issues and suggested
+remediations, ordered by impact and implementation difficulty:
+
+| Priority | Issue                    | Difficulty | Remediation                    |
+|----------|--------------------------|------------|--------------------------------|
+| Critical | Plaintext passwords      | Easy       | Implement SHA-512 crypt        |
+| Critical | No stack canaries        | Easy       | Enable -fstack-protector-strong|
+| Critical | No ASLR                  | Medium     | Random slide in execve + dyld  |
+| High     | Root-running daemons     | Medium     | Dedicated UIDs, privilege drop |
+| High     | No W^X enforcement       | Easy       | Reject WRITE+EXEC in VMM      |
+| High     | Predictable TCP ISNs     | Easy       | SipHash-based ISN generation   |
+| High     | No resource limits       | Medium     | Per-user rlimits               |
+| Medium   | No MAC/sandboxing        | Hard       | TrustedBSD-style MAC framework |
+| Medium   | No TLS                   | Hard       | Port mbedTLS or BearSSL        |
+| Medium   | No firewall              | Medium     | Simple packet filter in IP layer|
+| Medium   | No syscall audit         | Medium     | Validate all arg ranges        |
+| Low      | No secure boot           | Hard       | Requires UEFI or custom loader |
+| Low      | No Spectre mitigations   | Medium     | Barrier instructions + KPTI    |
+| Low      | Static pool exhaustion   | Medium     | Dynamic allocation + limits    |
+| Low      | Register state leaks     | Easy       | Zero trap frame on fork        |
+
+The "Critical" items are straightforward to implement and would dramatically
+improve the security posture.  The "High" items require moderate refactoring.
+The "Medium" and "Low" items represent significant architectural work that
+would bring Kiseki closer to production-grade security.
+
+It is worth emphasising that Kiseki's current security model is entirely
+appropriate for its purpose as an educational operating system.  The
+simplifications documented here are deliberate design choices that prioritise
+code clarity over security hardening.  A reader who understands these gaps
+understands what real operating systems must do -- and why operating system
+security is so complex.
+
+---
+
+*End of Kiseki Internals Book*
